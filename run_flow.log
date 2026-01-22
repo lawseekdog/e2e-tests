@@ -1,0 +1,84 @@
+uploaded file_id 154
+session 76
+first chat done 5.88 s
+iter 0 card workflow_input_kickoff_workflow-kickoff clarify workflow-kickoff
+  resume 344.83 s
+iter 1 card clarify_facts clarify litigation-intake
+  resume 554.82 s
+iter 2 no card -> continue
+  chat 0.06 s
+iter 3 no card -> continue
+  chat 0.03 s
+iter 4 no card -> continue
+  chat 0.06 s
+iter 5 no card -> continue
+  chat 0.02 s
+iter 6 no card -> continue
+  chat 0.03 s
+iter 7 no card -> continue
+  chat 0.02 s
+iter 8 no card -> continue
+  chat 0.04 s
+iter 9 no card -> continue
+  chat 0.07 s
+iter 10 no card -> continue
+  chat 0.03 s
+iter 11 no card -> continue
+  chat 0.05 s
+iter 12 no card -> continue
+  chat 0.06 s
+iter 13 no card -> continue
+  chat 0.05 s
+iter 14 no card -> continue
+  chat 0.08 s
+iter 15 no card -> continue
+  chat 0.06 s
+iter 16 no card -> continue
+  chat 0.04 s
+iter 17 no card -> continue
+  chat 0.06 s
+iter 18 no card -> continue
+  chat 0.02 s
+iter 19 no card -> continue
+  chat 0.02 s
+iter 20 no card -> continue
+  chat 0.03 s
+iter 21 no card -> continue
+  chat 0.02 s
+iter 22 no card -> continue
+  chat 0.02 s
+iter 23 no card -> continue
+  chat 0.03 s
+iter 24 no card -> continue
+  chat 0.03 s
+iter 25 no card -> continue
+  chat 0.03 s
+iter 26 no card -> continue
+  chat 0.03 s
+iter 27 no card -> continue
+  chat 0.03 s
+iter 28 no card -> continue
+  chat 0.02 s
+iter 29 no card -> continue
+  chat 0.03 s
+iter 30 no card -> continue
+  chat 0.02 s
+iter 31 no card -> continue
+  chat 0.03 s
+iter 32 no card -> continue
+  chat 0.03 s
+iter 33 no card -> continue
+  chat 0.02 s
+iter 34 no card -> continue
+  chat 0.02 s
+iter 35 no card -> continue
+  chat 0.04 s
+iter 36 no card -> continue
+  chat 0.03 s
+iter 37 no card -> continue
+  chat 0.03 s
+iter 38 no card -> continue
+  chat 0.02 s
+iter 39 no card -> continue
+  chat 0.02 s
+matter_id 65

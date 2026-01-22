@@ -120,7 +120,7 @@ async def main():
             pending = await c.get_pending_card(sid)
             card = pending.get("data")
             if card:
-                print("iter", i, "card", card.get("todo_key"), card.get("review_type"), card.get("skill_id"), flush=True)
+                print("iter", i, "card", card.get("task_key"), card.get("review_type"), card.get("skill_id"), flush=True)
                 t = time.time()
                 await c.resume(sid, _auto_answer_card(card, file_id))
                 print("  resume", round(time.time() - t, 2), "s", flush=True)

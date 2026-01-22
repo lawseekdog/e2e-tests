@@ -363,11 +363,11 @@ def _question_sig(q: dict) -> str:
 
 def _card_sig(card: dict) -> str:
     skill = str(card.get("skill_id") or "").strip()
-    todo = str(card.get("todo_key") or "").strip()
+    task = str(card.get("task_key") or "").strip()
     review = str(card.get("review_type") or "").strip()
     qs = card.get("questions") if isinstance(card.get("questions"), list) else []
     sigs = [_question_sig(q) for q in qs if isinstance(q, dict)]
-    raw = json.dumps({"skill": skill, "todo": todo, "review": review, "questions": sigs}, ensure_ascii=False, sort_keys=True)
+    raw = json.dumps({"skill": skill, "task": task, "review": review, "questions": sigs}, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -418,7 +418,7 @@ async def test_litigation_bus_injury_reaches_claim_path_and_evidence_updates_pro
             break
         await asyncio.sleep(1.0)
     assert isinstance(kickoff_card, dict) and kickoff_card, "expected kickoff card but got none"
-    _dbg("kickoff card:", kickoff_card.get("skill_id"), kickoff_card.get("todo_key"), kickoff_card.get("review_type"))
+    _dbg("kickoff card:", kickoff_card.get("skill_id"), kickoff_card.get("task_key"), kickoff_card.get("review_type"))
 
     facts = _bus_injury_facts_text()
     kickoff_overrides = {
@@ -486,21 +486,21 @@ async def test_litigation_bus_injury_reaches_claim_path_and_evidence_updates_pro
 
         skill = str(pending.get("skill_id") or "").strip()
         review = str(pending.get("review_type") or "").strip()
-        todo = str(pending.get("todo_key") or "").strip()
+        task = str(pending.get("task_key") or "").strip()
         qs = pending.get("questions") if isinstance(pending.get("questions"), list) else []
 
         seen_cards.append(
             {
                 "skill_id": skill,
                 "review_type": review,
-                "todo_key": todo,
+                "task_key": task,
                 "sig": sig[:12],
                 "question_sigs": [_question_sig(q) for q in qs if isinstance(q, dict)],
             }
         )
-        _dbg("pending card:", {"skill_id": skill, "review_type": review, "todo_key": todo, "q": len(qs)})
+        _dbg("pending card:", {"skill_id": skill, "review_type": review, "task_key": task, "q": len(qs)})
 
-        # 防止卡死：同一张卡（相同 skill/todo + questions schema）重复出现 N 次，直接失败并打印详情便于定位。
+        # 防止卡死：同一张卡（相同 skill/task + questions schema）重复出现 N 次，直接失败并打印详情便于定位。
         if card_sig_counts[sig] > 3:
             raise AssertionError(
                 f"same pending card repeated too many times (>3): {seen_cards[-1]}\n"

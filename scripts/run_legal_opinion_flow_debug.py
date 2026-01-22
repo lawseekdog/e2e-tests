@@ -131,7 +131,7 @@ async def main():
         t0 = time.time()
         for _ in range(30):
             pending0 = await c.get_pending_card(sid)
-            if (pending0.get("data") or {}).get("todo_key"):
+            if (pending0.get("data") or {}).get("task_key"):
                 break
             await asyncio.sleep(1)
         print("kickoff wait done", round(time.time() - t0, 2), "s", flush=True)
@@ -154,7 +154,7 @@ async def main():
                     "iter",
                     i,
                     "card",
-                    card.get("todo_key"),
+                    card.get("task_key"),
                     card.get("review_type"),
                     card.get("skill_id"),
                     flush=True,

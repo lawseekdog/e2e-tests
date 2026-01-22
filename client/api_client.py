@@ -264,14 +264,14 @@ class ApiClient:
     async def get_matter(self, matter_id: str) -> dict[str, Any]:
         return await self.get(f"/api/v1/matters/{matter_id}")
 
-    async def get_matter_todos(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"/api/v1/matters/{matter_id}/todos")
+    async def get_matter_tasks(self, matter_id: str) -> dict[str, Any]:
+        return await self.get(f"/api/v1/matters/{matter_id}/tasks")
 
-    async def complete_todo(
-        self, matter_id: str, todo_id: str, result: dict
+    async def complete_task(
+        self, matter_id: str, task_id: str, result: dict
     ) -> dict[str, Any]:
         return await self.post(
-            f"/api/v1/matters/{matter_id}/todos/{todo_id}/complete",
+            f"/api/v1/matters/{matter_id}/tasks/{task_id}/complete",
             result
         )
 

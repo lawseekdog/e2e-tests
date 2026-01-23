@@ -149,6 +149,9 @@ class ApiClient:
     async def put(self, path: str, data: dict | None = None, **kwargs) -> dict[str, Any]:
         return await self._request("PUT", path, json=data, **kwargs)
 
+    async def patch(self, path: str, data: dict | None = None, **kwargs) -> dict[str, Any]:
+        return await self._request("PATCH", path, json=data, **kwargs)
+
     async def delete(self, path: str, **kwargs) -> dict[str, Any]:
         return await self._request("DELETE", path, **kwargs)
 

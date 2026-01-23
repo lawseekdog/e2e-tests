@@ -47,6 +47,7 @@ async def lawyer_client():
                     existing = it
                     break
 
+        lawyer_user_id = None
         if existing is None:
             created = await admin.post(
                 "/api/v1/admin/users",
@@ -59,17 +60,52 @@ async def lawyer_client():
             )
             # Admin endpoints return ApiResponse; unwrap to find id.
             created_data = created.get("data") if isinstance(created, dict) else None
-            user_id = None
             if isinstance(created_data, dict):
-                user_id = created_data.get("id")
-            if user_id is None:
+                lawyer_user_id = created_data.get("id")
+            if lawyer_user_id is None:
                 raise RuntimeError(f"failed to create lawyer user: {created}")
 
             # Mark as lawyer.
             await admin.put(
-                f"/api/v1/admin/users/{user_id}/user-type",
+                f"/api/v1/admin/users/{lawyer_user_id}/user-type",
                 {"user_type": "lawyer"},
             )
+        else:
+            lawyer_user_id = existing.get("id")
+
+        if lawyer_user_id is None:
+            raise RuntimeError(f"failed to resolve lawyer user id: {resp}")
+
+        # Ensure there is at least one organization and bind the lawyer user to it so downstream services
+        # receive X-Organization-Id and can auto-kickoff matters.
+        org_list = await admin.get("/api/v1/admin/organizations?page=1&size=5")
+        org_id = None
+        if isinstance(org_list, dict):
+            items = org_list.get("data") if isinstance(org_list.get("data"), list) else []
+            if items:
+                first = items[0] if isinstance(items[0], dict) else {}
+                org_id = first.get("id")
+
+        if org_id is None:
+            created_org = await admin.post(
+                "/api/v1/admin/organizations",
+                {
+                    "name": "E2E Law Firm",
+                    "practice_area": "civil",
+                    "law_firm_license": "E2E-001",
+                    "owner_user_id": int(lawyer_user_id),
+                },
+            )
+            org_data = created_org.get("data") if isinstance(created_org, dict) else None
+            if isinstance(org_data, dict):
+                org_id = org_data.get("id")
+        if org_id is None:
+            raise RuntimeError(f"failed to ensure organization: {org_list}")
+
+        await admin.patch(
+            f"/internal/user-service/internal/users/{lawyer_user_id}/organization",
+            {"organization_id": int(org_id)},
+        )
 
     async with ApiClient(BASE_URL) as c:
         await c.login(LAWYER_USERNAME, LAWYER_PASSWORD)

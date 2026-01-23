@@ -17,6 +17,7 @@ _MATTER_DB = PgTarget(dbname=os.getenv("E2E_MATTER_DB", "matter-service"))
 
 
 @pytest.mark.e2e
+@pytest.mark.slow
 async def test_civil_defense_generates_defense_statement_and_persists_state(lawyer_client):
     evidence_dir = Path(__file__).resolve().parent / "evidence"
     complaint_path = evidence_dir / "opponent_complaint.txt"
@@ -75,9 +76,9 @@ async def test_civil_defense_generates_defense_statement_and_persists_state(lawy
     traces = traces_data.get("traces") if isinstance(traces_data, dict) else None
     assert isinstance(traces, list) and traces, traces_resp
     node_ids = {str(it.get("node_id") or "").strip() for it in traces if isinstance(it, dict)}
-    assert "complaint-analysis" in node_ids
-    assert "defense-planning" in node_ids
-    assert "document-generation" in node_ids
+    assert any(x in node_ids for x in {"skill:complaint-analysis", "complaint-analysis"})
+    assert any(x in node_ids for x in {"skill:defense-planning", "defense-planning"})
+    assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
 
     # ========== Deliverable content (DOCX) ==========
     dels_resp = await lawyer_client.list_deliverables(flow.matter_id, output_key="defense_statement")
@@ -122,4 +123,3 @@ async def test_civil_defense_generates_defense_statement_and_persists_state(lawy
         must_file_id=complaint_file_id,
         timeout_s=90.0,
     )
-

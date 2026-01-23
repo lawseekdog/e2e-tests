@@ -17,6 +17,7 @@ _MATTER_DB = PgTarget(dbname=os.getenv("E2E_MATTER_DB", "matter-service"))
 
 
 @pytest.mark.e2e
+@pytest.mark.slow
 async def test_civil_appeal_appellee_generates_appeal_defense(lawyer_client):
     evidence_dir = Path(__file__).resolve().parent / "evidence"
     judgment_path = evidence_dir / "first_instance_judgment.txt"
@@ -78,10 +79,10 @@ async def test_civil_appeal_appellee_generates_appeal_defense(lawyer_client):
     traces = traces_data.get("traces") if isinstance(traces_data, dict) else None
     assert isinstance(traces, list) and traces, traces_resp
     node_ids = {str(it.get("node_id") or "").strip() for it in traces if isinstance(it, dict)}
-    assert "appeal-intake" in node_ids
-    assert "judgment-analysis" in node_ids
-    assert "defense-planning" in node_ids
-    assert "document-generation" in node_ids
+    assert any(x in node_ids for x in {"skill:appeal-intake", "appeal-intake"})
+    assert any(x in node_ids for x in {"skill:judgment-analysis", "judgment-analysis"})
+    assert any(x in node_ids for x in {"skill:defense-planning", "defense-planning"})
+    assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
 
     dels_resp = await lawyer_client.list_deliverables(flow.matter_id, output_key="appeal_defense")
     dels = unwrap_api_response(dels_resp)
@@ -117,4 +118,3 @@ async def test_civil_appeal_appellee_generates_appeal_defense(lawyer_client):
         overwrite=True,
     )
     await wait_for_search_hit(lawyer_client, query=unique, kb_ids=[kb_id], must_file_id=appeal_file_id, timeout_s=90.0)
-

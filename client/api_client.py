@@ -218,11 +218,14 @@ class ApiClient:
         self,
         session_id: str,
         user_response: dict[str, Any],
+        pending_card: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         data = {
             "user_id": int(self.user_id) if self.user_id else None,
             "user_response": user_response,
         }
+        if pending_card:
+            data["pending_card"] = pending_card
         return await self._post_sse(f"/api/v1/consultations/sessions/{session_id}/resume", data)
 
     async def switch_service_type(

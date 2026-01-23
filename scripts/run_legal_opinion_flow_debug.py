@@ -122,6 +122,15 @@ async def main():
     async with ApiClient(base_url) as c:
         await c.login(user, pwd)
 
+        # Upload a sample material so the kickoff card's required attachment_file_ids can be satisfied.
+        # This also exercises files-service parsing + matter-service prepare (ZIP expand/wait) path.
+        sample_doc = Path(__file__).resolve().parents[2] / "关于赵丽珍非因工死亡事件责任分析与应对策略法律意见书.docx"
+        uploaded_file_id: Optional[str] = None
+        if sample_doc.exists():
+            up = await c.upload_file(str(sample_doc), purpose="consultation")
+            uploaded_file_id = str((up.get("data") or {}).get("id") or "").strip() or None
+            print("uploaded_file_id", uploaded_file_id, flush=True)
+
         sess = await c.create_session(service_type_id="legal_opinion")
         sid = str((sess.get("data") or {}).get("id") or "").strip()
         print("session", sid, flush=True)
@@ -160,7 +169,7 @@ async def main():
                     flush=True,
                 )
                 t = time.time()
-                resp = await c.resume(sid, _auto_answer_card(card, None))
+                resp = await c.resume(sid, _auto_answer_card(card, uploaded_file_id))
                 print("  resume", round(time.time() - t, 2), "s", flush=True)
                 err = next((e for e in (resp.get("events") or []) if isinstance(e, dict) and e.get("event") == "error"), None)
                 if err:

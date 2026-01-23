@@ -29,6 +29,7 @@ def _case_facts() -> str:
 
 
 @pytest.mark.e2e
+@pytest.mark.slow
 async def test_civil_prosecution_private_lending_generates_civil_complaint_and_persists_state(lawyer_client):
     evidence_dir = Path(__file__).resolve().parent / "evidence"
     paths = [
@@ -95,9 +96,9 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
     assert isinstance(traces, list) and traces, traces_resp
     node_ids = {str(it.get("node_id") or "").strip() for it in traces if isinstance(it, dict)}
     # Core happy-path nodes (playbook-dependent, but stable across envs).
-    assert "litigation-intake" in node_ids
-    assert "cause-recommendation" in node_ids
-    assert "document-generation" in node_ids
+    assert any(x in node_ids for x in {"skill:litigation-intake", "litigation-intake"})
+    assert any(x in node_ids for x in {"skill:cause-recommendation", "cause-recommendation"})
+    assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
 
     # ========== Deliverable content (DOCX) ==========
     dels_resp = await lawyer_client.list_deliverables(flow.matter_id, output_key="civil_complaint")

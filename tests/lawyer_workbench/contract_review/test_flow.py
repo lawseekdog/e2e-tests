@@ -17,6 +17,7 @@ _MATTER_DB = PgTarget(dbname=os.getenv("E2E_MATTER_DB", "matter-service"))
 
 
 @pytest.mark.e2e
+@pytest.mark.slow
 async def test_contract_review_generates_review_report(lawyer_client):
     evidence_dir = Path(__file__).resolve().parent / "evidence"
     contract_path = evidence_dir / "sample_contract.txt"
@@ -75,9 +76,9 @@ async def test_contract_review_generates_review_report(lawyer_client):
     traces = traces_data.get("traces") if isinstance(traces_data, dict) else None
     assert isinstance(traces, list) and traces, traces_resp
     node_ids = {str(it.get("node_id") or "").strip() for it in traces if isinstance(it, dict)}
-    assert "contract-intake" in node_ids
-    assert "contract-review" in node_ids
-    assert "document-generation" in node_ids
+    assert any(x in node_ids for x in {"skill:contract-intake", "contract-intake"})
+    assert any(x in node_ids for x in {"skill:contract-review", "contract-review"})
+    assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
 
     dels_resp = await lawyer_client.list_deliverables(flow.matter_id)
     dels = unwrap_api_response(dels_resp)

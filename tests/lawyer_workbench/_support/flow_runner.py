@@ -185,8 +185,21 @@ class WorkbenchFlow:
         # Keep an audit trail for assertions/debugging.
         self.seen_cards.append(card)
         self.seen_card_signatures.append(card_signature(card))
+        skill_id = str(card.get("skill_id") or "").strip()
+        if skill_id == "system:kickoff":
+            # Avoid a long resume() run on kickoff: send a normal chat message.
+            # ConsultationChatService can auto-complete the kickoff card from the first user_query.
+            facts = _resolve_override_value("profile.facts", self.overrides)
+            facts_text = trim(facts) or "已补充案件事实，请继续推进。"
+            return await self.client.chat(
+                self.session_id,
+                facts_text,
+                attachments=list(self.uploaded_file_ids),
+                max_loops=6,
+            )
+
         user_response = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
-        return await self.client.resume(self.session_id, user_response)
+        return await self.client.resume(self.session_id, user_response, pending_card=card)
 
     async def nudge(self, text: str = _NUDGE_TEXT, *, attachments: list[str] | None = None, max_loops: int = 12) -> dict[str, Any]:
         return await self.client.chat(self.session_id, text, attachments=attachments or [], max_loops=max_loops)

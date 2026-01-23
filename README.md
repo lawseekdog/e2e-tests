@@ -79,6 +79,8 @@ pytest tests/lawyer_workbench/civil_prosecution/test_flow.py -v
 # 带标记的测试
 pytest tests/ -v -m e2e
 pytest tests/ -v -m smoke
+pytest tests/ -v -m "e2e and not slow"
+pytest tests/ -v -m slow
 ```
 
 ### 生成报告

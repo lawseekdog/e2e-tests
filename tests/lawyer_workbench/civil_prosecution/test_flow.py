@@ -32,7 +32,7 @@ def _case_facts() -> str:
 async def test_civil_prosecution_private_lending_generates_civil_complaint_and_persists_state(lawyer_client):
     evidence_dir = Path(__file__).resolve().parent / "evidence"
     paths = [
-        evidence_dir / "sample_iou.pdf",
+        evidence_dir / "iou.txt",
         evidence_dir / "sample_transfer_record.txt",
         evidence_dir / "sample_chat_record.txt",
     ]

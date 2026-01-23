@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 
+import httpx
 import pytest
 from dotenv import load_dotenv
 
@@ -16,10 +17,91 @@ if repo_root_env.exists():
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 BASE_URL = os.getenv("BASE_URL", "http://localhost:18001")
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
 LAWYER_USERNAME = os.getenv("LAWYER_USERNAME", "lawyer1")
 LAWYER_PASSWORD = os.getenv("LAWYER_PASSWORD", "lawyer123456")
+
+
+async def _ensure_seed_packages() -> None:
+    """Bootstrap system resources on a fresh DB (no mocks).
+
+    The stack relies on collector-service seed_packages to populate:
+    - matters.service_types + playbooks (platform-service)
+    - structured knowledge seeds (knowledge-service)
+    - templates (templates-service)
+
+    In local docker, these may still be running in the background when E2E starts; make E2E resilient by
+    proactively applying required packages when matter-service reports missing config.
+    """
+    if str(os.getenv("E2E_SKIP_SEED", "") or "").strip().lower() in {"1", "true", "yes"}:
+        return
+    if not INTERNAL_API_KEY:
+        raise RuntimeError("INTERNAL_API_KEY is required for E2E (set repo-root .env or e2e-tests/.env)")
+
+    async with httpx.AsyncClient(timeout=120.0) as c:
+        # 1) Fast check: if matter-service can list service types, platform config is ready.
+        try:
+            resp = await c.get(
+                f"{BASE_URL}/internal/matter-service/internal/matters/service-types",
+                headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
+                params={"category": "litigation"},
+            )
+            if resp.status_code == 200:
+                body = resp.json()
+                if body.get("code") == 0 and isinstance(body.get("data"), list) and body.get("data"):
+                    return
+        except Exception:
+            # Fall through to seeding (best effort).
+            pass
+
+        # 2) Apply the minimum required packages first (must succeed for litigation flows).
+        base_payload = {"dry_run": False, "force": False}
+        must_packages = ["matters_system_resources", "knowledge_structured_seeds"]
+        resp = await c.post(
+            f"{BASE_URL}/api/v1/seed-packages/apply-internal",
+            headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
+            json={**base_payload, "package_ids": must_packages},
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("code") != 0:
+            raise RuntimeError(f"seed_packages apply-internal failed: {body}")
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, dict) or data.get("success") is not True:
+            raise RuntimeError(f"seed_packages required packages failed: {body}")
+
+        # 3) Templates are required for document-generation. Some optional items (sync templates to sys_templates KB)
+        # can fail without breaking the workflow; treat as best-effort but require curated_templates_import success.
+        resp = await c.post(
+            f"{BASE_URL}/api/v1/seed-packages/apply-internal",
+            headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
+            json={**base_payload, "package_ids": ["templates_system_resources"]},
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("code") != 0:
+            raise RuntimeError(f"seed_packages templates_system_resources failed: {body}")
+
+        results = ((body.get("data") or {}) if isinstance(body, dict) else {}).get("results") or []
+        ok = False
+        for pkg in results if isinstance(results, list) else []:
+            if not isinstance(pkg, dict) or str(pkg.get("package_id") or "") != "templates_system_resources":
+                continue
+            for it in pkg.get("items") if isinstance(pkg.get("items"), list) else []:
+                if isinstance(it, dict) and str(it.get("item_id") or "") == "curated_templates_import":
+                    res = it.get("result") if isinstance(it.get("result"), dict) else {}
+                    if str(res.get("status") or "") == "completed":
+                        ok = True
+                        break
+        if not ok:
+            raise RuntimeError(f"seed_packages templates_system_resources did not import templates: {body}")
+
+
+@pytest.fixture(scope="session", autouse=True)
+async def seed_system_resources():
+    await _ensure_seed_packages()
 
 
 @pytest.fixture

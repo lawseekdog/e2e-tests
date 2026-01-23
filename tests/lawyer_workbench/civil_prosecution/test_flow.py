@@ -70,6 +70,8 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
         overrides={
             "profile.facts": _case_facts(),
             "profile.claims": "返还本金100000元，并按年利率6%支付逾期利息，承担诉讼费。",
+            # Keep document-generation minimal for E2E: generate only the primary deliverable.
+            "profile.decisions.selected_documents": ["civil_complaint"],
         },
     )
 

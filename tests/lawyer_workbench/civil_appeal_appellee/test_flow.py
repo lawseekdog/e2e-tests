@@ -58,7 +58,9 @@ async def test_civil_appeal_appellee_generates_appeal_defense(lawyer_client):
                 "我方（被上诉人）张三E2E03，收到对方（上诉人）李四E2E03上诉。"
                 "证据：一审判决书、借条、转账记录、上诉状。"
                 "请分析上诉理由并生成上诉答辩状。"
-            )
+            ),
+            # Keep document-generation minimal for E2E: generate only the primary deliverable.
+            "profile.decisions.selected_documents": ["appeal_defense"],
         },
     )
 

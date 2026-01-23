@@ -52,7 +52,9 @@ async def test_civil_defense_generates_defense_statement_and_persists_state(lawy
             "profile.facts": (
                 "我方（被告）张三E2E02，收到原告王五E2E02起诉，主张民间借贷50,000元及利息。"
                 "我方认为双方存在其他往来款，借条真实性存疑；我方已部分还款。"
-            )
+            ),
+            # Keep document-generation minimal for E2E: generate only the primary deliverable.
+            "profile.decisions.selected_documents": ["defense_statement"],
         },
     )
 

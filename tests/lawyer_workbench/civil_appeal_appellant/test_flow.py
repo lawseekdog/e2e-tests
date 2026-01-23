@@ -53,7 +53,9 @@ async def test_civil_appeal_appellant_generates_appeal_brief(lawyer_client):
                 "我方张三E2E03对一审判决关于利息部分不服，拟提起二审上诉。"
                 "证据：一审判决书、借条、转账记录。"
                 "请结合一审判决书，梳理争点并生成上诉状。"
-            )
+            ),
+            # Keep document-generation minimal for E2E: generate only the primary deliverable.
+            "profile.decisions.selected_documents": ["appeal_brief"],
         },
     )
 

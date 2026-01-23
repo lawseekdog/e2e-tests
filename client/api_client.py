@@ -59,7 +59,9 @@ class ApiClient:
         # Spring Boot services (esp. matter-service) can take ~50s to start; keep enough headroom.
         # Matter-service may take ~60-90s to restart locally (JIT + Flyway). Keep enough headroom so E2E
         # can ride out transient 502/503/504 from the gateway.
-        get_retries = int(os.getenv("E2E_HTTP_GET_RETRIES", "60") or 60)
+        # In local docker, Spring services may restart (Flyway, JIT warmup) and nginx returns 502/503/504
+        # for several minutes. Keep this tolerant by default; override via E2E_HTTP_GET_RETRIES in CI.
+        get_retries = int(os.getenv("E2E_HTTP_GET_RETRIES", "180") or 180)
         max_attempts = get_retries if method.upper() == "GET" else 1
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
@@ -162,7 +164,7 @@ class ApiClient:
         # Use x-www-form-urlencoded to keep E2E stable across gateway/service implementations.
         url = f"{self.base_url}/api/v1/auth/login"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        max_attempts = int(os.getenv("E2E_HTTP_LOGIN_RETRIES", "60") or 60)
+        max_attempts = int(os.getenv("E2E_HTTP_LOGIN_RETRIES", "180") or 180)
         transient = {500, 502, 503, 504}
         last_exc: Exception | None = None
 

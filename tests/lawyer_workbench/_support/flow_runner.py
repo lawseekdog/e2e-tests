@@ -109,15 +109,16 @@ def auto_answer_card(
                 value = default
             else:
                 options = q.get("options") if isinstance(q.get("options"), list) else []
-                rec = []
+                # For multi-select questions, picking all recommended options can trigger a lot of expensive
+                # downstream work (e.g., generating multiple documents). Prefer a minimal, deterministic choice.
+                picked = None
                 for opt in options:
                     if isinstance(opt, dict) and opt.get("recommended") is True and opt.get("value") is not None:
-                        rec.append(opt.get("value"))
-                if rec:
-                    value = rec
-                else:
-                    first = _pick_recommended_or_first(options)
-                    value = [first] if first is not None else []
+                        picked = opt.get("value")
+                        break
+                if picked is None:
+                    picked = _pick_recommended_or_first(options)
+                value = [picked] if picked is not None else []
         elif it in {"file_ids", "file_id"} or fk == "attachment_file_ids":
             if has_default:
                 value = default

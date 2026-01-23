@@ -84,7 +84,7 @@ def _auto_answer_card(card: dict, uploaded_file_ids: list[str] | None = None) ->
             # 其他 file_id(s) 字段仅在 kickoff/必填时自动回填，避免把“旧证据”误当作“新增缺口材料”导致反复补问。
             if has_default:
                 value = default
-            elif uploaded_file_ids and (fk == "attachment_file_ids" or required or skill_id == "workflow-kickoff"):
+            elif uploaded_file_ids and (fk == "attachment_file_ids" or required or skill_id == "system:kickoff"):
                 value = uploaded_file_ids
             else:
                 value = None

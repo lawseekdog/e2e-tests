@@ -10,8 +10,15 @@ from tests.lawyer_workbench._support.docx import assert_docx_contains, extract_d
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
 from tests.lawyer_workbench._support.memory import entity_keys, wait_for_entity_keys
+from tests.lawyer_workbench._support.phase_timeline import (
+    assert_has_deliverable,
+    assert_has_phases,
+    assert_playbook_id,
+    assert_phase_status_in,
+    unwrap_phase_timeline,
+)
 from tests.lawyer_workbench._support.profile import assert_has_party, assert_service_type
-from tests.lawyer_workbench._support.sse import assert_visible_response
+from tests.lawyer_workbench._support.sse import assert_task_lifecycle, assert_visible_response
 from tests.lawyer_workbench._support.timeline import assert_timeline_has_output_keys, unwrap_timeline
 from tests.lawyer_workbench._support.utils import unwrap_api_response
 
@@ -53,6 +60,7 @@ async def test_civil_appeal_appellant_generates_appeal_brief(lawyer_client):
     assert "profile.facts" in fks, first_card
     kickoff_sse = await flow.resume_card(first_card)
     assert_visible_response(kickoff_sse)
+    assert_task_lifecycle(kickoff_sse)
 
     async def _appeal_brief_ready(f: WorkbenchFlow) -> bool:
         await f.refresh()
@@ -91,6 +99,13 @@ async def test_civil_appeal_appellant_generates_appeal_brief(lawyer_client):
     assert_service_type(prof, "civil_appeal_appellant")
     assert_has_party(prof, role="plaintiff", name_contains="张三")
     assert_has_party(prof, role="defendant", name_contains="李四")
+
+    pt_resp = await lawyer_client.get_matter_phase_timeline(flow.matter_id)
+    pt = unwrap_phase_timeline(pt_resp)
+    assert_playbook_id(pt, "litigation_civil_appeal_appellant")
+    assert_has_phases(pt, must_include=["kickoff", "intake", "execute"])
+    assert_phase_status_in(pt, phase_id="kickoff", allowed=["completed", "in_progress"])
+    assert_has_deliverable(pt, output_key="appeal_brief")
 
     tl_resp = await lawyer_client.get_matter_timeline(flow.matter_id, limit=50)
     tl = unwrap_timeline(tl_resp)

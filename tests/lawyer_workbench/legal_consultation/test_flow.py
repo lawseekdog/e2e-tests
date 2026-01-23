@@ -5,10 +5,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.lawyer_workbench._support.canvas import canvas_evidence_file_ids, canvas_profile, unwrap_canvas
 from tests.lawyer_workbench._support.db import PgTarget, count
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
-from tests.lawyer_workbench._support.sse import assert_visible_response
-from tests.lawyer_workbench._support.utils import unwrap_api_response
+from tests.lawyer_workbench._support.phase_timeline import assert_has_phases, assert_playbook_id, unwrap_phase_timeline
+from tests.lawyer_workbench._support.sse import assert_task_lifecycle, assert_visible_response
+from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
 
 
 _MATTER_DB = PgTarget(dbname=os.getenv("E2E_MATTER_DB", "matter-service"))
@@ -16,7 +18,7 @@ _MATTER_DB = PgTarget(dbname=os.getenv("E2E_MATTER_DB", "matter-service"))
 
 def _consult_facts() -> str:
     return (
-        "我与房东签订租赁合同，押金2000元。退租时房东以墙面污损为由拒退押金。\n"
+        "我叫张三E2E00，与房东李四E2E00签订租赁合同，押金2000元。退租时房东以墙面污损为由拒退押金。\n"
         "我有：租赁合同、交接清单、聊天记录。诉求：退还押金2000元并承担合理费用。"
     )
 
@@ -39,6 +41,32 @@ async def test_legal_consultation_can_run_and_switch_to_litigation(lawyer_client
     # Prime the consult loop with a single rich message (consultation playbook may not always interrupt with a card).
     sse = await flow.nudge(_consult_facts(), attachments=[note_file_id], max_loops=12)
     assert_visible_response(sse)
+
+    async def _canvas_ready(expected_service_type: str) -> dict | None:
+        resp = await lawyer_client.get_session_canvas(session_id)
+        canvas = unwrap_canvas(resp)
+        prof = canvas_profile(canvas)
+        if str(prof.get("service_type_id") or "").strip() != expected_service_type:
+            return None
+        if note_file_id not in canvas_evidence_file_ids(canvas):
+            return None
+        # timeline comes from round_summary; allow a bit of time for async persistence.
+        tl = canvas.get("timeline")
+        if not isinstance(tl, list) or not tl:
+            return None
+        return canvas
+
+    await eventually(
+        lambda: _canvas_ready("legal_consultation"),
+        timeout_s=90.0,
+        interval_s=2.0,
+        description="session canvas (consultation) populated",
+    )
+
+    # Ensure workbench can show task progress UI (task_start/task_end).
+    sse2 = await flow.step(nudge_text="继续")
+    assert_visible_response(sse2)
+    assert_task_lifecycle(sse2)
 
     async def _consult_intake_executed(f: WorkbenchFlow) -> bool:
         await f.refresh()
@@ -67,3 +95,17 @@ async def test_legal_consultation_can_run_and_switch_to_litigation(lawyer_client
     prof = unwrap_api_response(prof_resp)
     assert isinstance(prof, dict), prof_resp
     assert str(prof.get("service_type_id") or "").strip() == "civil_prosecution"
+
+    # Session canvas should reflect the updated matter profile (service_type_id/playbook_id).
+    await eventually(
+        lambda: _canvas_ready("civil_prosecution"),
+        timeout_s=90.0,
+        interval_s=2.0,
+        description="session canvas (after switch_service_type) populated",
+    )
+
+    # Matter phase timeline should now follow the litigation playbook.
+    pt_resp = await lawyer_client.get_matter_phase_timeline(flow.matter_id)
+    pt = unwrap_phase_timeline(pt_resp)
+    assert_playbook_id(pt, "litigation_civil_prosecution")
+    assert_has_phases(pt, must_include=["kickoff", "intake", "execute"])

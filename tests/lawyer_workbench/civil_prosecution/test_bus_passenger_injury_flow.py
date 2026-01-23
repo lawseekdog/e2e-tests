@@ -16,8 +16,8 @@ def _case_facts() -> str:
     return (
         "【当事人】\n"
         "原告：张三E2E_BUS01（男，1988年生，手机 13800000000），乘客。\n"
-        "被告1：北京某公交客运有限公司E2E（承运人/公交公司）。\n"
-        "被告2：司机王五E2E（被告1雇员，驾驶公交车）。\n"
+        "被告：北京某公交客运有限公司E2E（承运人/公交公司）。\n"
+        "司机：王五E2E（被告雇员，驾驶公交车）。\n"
         "\n"
         "【经过】\n"
         "2026-01-20 08:10 在北京市朝阳区，张三E2E_BUS01乘坐北京市123路公交车（车票见附件）。\n"
@@ -25,6 +25,9 @@ def _case_facts() -> str:
         "\n"
         "【伤情与治疗】\n"
         "当日门诊诊断右桡骨远端骨折，后住院治疗（诊断证明、住院证明见附件）。\n"
+        "\n"
+        "【诉求】\n"
+        "请求判令被告赔偿医疗费、误工费、护理费、交通费等损失并承担诉讼费。\n"
         "\n"
         "【损失】\n"
         "医疗费、误工费、护理费、交通费等（后续据票据计算）。\n"
@@ -154,4 +157,3 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         must_include=["party:plaintiff:张三E2E_BUS01"],
         timeout_s=float(os.getenv("E2E_MEMORY_TIMEOUT_S", "120") or 120),
     )
-

@@ -10,8 +10,15 @@ from tests.lawyer_workbench._support.docx import assert_docx_contains, extract_d
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
 from tests.lawyer_workbench._support.memory import list_case_facts
+from tests.lawyer_workbench._support.phase_timeline import (
+    assert_has_deliverable,
+    assert_has_phases,
+    assert_playbook_id,
+    assert_phase_status_in,
+    unwrap_phase_timeline,
+)
 from tests.lawyer_workbench._support.profile import assert_service_type
-from tests.lawyer_workbench._support.sse import assert_visible_response
+from tests.lawyer_workbench._support.sse import assert_task_lifecycle, assert_visible_response
 from tests.lawyer_workbench._support.timeline import assert_timeline_has_output_keys, unwrap_timeline
 from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
 
@@ -54,6 +61,7 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
     assert "profile.facts" in fks, first_card
     kickoff_sse = await flow.resume_card(first_card)
     assert_visible_response(kickoff_sse)
+    assert_task_lifecycle(kickoff_sse)
 
     async def _opinion_ready(f: WorkbenchFlow) -> bool:
         await f.refresh()
@@ -90,6 +98,13 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
     prof = unwrap_api_response(prof_resp)
     assert isinstance(prof, dict), prof_resp
     assert_service_type(prof, "legal_opinion")
+
+    pt_resp = await lawyer_client.get_matter_phase_timeline(flow.matter_id)
+    pt = unwrap_phase_timeline(pt_resp)
+    assert_playbook_id(pt, "legal_opinion")
+    assert_has_phases(pt, must_include=["kickoff", "qualify", "execute"])
+    assert_phase_status_in(pt, phase_id="kickoff", allowed=["completed", "in_progress"])
+    assert_has_deliverable(pt, output_key="legal_opinion")
 
     tl_resp = await lawyer_client.get_matter_timeline(flow.matter_id, limit=50)
     tl = unwrap_timeline(tl_resp)

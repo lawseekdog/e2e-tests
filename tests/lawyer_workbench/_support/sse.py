@@ -56,6 +56,52 @@ def extract_output(sse: dict[str, Any]) -> str:
 def extract_last_card(sse: dict[str, Any]) -> dict[str, Any] | None:
     return last_event_data(sse, "card")
 
+def task_starts(sse: dict[str, Any]) -> list[dict[str, Any]]:
+    return events_of_type(sse, "task_start")
+
+
+def task_ends(sse: dict[str, Any]) -> list[dict[str, Any]]:
+    return events_of_type(sse, "task_end")
+
+
+def validate_task_events(sse: dict[str, Any]) -> None:
+    """Validate task_start/task_end structure when present."""
+    starts = task_starts(sse)
+    ends = task_ends(sse)
+
+    started_nodes: set[str] = set()
+    for it in starts:
+        node = str((it or {}).get("node") or "").strip()
+        if not node:
+            raise AssertionError(f"task_start missing node: {it}")
+        started_nodes.add(node)
+
+    for it in ends:
+        node = str((it or {}).get("node") or "").strip()
+        if not node:
+            raise AssertionError(f"task_end missing node: {it}")
+        # ai-engine emits node_end only after node_start, but keep this as a strong contract for the UI.
+        if started_nodes and node not in started_nodes:
+            raise AssertionError(f"task_end node without matching task_start: node={node!r} started={sorted(started_nodes)}")
+
+    # Best-effort contract: run_skill starts should be enriched with skill_id.
+    for it in starts:
+        if str((it or {}).get("node") or "").strip() != "run_skill":
+            continue
+        sid = str((it or {}).get("skill_id") or "").strip()
+        if not sid:
+            raise AssertionError(f"run_skill task_start missing skill_id: {it}")
+
+
+def assert_task_lifecycle(sse: dict[str, Any], *, min_starts: int = 1) -> None:
+    """Require task_start/task_end to exist (workbench progress UI contract)."""
+    starts = task_starts(sse)
+    ends = task_ends(sse)
+    if len(starts) < int(min_starts):
+        raise AssertionError(f"SSE missing task_start events (need>={min_starts}). Event types={event_types(sse)}")
+    if not ends:
+        raise AssertionError(f"SSE missing task_end events. Event types={event_types(sse)}")
+    validate_task_events(sse)
 
 def assert_no_error(sse: dict[str, Any]) -> None:
     errs = events_of_type(sse, "error")
@@ -86,6 +132,7 @@ def assert_visible_response(sse: dict[str, Any], *, output_must_contain: Iterabl
     assert_no_error(sse)
     assert_has_end(sse)
     assert_has_progress(sse)
+    validate_task_events(sse)
 
     out = extract_output(sse).strip()
     card = extract_last_card(sse)
@@ -102,4 +149,3 @@ def assert_visible_response(sse: dict[str, Any], *, output_must_contain: Iterabl
                 missing.append(s)
         if missing:
             raise AssertionError(f"SSE output missing fragments={missing}. Output sample:\n{out[:1500]}")
-

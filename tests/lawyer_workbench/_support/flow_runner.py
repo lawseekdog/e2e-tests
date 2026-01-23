@@ -168,6 +168,8 @@ class WorkbenchFlow:
     uploaded_file_ids: list[str] = field(default_factory=list)
     overrides: dict[str, Any] = field(default_factory=dict)
     matter_id: str | None = None
+    seen_cards: list[dict[str, Any]] = field(default_factory=list)
+    seen_card_signatures: list[str] = field(default_factory=list)
 
     async def refresh(self) -> None:
         sess = unwrap_api_response(await self.client.get_session(self.session_id))
@@ -180,6 +182,9 @@ class WorkbenchFlow:
         return card if isinstance(card, dict) and card else None
 
     async def resume_card(self, card: dict[str, Any]) -> dict[str, Any]:
+        # Keep an audit trail for assertions/debugging.
+        self.seen_cards.append(card)
+        self.seen_card_signatures.append(card_signature(card))
         user_response = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
         return await self.client.resume(self.session_id, user_response)
 
@@ -227,4 +232,3 @@ async def wait_for_initial_card(flow: WorkbenchFlow, *, timeout_s: float = 60.0)
             return last
         await asyncio.sleep(1.0)
     raise AssertionError(f"Timed out waiting for initial card (timeout={timeout_s}s, session_id={flow.session_id})")
-

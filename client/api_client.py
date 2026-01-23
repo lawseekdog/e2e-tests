@@ -225,6 +225,21 @@ class ApiClient:
         }
         return await self._post_sse(f"/api/v1/consultations/sessions/{session_id}/resume", data)
 
+    async def switch_service_type(
+        self,
+        session_id: str,
+        *,
+        service_type_id: str,
+        title: str | None = None,
+        cause_of_action_code: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"service_type_id": str(service_type_id)}
+        if title is not None:
+            payload["title"] = str(title)
+        if cause_of_action_code is not None:
+            payload["cause_of_action_code"] = str(cause_of_action_code)
+        return await self.post(f"/api/v1/consultations/sessions/{session_id}/service-type", payload)
+
     # ========== Files ==========
 
     async def upload_file(
@@ -251,6 +266,18 @@ class ApiClient:
             resp = await self._client.post(url, headers=headers, params=params, files=files)
             resp.raise_for_status()
             return resp.json()
+
+    async def download_file_bytes(self, file_id: str) -> bytes:
+        """Download a file's raw bytes via files-service."""
+        fid = str(file_id).strip()
+        if not fid:
+            raise ValueError("file_id is required")
+        url = f"{self.base_url}/api/v1/files/{fid}/download"
+        headers = dict(self.headers)
+        headers.pop("Content-Type", None)
+        resp = await self._client.get(url, headers=headers)
+        resp.raise_for_status()
+        return resp.content
 
     # ========== Matters ==========
 
@@ -281,11 +308,20 @@ class ApiClient:
     async def get_workflow_snapshot(self, matter_id: str) -> dict[str, Any]:
         return await self.get(f"/api/v1/matters/{matter_id}/workflow")
 
+    async def get_workflow_profile(self, matter_id: str) -> dict[str, Any]:
+        return await self.get(f"/api/v1/matters/{matter_id}/workflow/profile")
+
     async def list_deliverables(self, matter_id: str, output_key: str | None = None) -> dict[str, Any]:
         params = {}
         if output_key:
             params["output_key"] = output_key
         return await self.get(f"/api/v1/matters/{matter_id}/deliverables", params=params)
+
+    async def list_traces(self, matter_id: str, limit: int | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = int(limit)
+        return await self.get(f"/api/v1/matters/{matter_id}/traces", params=params)
 
     # ========== Knowledge ==========
 

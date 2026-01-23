@@ -1,0 +1,6 @@
+Transfer record (mock)
+Date: 2025-01-01
+From: Zhang San
+To: Li Si
+Amount: 100000 CNY
+Reference: loan

@@ -622,6 +622,12 @@ async def test_litigation_bus_injury_reaches_claim_path_and_evidence_updates_pro
     )
     assert isinstance(dashcam_sse, dict)
     dashcam_events = dashcam_sse.get("events") if isinstance(dashcam_sse.get("events"), list) else []
+    _dbg(
+        "dashcam sse events:",
+        [e.get("event") for e in dashcam_events if isinstance(e, dict)][:12],
+        "output_len:",
+        len(str(dashcam_sse.get("output") or "")),
+    )
     dashcam_partial = any(
         isinstance(e, dict)
         and e.get("event") == "error"

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.lawyer_workbench._support.memory import wait_for_entity_keys
+from tests.lawyer_workbench._support.memory import assert_fact_content_contains, wait_for_entity_keys
 from tests.lawyer_workbench._support.profile import assert_has_party, assert_service_type
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
 from tests.lawyer_workbench._support.sse import assert_visible_response
@@ -162,10 +162,11 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         assert_visible_response(tx_sse)
 
     # Basic memory smoke: plaintiff evidence should be extracted from facts/evidence names.
-    await wait_for_entity_keys(
+    facts = await wait_for_entity_keys(
         lawyer_client,
         user_id=int(lawyer_client.user_id),
         case_id=str(flow.matter_id),
-        must_include=["party:plaintiff:张三E2E_BUS01"],
+        must_include=["party:plaintiff:primary"],
         timeout_s=float(os.getenv("E2E_MEMORY_TIMEOUT_S", "120") or 120),
     )
+    assert_fact_content_contains(facts, entity_key="party:plaintiff:primary", must_include=["张三E2E_BUS01"])

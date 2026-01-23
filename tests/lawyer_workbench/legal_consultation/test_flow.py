@@ -7,7 +7,7 @@ import pytest
 
 from tests.lawyer_workbench._support.canvas import canvas_evidence_file_ids, canvas_profile, unwrap_canvas
 from tests.lawyer_workbench._support.db import PgTarget, count
-from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
+from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
 from tests.lawyer_workbench._support.phase_timeline import assert_has_phases, assert_playbook_id, unwrap_phase_timeline
 from tests.lawyer_workbench._support.sse import assert_task_lifecycle, assert_visible_response
 from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
@@ -40,9 +40,17 @@ async def test_legal_consultation_can_run_and_switch_to_litigation(lawyer_client
 
     flow = WorkbenchFlow(client=lawyer_client, session_id=session_id, uploaded_file_ids=[note_file_id])
 
-    # Prime the consult loop with a single rich message (consultation playbook may not always interrupt with a card).
-    sse = await flow.nudge(_consult_facts(), attachments=[note_file_id], max_loops=12)
-    assert_visible_response(sse)
+    # Kickoff should always be the first interrupt card in the "start_service" flow.
+    flow.overrides["profile.facts"] = _consult_facts()
+    first_card = await wait_for_initial_card(flow, timeout_s=90.0)
+    assert str(first_card.get("skill_id") or "").strip() == "system:kickoff", first_card
+    qs = first_card.get("questions") if isinstance(first_card.get("questions"), list) else []
+    fks = {str(q.get("field_key") or "").strip() for q in qs if isinstance(q, dict)}
+    assert "profile.facts" in fks, first_card
+
+    kickoff_sse = await flow.resume_card(first_card)
+    assert_visible_response(kickoff_sse)
+    assert_task_lifecycle(kickoff_sse)
 
     async def _canvas_ready(expected_service_type: str) -> dict | None:
         resp = await lawyer_client.get_session_canvas(session_id)

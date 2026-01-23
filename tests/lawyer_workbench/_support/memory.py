@@ -44,6 +44,70 @@ def entity_keys(facts: list[dict[str, Any]]) -> set[str]:
     return out
 
 
+def find_fact(facts: list[dict[str, Any]], *, entity_key: str) -> dict[str, Any] | None:
+    """Find a fact by exact entity_key."""
+    want = str(entity_key or "").strip()
+    if not want:
+        raise ValueError("entity_key is required")
+    for it in facts or []:
+        if not isinstance(it, dict):
+            continue
+        k = str(it.get("entity_key") or "").strip()
+        if k == want:
+            return it
+    return None
+
+
+def assert_fact_content_contains(
+    facts: list[dict[str, Any]],
+    *,
+    entity_key: str,
+    must_include: Iterable[str],
+) -> None:
+    """Assert a specific fact exists and its content contains required fragments."""
+    f = find_fact(facts, entity_key=entity_key)
+    if not f:
+        raise AssertionError(f"missing memory fact: entity_key={entity_key!r}. Have={sorted(entity_keys(facts))[:50]}")
+
+    content = str(f.get("content") or "")
+    missing: list[str] = []
+    for needle in must_include:
+        s = str(needle or "").strip()
+        if not s:
+            continue
+        if s not in content:
+            missing.append(s)
+    if missing:
+        raise AssertionError(
+            f"memory fact content missing fragments: entity_key={entity_key!r} missing={missing}. "
+            f"content={content!r}"
+        )
+
+
+def assert_any_fact_content_contains(
+    facts: list[dict[str, Any]],
+    *,
+    candidate_entity_keys: Iterable[str],
+    must_include: Iterable[str],
+) -> str:
+    """Assert any one of the given entity_keys exists and matches content; return the matched key."""
+    keys = [str(x).strip() for x in (candidate_entity_keys or []) if str(x).strip()]
+    if not keys:
+        raise ValueError("candidate_entity_keys is required")
+    last_err: AssertionError | None = None
+    for k in keys:
+        try:
+            assert_fact_content_contains(facts, entity_key=k, must_include=must_include)
+            return k
+        except AssertionError as e:
+            last_err = e
+            continue
+    raise AssertionError(
+        f"none of the candidate memory facts matched: keys={keys}. Have={sorted(entity_keys(facts))[:50]}. "
+        f"Last={last_err}"
+    )
+
+
 async def wait_for_entity_keys(
     client,
     *,
@@ -67,4 +131,3 @@ async def wait_for_entity_keys(
 
     missing = sorted(want - last_keys)
     raise AssertionError(f"Timed out waiting for memory entity_keys. Missing={missing}. Got={sorted(last_keys)[:50]}")
-

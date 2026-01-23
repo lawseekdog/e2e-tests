@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from tests.lawyer_workbench._support.db import PgTarget, count
-from tests.lawyer_workbench._support.docx import assert_docx_contains, extract_docx_text
+from tests.lawyer_workbench._support.docx import (
+    assert_docx_contains,
+    assert_docx_has_no_template_placeholders,
+    extract_docx_text,
+)
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
 from tests.lawyer_workbench._support.memory import list_case_facts
@@ -119,6 +123,7 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
     assert file_id, d0
     docx_bytes = await lawyer_client.download_file_bytes(file_id)
     text = extract_docx_text(docx_bytes)
+    assert_docx_has_no_template_placeholders(text)
     assert_docx_contains(text, must_include=["法律意见", "赵丽珍"])
 
     async def _memory_has_zhao() -> list[dict] | None:

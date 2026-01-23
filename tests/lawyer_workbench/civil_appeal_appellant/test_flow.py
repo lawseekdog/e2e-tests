@@ -6,10 +6,14 @@ from pathlib import Path
 import pytest
 
 from tests.lawyer_workbench._support.db import PgTarget, count
-from tests.lawyer_workbench._support.docx import assert_docx_contains, extract_docx_text
+from tests.lawyer_workbench._support.docx import (
+    assert_docx_contains,
+    assert_docx_has_no_template_placeholders,
+    extract_docx_text,
+)
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
-from tests.lawyer_workbench._support.memory import entity_keys, wait_for_entity_keys
+from tests.lawyer_workbench._support.memory import assert_any_fact_content_contains, wait_for_entity_keys
 from tests.lawyer_workbench._support.phase_timeline import (
     assert_has_deliverable,
     assert_has_phases,
@@ -120,6 +124,7 @@ async def test_civil_appeal_appellant_generates_appeal_brief(lawyer_client):
     assert file_id, d0
     docx_bytes = await lawyer_client.download_file_bytes(file_id)
     text = extract_docx_text(docx_bytes)
+    assert_docx_has_no_template_placeholders(text)
     assert_docx_contains(text, must_include=["上诉", "张三E2E03", "李四E2E03"])
 
     facts = await wait_for_entity_keys(
@@ -129,9 +134,16 @@ async def test_civil_appeal_appellant_generates_appeal_brief(lawyer_client):
         must_include=["evidence:借条", "evidence:转账记录"],
         timeout_s=120.0,
     )
-    keys = entity_keys(facts)
-    assert any(k.startswith("party:") and "张三" in k for k in keys), sorted(list(keys))[:50]
-    assert any(k.startswith("party:") and "李四" in k for k in keys), sorted(list(keys))[:50]
+    assert_any_fact_content_contains(
+        facts,
+        candidate_entity_keys=["party:appellant:primary", "party:plaintiff:primary"],
+        must_include=["张三E2E03"],
+    )
+    assert_any_fact_content_contains(
+        facts,
+        candidate_entity_keys=["party:appellee:primary", "party:defendant:primary"],
+        must_include=["李四E2E03"],
+    )
 
     kb_id = "e2e_kb_civil_appeal_appellant"
     unique = f"E2E_UNIQUE_APPEAL_APP_{flow.matter_id}"

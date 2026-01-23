@@ -44,3 +44,14 @@ def assert_docx_contains(text: str, *, must_include: Iterable[str]) -> None:
         sample = text[:2000]
         raise AssertionError(f"DOCX missing required fragments: {missing}. Extracted sample:\n{sample}")
 
+
+def assert_docx_has_no_template_placeholders(text: str) -> None:
+    """Catch common template placeholder leaks (jinja/docxtpl-style)."""
+    t = text or ""
+    bad = []
+    for needle in ("{{", "}}", "{%", "%}"):
+        if needle in t:
+            bad.append(needle)
+    if bad:
+        sample = t[:2000]
+        raise AssertionError(f"DOCX contains unresolved template placeholders: {bad}. Extracted sample:\n{sample}")

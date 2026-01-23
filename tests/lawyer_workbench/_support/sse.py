@@ -56,6 +56,19 @@ def extract_output(sse: dict[str, Any]) -> str:
 def extract_last_card(sse: dict[str, Any]) -> dict[str, Any] | None:
     return last_event_data(sse, "card")
 
+
+def _has_partial_stream_error(sse: dict[str, Any]) -> bool:
+    """httpx may terminate SSE streams abruptly (proxy/connection teardown).
+
+    ApiClient records these as an `error` event with `partial: True` so tests can continue by polling state.
+    Treat it as a non-fatal stream end signal.
+    """
+    for e in events_of_type(sse, "error"):
+        if isinstance(e, dict) and e.get("partial") is True:
+            return True
+    return False
+
+
 def task_starts(sse: dict[str, Any]) -> list[dict[str, Any]]:
     return events_of_type(sse, "task_start")
 
@@ -104,13 +117,13 @@ def assert_task_lifecycle(sse: dict[str, Any], *, min_starts: int = 1) -> None:
     validate_task_events(sse)
 
 def assert_no_error(sse: dict[str, Any]) -> None:
-    errs = events_of_type(sse, "error")
+    errs = [e for e in events_of_type(sse, "error") if not (isinstance(e, dict) and e.get("partial") is True)]
     if errs:
         raise AssertionError(f"SSE returned error events: {errs[:2]}. Event types={event_types(sse)}")
 
 
 def assert_has_end(sse: dict[str, Any]) -> None:
-    if not (events_of_type(sse, "end") or events_of_type(sse, "complete")):
+    if not (events_of_type(sse, "end") or events_of_type(sse, "complete") or _has_partial_stream_error(sse)):
         raise AssertionError(f"SSE missing end/complete. Event types={event_types(sse)}")
 
 

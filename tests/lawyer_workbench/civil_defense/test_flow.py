@@ -47,6 +47,9 @@ async def test_civil_defense_generates_defense_statement_and_persists_state(lawy
 
     first_card = await wait_for_initial_card(flow, timeout_s=90.0)
     assert str(first_card.get("skill_id") or "").strip() == "system:kickoff", first_card
+    qs = first_card.get("questions") if isinstance(first_card.get("questions"), list) else []
+    fks = {str(q.get("field_key") or "").strip() for q in qs if isinstance(q, dict)}
+    assert "profile.facts" in fks, first_card
     kickoff_sse = await flow.resume_card(first_card)
     assert_visible_response(kickoff_sse)
 

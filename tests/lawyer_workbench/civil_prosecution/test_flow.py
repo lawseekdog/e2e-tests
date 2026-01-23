@@ -65,6 +65,9 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
     # Kickoff should generate an interrupt card quickly in a healthy system.
     first_card = await wait_for_initial_card(flow, timeout_s=90.0)
     assert str(first_card.get("skill_id") or "").strip() == "system:kickoff", first_card
+    qs = first_card.get("questions") if isinstance(first_card.get("questions"), list) else []
+    fks = {str(q.get("field_key") or "").strip() for q in qs if isinstance(q, dict)}
+    assert "profile.facts" in fks, first_card
     kickoff_sse = await flow.resume_card(first_card)
     assert_visible_response(kickoff_sse)
 

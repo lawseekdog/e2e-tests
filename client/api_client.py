@@ -162,17 +162,53 @@ class ApiClient:
         # Use x-www-form-urlencoded to keep E2E stable across gateway/service implementations.
         url = f"{self.base_url}/api/v1/auth/login"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        resp = await self._client.post(url, headers=headers, data={"username": username, "password": password})
-        resp.raise_for_status()
-        result = resp.json()
-        self.token = result["data"]["access_token"]
-        # Populate X-User-Id / X-Organization-Id for downstream services.
-        me = await self.get_me()
-        self.user_id = str(me["data"]["user_id"])
-        org_id = me["data"].get("organization_id")
-        self.organization_id = str(org_id) if org_id is not None and str(org_id).strip() else None
-        self.is_superuser = bool(me["data"].get("is_superuser"))
-        return result
+        max_attempts = int(os.getenv("E2E_HTTP_LOGIN_RETRIES", "60") or 60)
+        transient = {500, 502, 503, 504}
+        last_exc: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = await self._client.post(url, headers=headers, data={"username": username, "password": password})
+                if resp.status_code in transient and attempt < max_attempts:
+                    # Local docker dev: user-service/auth dependencies may restart and briefly cause 5xx.
+                    await asyncio.sleep(min(4.0, 0.5 * attempt))
+                    continue
+                resp.raise_for_status()
+                result = resp.json()
+                self.token = result["data"]["access_token"]
+
+                # Populate X-User-Id / X-Organization-Id for downstream services.
+                me = None
+                for j in range(1, max_attempts + 1):
+                    try:
+                        me = await self.get_me()
+                        break
+                    except httpx.HTTPStatusError as e:
+                        code = e.response.status_code if e.response is not None else None
+                        if code in transient and j < max_attempts:
+                            await asyncio.sleep(min(4.0, 0.5 * j))
+                            continue
+                        raise
+                    except Exception as e:
+                        if j >= max_attempts:
+                            raise
+                        await asyncio.sleep(min(4.0, 0.5 * j))
+
+                if not isinstance(me, dict) or "data" not in me:
+                    raise RuntimeError(f"unexpected /auth/me payload: {me}")
+
+                self.user_id = str(me["data"]["user_id"])
+                org_id = me["data"].get("organization_id")
+                self.organization_id = str(org_id) if org_id is not None and str(org_id).strip() else None
+                self.is_superuser = bool(me["data"].get("is_superuser"))
+                return result
+            except Exception as e:
+                last_exc = e
+                if attempt >= max_attempts:
+                    raise
+                await asyncio.sleep(min(4.0, 0.5 * attempt))
+
+        raise last_exc if last_exc else RuntimeError("login failed")
 
     async def get_me(self) -> dict[str, Any]:
         return await self.get("/api/v1/auth/me")

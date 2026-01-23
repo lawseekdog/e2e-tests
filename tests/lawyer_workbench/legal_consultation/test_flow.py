@@ -28,13 +28,15 @@ async def test_legal_consultation_can_run_and_switch_to_litigation(lawyer_client
     evidence_dir = Path(__file__).resolve().parent / "evidence"
     note_path = evidence_dir / "consult_note.txt"
 
-    up = await lawyer_client.upload_file(str(note_path), purpose="consultation")
-    note_file_id = str(((up.get("data") or {}) if isinstance(up, dict) else {}).get("id") or "").strip()
-    assert note_file_id, up
-
     sess = await lawyer_client.create_session(service_type_id="legal_consultation")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
+
+    # Bind attachment to session so consultation canvas can render evidence_list.
+    up = await lawyer_client.upload_session_attachment(session_id, str(note_path))
+    up_data = unwrap_api_response(up)
+    note_file_id = str(((up_data or {}) if isinstance(up_data, dict) else {}).get("file_id") or "").strip()
+    assert note_file_id, up
 
     flow = WorkbenchFlow(client=lawyer_client, session_id=session_id, uploaded_file_ids=[note_file_id])
 

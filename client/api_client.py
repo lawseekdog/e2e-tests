@@ -250,6 +250,26 @@ class ApiClient:
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
         return await self.get(f"/api/v1/consultations/sessions/{session_id}/pending_card")
 
+    async def upload_session_attachment(self, session_id: str, file_path: str) -> dict[str, Any]:
+        """Upload an attachment bound to a consultation session (so canvas.evidence_list can show it)."""
+        path = Path(file_path)
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(file_path)
+
+        sid = str(session_id).strip()
+        if not sid:
+            raise ValueError("session_id is required")
+
+        url = f"{self.base_url}/api/v1/consultations/sessions/{sid}/attachments"
+        headers = dict(self.headers)
+        headers.pop("Content-Type", None)  # Let httpx set multipart boundary.
+
+        with path.open("rb") as f:
+            files = {"file": (path.name, f)}
+            resp = await self._client.post(url, headers=headers, files=files)
+            resp.raise_for_status()
+            return resp.json()
+
     async def get_session_canvas(self, session_id: str) -> dict[str, Any]:
         return await self.get(f"/api/v1/consultations/sessions/{session_id}/canvas")
 

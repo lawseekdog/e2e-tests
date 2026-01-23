@@ -105,20 +105,32 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
     assert_has_party(prof, role="plaintiff", name_contains="张三E2E_BUS01")
     assert_has_party(prof, role="defendant", name_contains="北京某公交客运有限公司E2E")
 
-    rec = prof.get("cause_recommendation") if isinstance(prof.get("cause_recommendation"), dict) else {}
-    recommended_code = str(rec.get("recommended_code") or "").strip()
-    assert recommended_code, rec
-    assert recommended_code in {"transport_contract", "personal_injury_tort"}, rec
-
-    cands = prof.get("cause_candidates") if isinstance(prof.get("cause_candidates"), list) else []
-    assert cands, prof.get("cause_candidates")
-    top = cands[0] if isinstance(cands[0], dict) else {}
-    top_support = float(top.get("evidence_support") or 0.0)
-    assert top_support > 0.0, f"unexpected evidence_support=0 for top cause: {top}"
-
     # Confirm the cause selection card to continue.
     cause_card = await flow.get_pending_card()
     assert cause_card and str(cause_card.get("skill_id") or "").strip() == "cause-recommendation", cause_card
+    qs = cause_card.get("questions") if isinstance(cause_card.get("questions"), list) else []
+    select_q = None
+    for q in qs:
+        if not isinstance(q, dict):
+            continue
+        if str(q.get("input_type") or "").strip().lower() == "select":
+            select_q = q
+            break
+    assert isinstance(select_q, dict), f"missing select question: {cause_card}"
+    opts = select_q.get("options") if isinstance(select_q.get("options"), list) else []
+    assert opts, f"missing options: {cause_card}"
+    rec_opt = None
+    for o in opts:
+        if isinstance(o, dict) and o.get("recommended") is True:
+            rec_opt = o
+            break
+    assert isinstance(rec_opt, dict), f"missing recommended option: {opts}"
+    recommended_code = str(rec_opt.get("value") or "").strip()
+    assert recommended_code in {"transport_contract", "personal_injury_tort"}, rec_opt
+    # Ensure the option description includes a non-zero evidence support signal (tool-derived, not LLM-made-up).
+    desc = str(rec_opt.get("description") or "").strip()
+    assert "证据支撑度" in desc, f"missing evidence_support hint in option description: {rec_opt}"
+    assert "证据支撑度 0%" not in desc, f"unexpected evidence_support=0 in option description: {rec_opt}"
     cause_sse = await flow.resume_card(cause_card)
     assert_visible_response(cause_sse)
 

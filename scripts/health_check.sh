@@ -4,6 +4,7 @@
 set -e
 
 BASE_URL="${BASE_URL:-http://localhost:18001}"
+INTERNAL_API_KEY="${INTERNAL_API_KEY:-change-me-in-production-32chars}"
 
 SERVICES=(
   "auth-service"
@@ -12,6 +13,10 @@ SERVICES=(
   "matter-service"
   "knowledge-service"
   "files-service"
+  "platform-service"
+  "templates-service"
+  "collector-service"
+  "memory-service"
 )
 
 echo "=== LawSeekDog 服务健康检查 ==="
@@ -29,8 +34,8 @@ fi
 # 通过 Gateway 检查各服务
 for service in "${SERVICES[@]}"; do
   echo -n "${service}: "
-  # 尝试访问服务的健康检查端点
-  response=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/internal/${service}/actuator/health" 2>/dev/null || echo "000")
+  # Java 服务的 actuator 暴露在 /internal/actuator/health，并要求 internal api key
+  response=$(curl -s -H "X-Internal-Api-Key: ${INTERNAL_API_KEY}" -o /dev/null -w "%{http_code}" "${BASE_URL}/internal/${service}/internal/actuator/health" 2>/dev/null || echo "000")
   if [ "$response" == "200" ]; then
     echo "✓ healthy"
   else

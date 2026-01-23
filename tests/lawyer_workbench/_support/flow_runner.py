@@ -170,6 +170,8 @@ class WorkbenchFlow:
     matter_id: str | None = None
     seen_cards: list[dict[str, Any]] = field(default_factory=list)
     seen_card_signatures: list[str] = field(default_factory=list)
+    seen_sse: list[dict[str, Any]] = field(default_factory=list)
+    last_sse: dict[str, Any] | None = None
 
     async def refresh(self) -> None:
         sess = unwrap_api_response(await self.client.get_session(self.session_id))
@@ -191,18 +193,30 @@ class WorkbenchFlow:
             # ConsultationChatService can auto-complete the kickoff card from the first user_query.
             facts = _resolve_override_value("profile.facts", self.overrides)
             facts_text = trim(facts) or "已补充案件事实，请继续推进。"
-            return await self.client.chat(
+            sse = await self.client.chat(
                 self.session_id,
                 facts_text,
                 attachments=list(self.uploaded_file_ids),
                 max_loops=6,
             )
+            if isinstance(sse, dict):
+                self.last_sse = sse
+                self.seen_sse.append(sse)
+            return sse
 
         user_response = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
-        return await self.client.resume(self.session_id, user_response, pending_card=card)
+        sse = await self.client.resume(self.session_id, user_response, pending_card=card)
+        if isinstance(sse, dict):
+            self.last_sse = sse
+            self.seen_sse.append(sse)
+        return sse
 
     async def nudge(self, text: str = _NUDGE_TEXT, *, attachments: list[str] | None = None, max_loops: int = 12) -> dict[str, Any]:
-        return await self.client.chat(self.session_id, text, attachments=attachments or [], max_loops=max_loops)
+        sse = await self.client.chat(self.session_id, text, attachments=attachments or [], max_loops=max_loops)
+        if isinstance(sse, dict):
+            self.last_sse = sse
+            self.seen_sse.append(sse)
+        return sse
 
     async def step(self, *, nudge_text: str = _NUDGE_TEXT) -> dict[str, Any] | None:
         """Process one pending card if exists; otherwise send a small nudge chat."""

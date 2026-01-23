@@ -10,6 +10,9 @@ from tests.lawyer_workbench._support.docx import assert_docx_contains, extract_d
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
 from tests.lawyer_workbench._support.memory import list_case_facts
+from tests.lawyer_workbench._support.profile import assert_service_type
+from tests.lawyer_workbench._support.sse import assert_visible_response
+from tests.lawyer_workbench._support.timeline import assert_timeline_has_output_keys, unwrap_timeline
 from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
 
 
@@ -45,8 +48,9 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
     )
 
     first_card = await wait_for_initial_card(flow, timeout_s=90.0)
-    assert str(first_card.get("skill_id") or "").strip(), first_card
-    await flow.resume_card(first_card)
+    assert str(first_card.get("skill_id") or "").strip() == "system:kickoff", first_card
+    kickoff_sse = await flow.resume_card(first_card)
+    assert_visible_response(kickoff_sse)
 
     async def _opinion_ready(f: WorkbenchFlow) -> bool:
         await f.refresh()
@@ -78,6 +82,15 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
     assert any(x in node_ids for x in {"skill:legal-opinion-intake", "legal-opinion-intake"})
     assert any(x in node_ids for x in {"skill:legal-opinion-analysis", "legal-opinion-analysis"})
     assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
+
+    prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
+    prof = unwrap_api_response(prof_resp)
+    assert isinstance(prof, dict), prof_resp
+    assert_service_type(prof, "legal_opinion")
+
+    tl_resp = await lawyer_client.get_matter_timeline(flow.matter_id, limit=50)
+    tl = unwrap_timeline(tl_resp)
+    assert_timeline_has_output_keys(tl, must_include=["legal_opinion"])
 
     dels_resp = await lawyer_client.list_deliverables(flow.matter_id, output_key="legal_opinion")
     dels = unwrap_api_response(dels_resp)

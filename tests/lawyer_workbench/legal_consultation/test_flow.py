@@ -7,6 +7,7 @@ import pytest
 
 from tests.lawyer_workbench._support.db import PgTarget, count
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
+from tests.lawyer_workbench._support.sse import assert_visible_response
 from tests.lawyer_workbench._support.utils import unwrap_api_response
 
 
@@ -36,7 +37,8 @@ async def test_legal_consultation_can_run_and_switch_to_litigation(lawyer_client
     flow = WorkbenchFlow(client=lawyer_client, session_id=session_id, uploaded_file_ids=[note_file_id])
 
     # Prime the consult loop with a single rich message (consultation playbook may not always interrupt with a card).
-    await flow.nudge(_consult_facts(), attachments=[note_file_id], max_loops=12)
+    sse = await flow.nudge(_consult_facts(), attachments=[note_file_id], max_loops=12)
+    assert_visible_response(sse)
 
     async def _consult_intake_executed(f: WorkbenchFlow) -> bool:
         await f.refresh()

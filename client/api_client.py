@@ -214,6 +214,27 @@ class ApiClient:
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
         return await self.get(f"/api/v1/consultations/sessions/{session_id}/pending_card")
 
+    async def get_session_canvas(self, session_id: str) -> dict[str, Any]:
+        return await self.get(f"/api/v1/consultations/sessions/{session_id}/canvas")
+
+    async def get_session_timeline(self, session_id: str, limit: int | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = int(limit)
+        return await self.get(f"/api/v1/consultations/sessions/{session_id}/timeline", params=params)
+
+    async def list_session_traces(self, session_id: str, limit: int | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = int(limit)
+        return await self.get(f"/api/v1/consultations/sessions/{session_id}/traces", params=params)
+
+    async def get_session_trace_detail(self, session_id: str, trace_id: str) -> dict[str, Any]:
+        tid = str(trace_id).strip()
+        if not tid:
+            raise ValueError("trace_id is required")
+        return await self.get(f"/api/v1/consultations/sessions/{session_id}/traces/{tid}")
+
     async def resume(
         self,
         session_id: str,
@@ -325,6 +346,15 @@ class ApiClient:
         if limit is not None:
             params["limit"] = int(limit)
         return await self.get(f"/api/v1/matters/{matter_id}/traces", params=params)
+
+    async def get_matter_timeline(self, matter_id: str, limit: int | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = int(limit)
+        return await self.get(f"/api/v1/matters/{matter_id}/timeline", params=params)
+
+    async def get_matter_phase_timeline(self, matter_id: str) -> dict[str, Any]:
+        return await self.get(f"/api/v1/matters/{matter_id}/phase-timeline")
 
     # ========== Knowledge ==========
 

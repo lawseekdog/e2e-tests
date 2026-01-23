@@ -10,6 +10,9 @@ from tests.lawyer_workbench._support.docx import assert_docx_contains, extract_d
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
 from tests.lawyer_workbench._support.memory import entity_keys, wait_for_entity_keys
+from tests.lawyer_workbench._support.profile import assert_has_party, assert_service_type
+from tests.lawyer_workbench._support.sse import assert_visible_response
+from tests.lawyer_workbench._support.timeline import assert_timeline_has_output_keys, unwrap_timeline
 from tests.lawyer_workbench._support.utils import unwrap_api_response
 
 
@@ -49,8 +52,9 @@ async def test_civil_appeal_appellee_generates_appeal_defense(lawyer_client):
     )
 
     first_card = await wait_for_initial_card(flow, timeout_s=90.0)
-    assert str(first_card.get("skill_id") or "").strip(), first_card
-    await flow.resume_card(first_card)
+    assert str(first_card.get("skill_id") or "").strip() == "system:kickoff", first_card
+    kickoff_sse = await flow.resume_card(first_card)
+    assert_visible_response(kickoff_sse)
 
     async def _appeal_defense_ready(f: WorkbenchFlow) -> bool:
         await f.refresh()
@@ -83,6 +87,17 @@ async def test_civil_appeal_appellee_generates_appeal_defense(lawyer_client):
     assert any(x in node_ids for x in {"skill:judgment-analysis", "judgment-analysis"})
     assert any(x in node_ids for x in {"skill:defense-planning", "defense-planning"})
     assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
+
+    prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
+    prof = unwrap_api_response(prof_resp)
+    assert isinstance(prof, dict), prof_resp
+    assert_service_type(prof, "civil_appeal_appellee")
+    assert_has_party(prof, role="plaintiff", name_contains="张三")
+    assert_has_party(prof, role="defendant", name_contains="李四")
+
+    tl_resp = await lawyer_client.get_matter_timeline(flow.matter_id, limit=50)
+    tl = unwrap_timeline(tl_resp)
+    assert_timeline_has_output_keys(tl, must_include=["appeal_defense"])
 
     dels_resp = await lawyer_client.list_deliverables(flow.matter_id, output_key="appeal_defense")
     dels = unwrap_api_response(dels_resp)

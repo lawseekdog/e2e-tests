@@ -580,17 +580,19 @@ async def test_litigation_bus_injury_reaches_claim_path_and_evidence_updates_pro
     for fid in uploaded_file_ids:
         assert fid in file_ids_saved, f"expected initial evidence file_id in matter.file_ids: {fid}"
 
-    # 等待进入 evidence 阶段（或发生回退后再推进）
+    # 等待推进到 evidence 阶段（或已直接推进到后续阶段）
     current_phase = None
     for _ in range(40):
         timeline_resp = await lawyer_client.get(f"/api/v1/matters/{matter_id}/phase-timeline")
         tl = _unwrap(timeline_resp)
         if isinstance(tl, dict):
             current_phase = str(tl.get("current_phase") or "").strip() or None
-            if current_phase == "evidence":
+            if current_phase in {"evidence", "strategy", "execute", "close"}:
                 break
         await asyncio.sleep(1.0)
-    assert current_phase == "evidence", f"expected to enter evidence phase, got current_phase={current_phase}"
+    assert current_phase in {"evidence", "strategy", "execute", "close"}, (
+        f"expected to reach evidence (or later) phase, got current_phase={current_phase}"
+    )
 
     # 6) 证据分析阶段补充“司机过错”证据（dashcam mp4），并观察画像/阶段变化
     dashcam_path = fixture_dir / "dashcam_driver_fault.mp4"

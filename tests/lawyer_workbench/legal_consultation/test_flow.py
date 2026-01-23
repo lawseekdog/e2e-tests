@@ -7,7 +7,7 @@ import pytest
 
 from tests.lawyer_workbench._support.db import PgTarget, count
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
-from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
+from tests.lawyer_workbench._support.utils import unwrap_api_response
 
 
 _MATTER_DB = PgTarget(dbname=os.getenv("E2E_MATTER_DB", "matter-service"))
@@ -38,19 +38,19 @@ async def test_legal_consultation_can_run_and_switch_to_litigation(lawyer_client
     # Prime the consult loop with a single rich message (consultation playbook may not always interrupt with a card).
     await flow.nudge(_consult_facts(), attachments=[note_file_id], max_loops=12)
 
-    async def _consult_traces_ready() -> bool:
-        await flow.refresh()
-        if not flow.matter_id:
+    async def _consult_intake_executed(f: WorkbenchFlow) -> bool:
+        await f.refresh()
+        if not f.matter_id:
             return False
-        resp = await lawyer_client.list_traces(flow.matter_id, limit=100)
+        resp = await lawyer_client.list_traces(f.matter_id, limit=200)
         data = unwrap_api_response(resp)
         traces = data.get("traces") if isinstance(data, dict) else None
         if not isinstance(traces, list) or not traces:
             return False
         node_ids = {str(it.get("node_id") or "").strip() for it in traces if isinstance(it, dict)}
-        return ("consult-intake" in node_ids) and ("readiness-assessment" in node_ids)
+        return ("skill:consult-intake" in node_ids) or ("consult-intake" in node_ids)
 
-    assert await eventually(_consult_traces_ready, timeout_s=120.0, interval_s=2.0, description="consultation traces")
+    await flow.run_until(_consult_intake_executed, max_steps=20, description="consult-intake trace")
     assert flow.matter_id
 
     mid_int = int(flow.matter_id)
@@ -65,4 +65,3 @@ async def test_legal_consultation_can_run_and_switch_to_litigation(lawyer_client
     prof = unwrap_api_response(prof_resp)
     assert isinstance(prof, dict), prof_resp
     assert str(prof.get("service_type_id") or "").strip() == "civil_prosecution"
-

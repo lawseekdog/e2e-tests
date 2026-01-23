@@ -126,8 +126,12 @@ async def test_memory_extraction_labor_case_extracts_evidence_and_wage_signals(c
     assert "evidence:考勤记录" in keys
 
     facts = [it for it in (mem.get("facts") or []) if isinstance(it, dict)]
-    has_salary = any(("15000" in str(it.get("content") or "") and (str(it.get("entity_key") or "").startswith("amount:"))) for it in facts)
-    has_duration = any(("3" in str(it.get("content") or "") and (str(it.get("entity_key") or "").startswith("duration:"))) for it in facts)
+    has_salary = any(
+        ("15000" in str(it.get("content") or "") and (str(it.get("entity_key") or "").startswith("amount:"))) for it in facts
+    )
+    has_duration = any(
+        ("3" in str(it.get("content") or "") and (str(it.get("entity_key") or "").startswith("duration:"))) for it in facts
+    )
     assert has_salary or has_duration
 
     recalled = await _recall_from_memory_service(user_id=user_id, case_id=matter_id, query="考勤记录", include_global=False)
@@ -189,3 +193,4 @@ async def test_memory_extraction_preferences_are_global_scope(client):
     pref = [it for it in facts if (it.get("category") == "preference")]
     assert pref, mem  # 如果偏好抽不到，后续召回会明显变差
     assert all((it.get("scope") == "global") for it in pref)
+

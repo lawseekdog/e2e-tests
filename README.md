@@ -13,18 +13,28 @@ e2e-tests/
 ├── client/                  # API 客户端
 │   └── api_client.py
 ├── fixtures/                # 测试数据
-│   ├── sample_contract.pdf
-│   └── sample_iou.pdf
+│   ├── sample_iou.pdf
+│   ├── sample_transfer_record.txt
+│   └── sample_chat_record.txt
 ├── tests/                   # 测试用例
 │   ├── test_auth.py
-│   ├── test_consultation.py
-│   ├── test_matter.py
-│   ├── test_litigation_flow.py
-│   └── test_knowledge.py
+│   ├── infra/               # 跨服务基础能力回归（memory/knowledge/...）
+│   │   └── memory/
+│   │       └── test_memory_extraction.py
+│   └── lawyer_workbench/    # 律师工作台：按 service_type 分目录的端到端用例
+│       ├── _support/        # 仅工具/断言（不应包含 test_*.py）
+│       ├── legal_consultation/
+│       ├── civil_prosecution/
+│       ├── civil_defense/
+│       ├── civil_appeal_appellant/
+│       ├── civil_appeal_appellee/
+│       ├── legal_opinion/
+│       └── contract_review/
 └── scripts/                 # 运维脚本
     ├── health_check.sh
     ├── smoke_test.py
-    └── load_test.py
+    ├── run_litigation_flow_debug.py
+    └── run_legal_opinion_flow_debug.py
 ```
 
 ## 环境准备
@@ -42,6 +52,13 @@ cp .env.example .env
 # 编辑 .env 配置测试环境
 ```
 
+关键变量（本套 E2E 不 mock LLM）：
+
+- `BASE_URL`: gateway 地址（默认 `http://localhost:18001`）
+- `AI_PLATFORM_URL`: ai-engine 地址（默认 `http://localhost:18084`，用于 memory-extraction infra 测试）
+- `INTERNAL_API_KEY`: 访问 `/internal/*` 路由所需（默认 `test_internal_key`，与 docker-compose 对齐）
+- `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY`: 真实 LLM Key（由你的 docker-compose / .env 决定）
+
 ## 运行测试
 
 ### 运行所有测试
@@ -56,8 +73,8 @@ pytest tests/ -v
 # 认证测试
 pytest tests/test_auth.py -v
 
-# 诉讼流程测试
-pytest tests/test_litigation_flow.py -v
+# 律师工作台：民事起诉（原告）
+pytest tests/lawyer_workbench/civil_prosecution/test_flow.py -v
 
 # 带标记的测试
 pytest tests/ -v -m e2e
@@ -79,32 +96,14 @@ pytest tests/ --html=report.html --self-contained-html
 - Token 刷新
 - 获取用户信息
 
-### 2. 咨询测试 (`test_consultation.py`)
+### 2. 律师工作台（按服务类型分目录）
 
-- 创建咨询会话
-- 发送消息
-- 升级为事项
-- 卡片交互
+- 每个 `service_type_id` 一个目录：对话/卡片推进 → 落库（matter/tasks/deliverables）→ 交付物（DOCX）→ traces/memory/knowledge 断言
+- 证据材料放在各目录的 `evidence/` 下（按用例准备）
 
-### 3. 事项测试 (`test_matter.py`)
+### 3. Memory Extraction 回归（`tests/infra/memory/test_memory_extraction.py`）
 
-- 创建事项
-- 更新事项
-- 待办任务完成
-- 阶段流转
-
-### 4. 诉讼流程测试 (`test_litigation_flow.py`)
-
-- 收案流程
-- 案由确认
-- 证据分析
-- 策略规划
-
-### 5. 知识库测试 (`test_knowledge.py`)
-
-- 法规检索
-- 案例检索
-- 要素匹配
+- 覆盖：抽取 → 写入 → recall 召回；包含 skip/PII 拦截/偏好全局化等关键回归点
 
 ## 脚本工具
 
@@ -118,12 +117,6 @@ pytest tests/ --html=report.html --self-contained-html
 
 ```bash
 python scripts/smoke_test.py
-```
-
-### 负载测试
-
-```bash
-python scripts/load_test.py --users 10 --requests 100
 ```
 
 ## CI/CD 集成

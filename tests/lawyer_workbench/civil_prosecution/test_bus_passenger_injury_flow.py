@@ -8,7 +8,7 @@ import pytest
 from tests.lawyer_workbench._support.memory import assert_fact_content_contains, wait_for_entity_keys
 from tests.lawyer_workbench._support.profile import assert_has_party, assert_service_type
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
-from tests.lawyer_workbench._support.sse import assert_visible_response
+from tests.lawyer_workbench._support.sse import assert_has_end, assert_has_progress, assert_no_error, assert_visible_response
 from tests.lawyer_workbench._support.utils import unwrap_api_response
 
 
@@ -78,6 +78,8 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         overrides={
             "profile.facts": _case_facts(),
             "profile.claims": "请求判令被告赔偿医疗费、误工费、护理费、交通费等损失并承担诉讼费。",
+            # Keep E2E fast/stable: generate only a single deliverable at execute stage.
+            "profile.decisions.selected_documents": ["litigation_strategy_report"],
         },
     )
 
@@ -132,7 +134,11 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
     assert "证据支撑度" in desc, f"missing evidence_support hint in option description: {rec_opt}"
     assert "证据支撑度 0%" not in desc, f"unexpected evidence_support=0 in option description: {rec_opt}"
     cause_sse = await flow.resume_card(cause_card)
-    assert_visible_response(cause_sse)
+    # Submitting the cause card may trigger a long evidence pipeline; allow an empty assistant bubble
+    # as long as the stream is alive (or ended partially) and there are no non-partial errors.
+    assert_no_error(cause_sse)
+    assert_has_progress(cause_sse)
+    assert_has_end(cause_sse)
 
     # Upload a dashcam video (mp4) to simulate "driver fault" evidence.
     mp4_path = tmp_path / "dashcam_driver_fault.mp4"
@@ -170,3 +176,44 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         timeout_s=float(os.getenv("E2E_MEMORY_TIMEOUT_S", "120") or 120),
     )
     assert_fact_content_contains(facts, entity_key="party:plaintiff:primary", must_include=["张三E2E_BUS01"])
+
+    # Continue through evidence -> strategy -> work_plan -> execute.
+    async def _strategy_pending(f: WorkbenchFlow) -> bool:
+        card = await f.get_pending_card()
+        return bool(card) and str(card.get("skill_id") or "").strip() == "dispute-strategy-planning"
+
+    await flow.run_until(_strategy_pending, max_steps=80, description="dispute-strategy-planning pending card")
+    strategy_card = await flow.get_pending_card()
+    assert strategy_card and str(strategy_card.get("skill_id") or "").strip() == "dispute-strategy-planning", strategy_card
+    strategy_sse = await flow.resume_card(strategy_card)
+    assert_visible_response(strategy_sse)
+
+    async def _work_plan_pending(f: WorkbenchFlow) -> bool:
+        card = await f.get_pending_card()
+        return bool(card) and str(card.get("skill_id") or "").strip() == "work-plan"
+
+    await flow.run_until(_work_plan_pending, max_steps=60, description="work-plan pending card")
+    wp_card = await flow.get_pending_card()
+    assert wp_card and str(wp_card.get("skill_id") or "").strip() == "work-plan", wp_card
+    wp_sse = await flow.resume_card(wp_card)
+    assert_visible_response(wp_sse)
+
+    async def _documents_pending(f: WorkbenchFlow) -> bool:
+        card = await f.get_pending_card()
+        return bool(card) and str(card.get("skill_id") or "").strip() == "documents"
+
+    await flow.run_until(_documents_pending, max_steps=40, description="documents selection pending card")
+    doc_card = await flow.get_pending_card()
+    assert doc_card and str(doc_card.get("skill_id") or "").strip() == "documents", doc_card
+    doc_sse = await flow.resume_card(doc_card)
+    assert_visible_response(doc_sse)
+
+    async def _strategy_report_ready(f: WorkbenchFlow) -> bool:
+        await f.refresh()
+        if not f.matter_id:
+            return False
+        resp = await f.client.list_deliverables(f.matter_id, output_key="litigation_strategy_report")
+        data = unwrap_api_response(resp)
+        return isinstance(data, dict) and bool(data.get("deliverables"))
+
+    await flow.run_until(_strategy_report_ready, max_steps=80, description="litigation_strategy_report deliverable")

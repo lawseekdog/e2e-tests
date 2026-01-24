@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .utils import trim, unwrap_api_response
+from .sse import assert_has_user_message
 
 _NUDGE_TEXT = "继续"
 
@@ -207,6 +208,7 @@ class WorkbenchFlow:
 
         user_response = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
         sse = await self.client.resume(self.session_id, user_response, pending_card=card)
+        assert_has_user_message(sse)
         if isinstance(sse, dict):
             self.last_sse = sse
             self.seen_sse.append(sse)

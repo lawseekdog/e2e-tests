@@ -162,3 +162,25 @@ def assert_visible_response(sse: dict[str, Any], *, output_must_contain: Iterabl
                 missing.append(s)
         if missing:
             raise AssertionError(f"SSE output missing fragments={missing}. Output sample:\n{out[:1500]}")
+
+
+def assert_has_user_message(sse: dict[str, Any], *, content_must_contain: Iterable[str] | None = None) -> None:
+    """Resume streams should echo a readable user message so the UI doesn't look like 'nothing was sent'."""
+    msgs = events_of_type(sse, "user_message")
+    if not msgs:
+        raise AssertionError(f"SSE missing user_message. Event types={event_types(sse)}")
+    last = msgs[-1] if msgs else {}
+    content = str((last or {}).get("content") or "").strip()
+    if not content:
+        raise AssertionError(f"SSE user_message missing content: {last}")
+
+    if content_must_contain:
+        missing: list[str] = []
+        for x in content_must_contain:
+            s = str(x or "").strip()
+            if not s:
+                continue
+            if s not in content:
+                missing.append(s)
+        if missing:
+            raise AssertionError(f"user_message content missing fragments={missing}. Content sample:\n{content[:1500]}")

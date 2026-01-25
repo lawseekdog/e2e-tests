@@ -85,7 +85,9 @@ class ApiClient:
         url = f"{self.base_url}{path}"
         headers = dict(self.headers)
         headers["Accept"] = "text/event-stream"
-        max_attempts = 5
+        # Local docker: Spring services may take a few minutes to restart (Flyway/JIT warmup),
+        # and the gateway returns 502/503/504 during that window. Keep SSE retries tolerant.
+        max_attempts = int(os.getenv("E2E_HTTP_SSE_RETRIES", "60") or 60)
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             events: list[dict[str, Any]] = []

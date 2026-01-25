@@ -67,7 +67,8 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         assert fid, f"upload failed: {up}"
         uploaded_file_ids.append(fid)
 
-    sess = await lawyer_client.create_session(service_type_id="civil_prosecution")
+    # Service type ids come from platform-service seeds; in current stack this is "civil_first_instance" (民事诉讼一审).
+    sess = await lawyer_client.create_session(service_type_id="civil_first_instance")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 
@@ -79,7 +80,7 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
             "profile.facts": _case_facts(),
             "profile.claims": "请求判令被告赔偿医疗费、误工费、护理费、交通费等损失并承担诉讼费。",
             # Keep E2E fast/stable: generate only a single deliverable at execute stage.
-            "profile.decisions.selected_documents": ["litigation_strategy_report"],
+            "profile.decisions.selected_documents": ["civil_complaint"],
         },
     )
 
@@ -103,7 +104,7 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
     # Validate cause recommendation is produced and evidence score is non-zero (no 'all zero' regression).
     prof = unwrap_api_response(await lawyer_client.get_workflow_profile(flow.matter_id))
     assert isinstance(prof, dict), prof
-    assert_service_type(prof, "civil_prosecution")
+    assert_service_type(prof, "civil_first_instance")
     assert_has_party(prof, role="plaintiff", name_contains="张三E2E_BUS01")
     assert_has_party(prof, role="defendant", name_contains="北京某公交客运有限公司E2E")
 
@@ -188,6 +189,25 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
     strategy_sse = await flow.resume_card(strategy_card)
     assert_visible_response(strategy_sse)
 
+    async def _strategy_report_generated(f: WorkbenchFlow) -> bool:
+        await f.refresh()
+        if not f.matter_id:
+            return False
+        resp = await f.client.list_traces(f.matter_id, limit=120)
+        data = unwrap_api_response(resp)
+        if not isinstance(data, dict):
+            return False
+        traces = data.get("traces")
+        traces = traces if isinstance(traces, list) else []
+        for t in traces:
+            if not isinstance(t, dict):
+                continue
+            if str(t.get("node_id") or "").strip() == "skill:dispute-strategy-report":
+                return True
+        return False
+
+    await flow.run_until(_strategy_report_generated, max_steps=40, description="strategy_report generated after confirmation")
+
     async def _work_plan_pending(f: WorkbenchFlow) -> bool:
         card = await f.get_pending_card()
         return bool(card) and str(card.get("skill_id") or "").strip() == "work-plan"
@@ -212,8 +232,8 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         await f.refresh()
         if not f.matter_id:
             return False
-        resp = await f.client.list_deliverables(f.matter_id, output_key="litigation_strategy_report")
+        resp = await f.client.list_deliverables(f.matter_id, output_key="civil_complaint")
         data = unwrap_api_response(resp)
         return isinstance(data, dict) and bool(data.get("deliverables"))
 
-    await flow.run_until(_strategy_report_ready, max_steps=80, description="litigation_strategy_report deliverable")
+    await flow.run_until(_strategy_report_ready, max_steps=80, description="civil_complaint deliverable")

@@ -59,7 +59,8 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
         assert fid, f"upload failed: {up}"
         uploaded_file_ids.append(fid)
 
-    sess = await lawyer_client.create_session(service_type_id="civil_prosecution")
+    # Service type ids come from platform-service seeds; in current stack this is "civil_first_instance" (民事诉讼一审).
+    sess = await lawyer_client.create_session(service_type_id="civil_first_instance")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 
@@ -125,7 +126,7 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
     prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
     prof = unwrap_api_response(prof_resp)
     assert isinstance(prof, dict), prof_resp
-    assert_service_type(prof, "civil_prosecution")
+    assert_service_type(prof, "civil_first_instance")
     assert_has_party(prof, role="plaintiff", name_contains="张三")
     assert_has_party(prof, role="defendant", name_contains="李四")
 
@@ -169,7 +170,7 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
     assert_fact_content_contains(facts, entity_key="party:defendant:primary", must_include=["李四E2E01"])
 
     # ========== Knowledge ingest/search (precision baseline, no mocks) ==========
-    kb_id = "e2e_kb_civil_prosecution"
+    kb_id = "e2e_kb_civil_first_instance"
     unique = f"E2E_UNIQUE_CIVIL_PROS_{flow.matter_id}"
     await ingest_doc(
         lawyer_client,
@@ -177,7 +178,7 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
         file_id=uploaded_file_ids[0],
         content=f"{unique}\n{_case_facts()}",
         doc_type="case",
-        metadata={"e2e": True, "service_type_id": "civil_prosecution", "matter_id": flow.matter_id},
+        metadata={"e2e": True, "service_type_id": "civil_first_instance", "matter_id": flow.matter_id},
         overwrite=True,
     )
     await wait_for_search_hit(

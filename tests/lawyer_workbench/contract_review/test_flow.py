@@ -23,7 +23,7 @@ from tests.lawyer_workbench._support.phase_timeline import (
 )
 from tests.lawyer_workbench._support.profile import assert_service_type
 from tests.lawyer_workbench._support.sse import assert_task_lifecycle, assert_visible_response
-from tests.lawyer_workbench._support.timeline import produced_output_keys, unwrap_timeline
+from tests.lawyer_workbench._support.timeline import memory_extraction_events, produced_output_keys, round_contents, unwrap_timeline
 from tests.lawyer_workbench._support.traces import extract_context_manifest, find_latest_trace
 from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
 
@@ -128,6 +128,12 @@ async def test_contract_review_generates_review_report(lawyer_client):
     tl = unwrap_timeline(tl_resp)
     have = produced_output_keys(tl)
     assert have.intersection({"contract_review_report", "modification_suggestion"}), sorted(have)
+    contents = round_contents(tl)
+    assert contents, tl_resp
+    for c in contents:
+        mt = c.get("memory_traces")
+        assert isinstance(mt, dict) and ("recall" in mt) and ("extraction" in mt), mt
+    assert any(int(e.get("extracted_count") or 0) > 0 for e in memory_extraction_events(tl)), tl
 
     dels_resp = await lawyer_client.list_deliverables(flow.matter_id)
     dels = unwrap_api_response(dels_resp)

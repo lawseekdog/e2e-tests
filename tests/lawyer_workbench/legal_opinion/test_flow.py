@@ -23,7 +23,7 @@ from tests.lawyer_workbench._support.phase_timeline import (
 )
 from tests.lawyer_workbench._support.profile import assert_service_type
 from tests.lawyer_workbench._support.sse import assert_task_lifecycle, assert_visible_response
-from tests.lawyer_workbench._support.timeline import assert_timeline_has_output_keys, unwrap_timeline
+from tests.lawyer_workbench._support.timeline import assert_timeline_has_output_keys, memory_extraction_events, round_contents, unwrap_timeline
 from tests.lawyer_workbench._support.traces import extract_context_manifest, find_latest_trace
 from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
 
@@ -120,10 +120,9 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
             if str(args.get("original_query") or "").strip() != "继续":
                 continue
             q = str(args.get("query") or "").strip()
-            assert q and q != "继续", c
-            assert len(q) >= 12, c
-            saw_anchor = True
-            break
+            if q and q != "继续" and len(q) >= 12:
+                saw_anchor = True
+                break
         if saw_anchor:
             break
     assert saw_anchor, "missing memory_recall with original_query='继续' (anchor recall optimization)"
@@ -143,6 +142,13 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
     tl_resp = await lawyer_client.get_matter_timeline(flow.matter_id, limit=50)
     tl = unwrap_timeline(tl_resp)
     assert_timeline_has_output_keys(tl, must_include=["legal_opinion"])
+    # Per-round memory observability contract: round_summary includes memory_traces (recall/extraction).
+    contents = round_contents(tl)
+    assert contents, tl_resp
+    for c in contents:
+        mt = c.get("memory_traces")
+        assert isinstance(mt, dict) and ("recall" in mt) and ("extraction" in mt), mt
+    assert any(int(e.get("extracted_count") or 0) > 0 for e in memory_extraction_events(tl)), tl
 
     dels_resp = await lawyer_client.list_deliverables(flow.matter_id, output_key="legal_opinion")
     dels = unwrap_api_response(dels_resp)

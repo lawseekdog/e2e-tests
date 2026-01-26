@@ -87,7 +87,9 @@ class ApiClient:
         headers["Accept"] = "text/event-stream"
         # Local docker: Spring services may take a few minutes to restart (Flyway/JIT warmup),
         # and the gateway returns 502/503/504 during that window. Keep SSE retries tolerant.
-        max_attempts = int(os.getenv("E2E_HTTP_SSE_RETRIES", "60") or 60)
+        # Long-lived workflows + local docker restarts can keep nginx returning 502/503/504 for several minutes.
+        # Keep this tolerant by default; override via env in CI if needed.
+        max_attempts = int(os.getenv("E2E_HTTP_SSE_RETRIES", "180") or 180)
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             events: list[dict[str, Any]] = []

@@ -129,7 +129,9 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
             break
     assert isinstance(rec_opt, dict), f"missing recommended option: {opts}"
     recommended_code = str(rec_opt.get("value") or "").strip()
-    assert recommended_code in {"transport_contract", "personal_injury_tort"}, rec_opt
+    # Rich "公交乘客摔伤 + 医疗证据" 场景下，应优先推荐人身侵权（生命权、身体权、健康权纠纷），
+    # 运输合同作为相邻备选保留即可，不应长期占据 Top1。
+    assert recommended_code == "personal_injury_tort", rec_opt
     # Ensure the option description includes a non-zero evidence support signal (tool-derived, not LLM-made-up).
     desc = str(rec_opt.get("description") or "").strip()
     assert "证据支撑度" in desc, f"missing evidence_support hint in option description: {rec_opt}"

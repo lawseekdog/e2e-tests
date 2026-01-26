@@ -33,7 +33,11 @@ async def test_memory_extraction_is_observable_per_round(lawyer_client):
     assert_task_lifecycle(kickoff_sse)
 
     # Wait until the matter is created so extract-node can write case-scoped memories.
-    await flow.run_until(lambda f: bool(f.matter_id), max_steps=20, description="matter_id assigned")
+    async def _matter_ready():
+        await flow.refresh()
+        return flow.matter_id or None
+
+    await eventually(_matter_ready, timeout_s=120.0, interval_s=2.0, description="matter_id assigned")
     assert flow.matter_id
 
     # Add a second, clearly-new fact so memory-extraction should have something to write this round.

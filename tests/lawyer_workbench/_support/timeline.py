@@ -73,6 +73,19 @@ def retrieval_snippets(timeline: dict[str, Any]) -> list[str]:
     return out
 
 
+def memory_extraction_events(timeline: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract per-round memory_extraction traces from round_summary (when present)."""
+    out: list[dict[str, Any]] = []
+    for c in round_contents(timeline):
+        mt = c.get("memory_traces")
+        if not isinstance(mt, dict):
+            continue
+        ext = mt.get("extraction")
+        if isinstance(ext, dict) and ext:
+            out.append(ext)
+    return out
+
+
 def assert_timeline_has_output_keys(timeline: dict[str, Any], *, must_include: Iterable[str]) -> None:
     have = produced_output_keys(timeline)
     want = {str(x).strip() for x in must_include if str(x).strip()}
@@ -89,4 +102,3 @@ def assert_timeline_retrieval_includes(timeline: dict[str, Any], *, snippet_cont
         if needle in snip:
             return
     raise AssertionError(f"timeline retrieval traces missing snippet fragment={needle!r}. Snippets sample={retrieval_snippets(timeline)[:5]}")
-

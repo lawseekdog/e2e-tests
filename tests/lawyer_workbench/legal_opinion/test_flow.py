@@ -24,6 +24,7 @@ from tests.lawyer_workbench._support.phase_timeline import (
 from tests.lawyer_workbench._support.profile import assert_service_type
 from tests.lawyer_workbench._support.sse import assert_task_lifecycle, assert_visible_response
 from tests.lawyer_workbench._support.timeline import assert_timeline_has_output_keys, unwrap_timeline
+from tests.lawyer_workbench._support.traces import extract_context_manifest, find_latest_trace
 from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
 
 
@@ -97,6 +98,35 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
     assert any(x in node_ids for x in {"skill:legal-opinion-intake", "legal-opinion-intake"})
     assert any(x in node_ids for x in {"skill:legal-opinion-analysis", "legal-opinion-analysis"})
     assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
+
+    # Context manifest observability: document-generation should see some recalled memory facts.
+    doc_gen_trace = find_latest_trace(traces, node_id="skill:document-generation") or find_latest_trace(traces, node_id="document-generation")
+    assert isinstance(doc_gen_trace, dict), traces_resp
+    manifest = extract_context_manifest(doc_gen_trace) or {}
+    mem = manifest.get("memory") if isinstance(manifest.get("memory"), dict) else {}
+    assert int(mem.get("limit") or 0) > 0, manifest
+    assert str(mem.get("source") or "") in {"facts", "context_text", "none"}, manifest
+    assert int(mem.get("selected_count") or 0) > 0, manifest
+
+    # Memory recall should rewrite short nudges ("继续") into an anchor query for better recall.
+    saw_anchor = False
+    for t in traces:
+        if not isinstance(t, dict) or str(t.get("node_id") or "").strip() != "memory":
+            continue
+        for c in (t.get("tool_calls") or []):
+            if not isinstance(c, dict) or str(c.get("name") or "").strip() != "memory_recall":
+                continue
+            args = c.get("args") if isinstance(c.get("args"), dict) else {}
+            if str(args.get("original_query") or "").strip() != "继续":
+                continue
+            q = str(args.get("query") or "").strip()
+            assert q and q != "继续", c
+            assert len(q) >= 12, c
+            saw_anchor = True
+            break
+        if saw_anchor:
+            break
+    assert saw_anchor, "missing memory_recall with original_query='继续' (anchor recall optimization)"
 
     prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
     prof = unwrap_api_response(prof_resp)

@@ -24,6 +24,7 @@ from tests.lawyer_workbench._support.phase_timeline import (
 from tests.lawyer_workbench._support.profile import assert_service_type
 from tests.lawyer_workbench._support.sse import assert_task_lifecycle, assert_visible_response
 from tests.lawyer_workbench._support.timeline import produced_output_keys, unwrap_timeline
+from tests.lawyer_workbench._support.traces import extract_context_manifest, find_latest_trace
 from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
 
 
@@ -98,6 +99,14 @@ async def test_contract_review_generates_review_report(lawyer_client):
     assert any(x in node_ids for x in {"skill:contract-intake", "contract-intake"})
     assert any(x in node_ids for x in {"skill:contract-review", "contract-review"})
     assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
+
+    # Context manifest observability: document-generation should see some recalled memory facts.
+    doc_gen_trace = find_latest_trace(traces, node_id="skill:document-generation") or find_latest_trace(traces, node_id="document-generation")
+    assert isinstance(doc_gen_trace, dict), traces_resp
+    manifest = extract_context_manifest(doc_gen_trace) or {}
+    mem = manifest.get("memory") if isinstance(manifest.get("memory"), dict) else {}
+    assert int(mem.get("limit") or 0) > 0, manifest
+    assert int(mem.get("selected_count") or 0) > 0, manifest
 
     prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
     prof = unwrap_api_response(prof_resp)

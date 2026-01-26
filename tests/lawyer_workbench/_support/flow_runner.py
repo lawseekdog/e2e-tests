@@ -121,12 +121,21 @@ def auto_answer_card(
                     picked = _pick_recommended_or_first(options)
                 value = [picked] if picked is not None else []
         elif it in {"file_ids", "file_id"} or fk == "attachment_file_ids":
-            if has_default:
-                value = default
-            elif uploaded_file_ids and (fk == "attachment_file_ids" or required or skill_id == "system:kickoff"):
-                value = uploaded_file_ids
+            # Card validation in ai-engine requires attachment_file_ids to always be an array.
+            if fk == "attachment_file_ids":
+                if has_default:
+                    value = default
+                elif uploaded_file_ids:
+                    value = uploaded_file_ids
+                else:
+                    value = []
             else:
-                value = [] if required else None
+                if has_default:
+                    value = default
+                elif uploaded_file_ids and (required or skill_id == "system:kickoff"):
+                    value = uploaded_file_ids
+                else:
+                    value = [] if required else None
         else:
             # Minimal safe defaults for common workflow profile slots.
             if fk == "profile.summary":

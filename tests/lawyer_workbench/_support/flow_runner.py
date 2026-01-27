@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -16,6 +17,12 @@ from .utils import trim, unwrap_api_response
 from .sse import assert_has_user_message
 
 _NUDGE_TEXT = "继续"
+_DEBUG = str(os.getenv("E2E_FLOW_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _debug(msg: str) -> None:
+    if _DEBUG:
+        print(msg, flush=True)
 
 
 def extract_last_card_from_sse(sse: dict[str, Any]) -> dict[str, Any] | None:
@@ -240,7 +247,9 @@ class WorkbenchFlow:
         await self.refresh()
         card = await self.get_pending_card()
         if card:
+            _debug(f"[flow] resume card skill_id={card.get('skill_id')} task_key={card.get('task_key')}")
             return await self.resume_card(card)
+        _debug(f"[flow] nudge {nudge_text!r}")
         return await self.nudge(nudge_text, attachments=[], max_loops=12)
 
     async def run_until(
@@ -253,12 +262,14 @@ class WorkbenchFlow:
         description: str = "target condition",
     ) -> None:
         """Advance the workflow until predicate(flow) is truthy (sync/async)."""
-        for _ in range(max_steps):
+        for i in range(1, max_steps + 1):
             ok = predicate(self)
             if asyncio.iscoroutine(ok):
                 ok = await ok
             if ok:
+                _debug(f"[flow] reached {description} at step {i} (session_id={self.session_id}, matter_id={self.matter_id})")
                 return
+            _debug(f"[flow] step {i}/{max_steps} waiting for {description} (session_id={self.session_id}, matter_id={self.matter_id})")
             await self.step(nudge_text=nudge_text)
             if step_sleep_s:
                 await asyncio.sleep(step_sleep_s)

@@ -26,6 +26,44 @@ def _case_facts() -> str:
     )
 
 
+def _assert_strategy_report_tables_filled(docx_bytes: bytes) -> None:
+    """Strategy report must fill stage plan + pricing tables (no blank rows)."""
+    from io import BytesIO
+
+    from docx import Document
+
+    doc = Document(BytesIO(docx_bytes))
+
+    found_plan = False
+    found_pricing = False
+
+    for t in doc.tables or []:
+        if not t.rows:
+            continue
+        header = [c.text.strip() for c in t.rows[0].cells]
+
+        # Stage plan table (standard base: 4 phases).
+        if any("阶段" in x for x in header) and any("时间" in x for x in header) and any("核心任务" in x for x in header):
+            found_plan = True
+            for ridx, row in enumerate(t.rows[1:5], start=1):
+                cells = [c.text.strip() for c in row.cells]
+                if len(cells) < 3 or not cells[0] or not cells[1] or not cells[2]:
+                    raise AssertionError(f"stage plan table has blank cell at row {ridx}: {cells}")
+            continue
+
+        # Pricing table (standard base: 2 fee rows).
+        if any("收费类型" in x for x in header) and any("收费金额" in x for x in header) and any("支付方式" in x for x in header):
+            found_pricing = True
+            for ridx, row in enumerate(t.rows[1:3], start=1):
+                cells = [c.text.strip() for c in row.cells]
+                if len(cells) < 2 or not cells[0] or not cells[1]:
+                    raise AssertionError(f"pricing table has blank type/amount at row {ridx}: {cells}")
+            continue
+
+    assert found_plan, "stage plan table not found in strategy report docx"
+    assert found_pricing, "pricing table not found in strategy report docx"
+
+
 @pytest.mark.e2e
 @pytest.mark.slow
 async def test_civil_prosecution_private_lending_generates_multiple_documents(lawyer_client):
@@ -110,8 +148,8 @@ async def test_civil_prosecution_private_lending_generates_multiple_documents(la
             assert any(x in text for x in ["100000", "100,000", "10万元", "10万"]), text[:2000]
         elif out_key == "litigation_strategy_report":
             assert any(x in text for x in ["诉讼策略报告", "策略"]), text[:2000]
+            _assert_strategy_report_tables_filled(docx_bytes)
         elif out_key == "evidence_list":
             assert any(x in text for x in ["证据目录", "证据"]), text[:2000]
         elif out_key == "preservation_application":
             assert any(x in text for x in ["保全", "财产保全申请书"]), text[:2000]
-

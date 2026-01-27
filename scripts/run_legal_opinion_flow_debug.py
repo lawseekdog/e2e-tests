@@ -175,9 +175,12 @@ async def main():
                 print("  resume", round(time.time() - t, 2), "s", flush=True)
                 err = next((e for e in (resp.get("events") or []) if isinstance(e, dict) and e.get("event") == "error"), None)
                 if err:
-                    print("  resume error", err.get("data"), flush=True)
-                    # Stop early: errors are usually deterministic (validation/config) and repeated retries just spam.
-                    break
+                    data = err.get("data") if isinstance(err.get("data"), dict) else {"error": err.get("data")}
+                    print("  resume error", data, flush=True)
+                    # Partial stream teardown (proxy/connection) is non-fatal; continue by polling state.
+                    if data.get("partial") is not True:
+                        # Stop early: non-partial errors are usually deterministic (validation/config).
+                        break
             else:
                 print("iter", i, "no card -> continue", flush=True)
                 t = time.time()
@@ -185,8 +188,10 @@ async def main():
                 print("  chat", round(time.time() - t, 2), "s", flush=True)
                 err = next((e for e in (resp.get("events") or []) if isinstance(e, dict) and e.get("event") == "error"), None)
                 if err:
-                    print("  chat error", err.get("data"), flush=True)
-                    break
+                    data = err.get("data") if isinstance(err.get("data"), dict) else {"error": err.get("data")}
+                    print("  chat error", data, flush=True)
+                    if data.get("partial") is not True:
+                        break
 
         print("matter_id", matter_id, flush=True)
 

@@ -270,11 +270,27 @@ class ApiClient:
         headers = dict(self.headers)
         headers.pop("Content-Type", None)  # Let httpx set multipart boundary.
 
-        with path.open("rb") as f:
-            files = {"file": (path.name, f)}
-            resp = await self._client.post(url, headers=headers, files=files)
-            resp.raise_for_status()
-            return resp.json()
+        max_attempts = int(os.getenv("E2E_HTTP_UPLOAD_RETRIES", "60") or 60)
+        transient = {500, 502, 503, 504}
+        last_exc: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with path.open("rb") as f:
+                    files = {"file": (path.name, f)}
+                    resp = await self._client.post(url, headers=headers, files=files)
+                if resp.status_code in transient and attempt < max_attempts:
+                    await asyncio.sleep(min(4.0, 0.5 * attempt))
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                last_exc = e
+                if attempt >= max_attempts:
+                    raise
+                await asyncio.sleep(min(4.0, 0.5 * attempt))
+
+        raise last_exc if last_exc else RuntimeError("upload session attachment failed")
 
     async def get_session_canvas(self, session_id: str) -> dict[str, Any]:
         return await self.get(f"/api/v1/consultations/sessions/{session_id}/canvas")
@@ -347,11 +363,27 @@ class ApiClient:
         if self.user_id:
             params["user_id"] = int(self.user_id)
 
-        with path.open("rb") as f:
-            files = {"file": (path.name, f)}
-            resp = await self._client.post(url, headers=headers, params=params, files=files)
-            resp.raise_for_status()
-            return resp.json()
+        max_attempts = int(os.getenv("E2E_HTTP_UPLOAD_RETRIES", "60") or 60)
+        transient = {500, 502, 503, 504}
+        last_exc: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with path.open("rb") as f:
+                    files = {"file": (path.name, f)}
+                    resp = await self._client.post(url, headers=headers, params=params, files=files)
+                if resp.status_code in transient and attempt < max_attempts:
+                    await asyncio.sleep(min(4.0, 0.5 * attempt))
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                last_exc = e
+                if attempt >= max_attempts:
+                    raise
+                await asyncio.sleep(min(4.0, 0.5 * attempt))
+
+        raise last_exc if last_exc else RuntimeError("upload file failed")
 
     async def download_file_bytes(self, file_id: str) -> bytes:
         """Download a file's raw bytes via files-service."""

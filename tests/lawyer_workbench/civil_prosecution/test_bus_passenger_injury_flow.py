@@ -5,6 +5,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.lawyer_workbench._support.docx import (
+    assert_docx_contains,
+    assert_docx_has_no_template_placeholders,
+    extract_docx_text,
+)
 from tests.lawyer_workbench._support.memory import assert_fact_content_contains, wait_for_entity_keys
 from tests.lawyer_workbench._support.profile import assert_has_party, assert_service_type
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
@@ -161,7 +166,7 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
 
     # If file-classify asks for user action (video usually unparseable), provide a transcript as a follow-up.
     pending = await flow.get_pending_card()
-    if pending and str(pending.get("skill_id") or "").strip() == "file-classify":
+    if pending and str(pending.get("skill_id") or "").strip() in {"file-classify", "file-insight"}:
         transcript_path = evidence_dir / "dashcam_transcript.txt"
         up_tx = await lawyer_client.upload_file(str(transcript_path), purpose="consultation")
         tx_id = str(((up_tx.get("data") or {}) if isinstance(up_tx, dict) else {}).get("id") or "").strip()
@@ -239,3 +244,26 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         return isinstance(data, dict) and bool(data.get("deliverables"))
 
     await flow.run_until(_strategy_report_ready, max_steps=80, description="civil_complaint deliverable")
+
+    # Verify generated DOCX has no unresolved template placeholders and contains key facts.
+    deliverables_resp = unwrap_api_response(await lawyer_client.list_deliverables(flow.matter_id, output_key="civil_complaint"))
+    deliverables = deliverables_resp.get("deliverables") if isinstance(deliverables_resp, dict) else None
+    assert isinstance(deliverables, list) and deliverables, deliverables_resp
+    d0 = deliverables[0] if isinstance(deliverables[0], dict) else {}
+    file_id = str(d0.get("file_id") or "").strip()
+    assert file_id, d0
+    docx_bytes = await lawyer_client.download_file_bytes(file_id)
+    text = extract_docx_text(docx_bytes)
+    assert_docx_has_no_template_placeholders(text)
+    assert_docx_contains(
+        text,
+        must_include=[
+            "民事起诉状",
+            "张三E2E_BUS01",
+            "北京某公交客运有限公司E2E",
+            "生命权、身体权、健康权纠纷",
+            "公交",
+            "急刹车",
+            "右桡骨",
+        ],
+    )

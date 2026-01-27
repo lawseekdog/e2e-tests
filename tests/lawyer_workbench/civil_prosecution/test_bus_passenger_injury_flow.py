@@ -86,6 +86,9 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
             "profile.claims": "请求判令被告赔偿医疗费、误工费、护理费、交通费等损失并承担诉讼费。",
             # Keep E2E fast/stable: generate only a single deliverable at execute stage.
             "profile.decisions.selected_documents": ["civil_complaint"],
+            # file-insight will always flag video/* as needs_user_action; allow the workflow to continue
+            # in E2E by choosing the "stop asking & proceed with current materials" option.
+            "data.files.preprocess_stop_ask": True,
         },
     )
 

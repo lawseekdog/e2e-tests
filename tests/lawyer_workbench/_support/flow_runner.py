@@ -147,6 +147,11 @@ def auto_answer_card(
             else:
                 value = default if has_default else ("已确认" if required else None)
 
+        # For optional questions, omit the answer entirely if we don't have a value.
+        # This avoids sending `null` into strict field validators (e.g. attachment_file_ids must be a list).
+        if value is None and not required:
+            continue
+
         answers.append({"field_key": fk, "value": value})
 
     return {"answers": answers}

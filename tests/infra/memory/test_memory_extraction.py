@@ -87,10 +87,12 @@ async def test_memory_extraction_loan_case_extracts_and_recallable(client):
     # 证据：由 postprocess 确定性补齐，必须稳定命中
     assert "evidence:借条" in keys
     assert "evidence:转账记录" in keys
-    # 关键事实：依赖 LLM 抽取，但这是最核心的回归信号
-    assert "party:plaintiff:张三" in keys
-    assert "party:defendant:李四" in keys
+    # 当事人：entity_key 以 role 维度保持稳定（避免重复），content 中必须包含姓名
+    assert "party:plaintiff:primary" in keys
+    assert "party:defendant:primary" in keys
     facts = [it for it in (mem.get("facts") or []) if isinstance(it, dict)]
+    assert any((it.get("entity_key") == "party:plaintiff:primary" and "张三" in str(it.get("content") or "")) for it in facts)
+    assert any((it.get("entity_key") == "party:defendant:primary" and "李四" in str(it.get("content") or "")) for it in facts)
     assert any(
         str(it.get("entity_key") or "").startswith("amount:")
         and "10" in str(it.get("content") or "")
@@ -193,4 +195,3 @@ async def test_memory_extraction_preferences_are_global_scope(client):
     pref = [it for it in facts if (it.get("category") == "preference")]
     assert pref, mem  # 如果偏好抽不到，后续召回会明显变差
     assert all((it.get("scope") == "global") for it in pref)
-

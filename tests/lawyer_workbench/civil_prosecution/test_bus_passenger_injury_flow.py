@@ -84,8 +84,13 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         overrides={
             "profile.facts": _case_facts(),
             "profile.claims": "请求判令被告赔偿医疗费、误工费、护理费、交通费等损失并承担诉讼费。",
-            # Keep E2E fast/stable: generate only a single deliverable at execute stage.
-            "profile.decisions.selected_documents": ["civil_complaint"],
+            # Generate the standard litigation bundle so we can validate docx quality.
+            "profile.decisions.selected_documents": [
+                "civil_complaint",
+                "litigation_strategy_report",
+                "evidence_list",
+                "compensation_calculation",
+            ],
             # file-insight will always flag video/* as needs_user_action; allow the workflow to continue
             # in E2E by choosing the "stop asking & proceed with current materials" option.
             "data.files.preprocess_stop_ask": True,
@@ -238,15 +243,22 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
     doc_sse = await flow.resume_card(doc_card)
     assert_visible_response(doc_sse)
 
-    async def _strategy_report_ready(f: WorkbenchFlow) -> bool:
+    async def _all_docx_ready(f: WorkbenchFlow) -> bool:
         await f.refresh()
         if not f.matter_id:
             return False
-        resp = await f.client.list_deliverables(f.matter_id, output_key="civil_complaint")
-        data = unwrap_api_response(resp)
-        return isinstance(data, dict) and bool(data.get("deliverables"))
+        for key in ["civil_complaint", "litigation_strategy_report", "evidence_list", "compensation_calculation"]:
+            resp = await f.client.list_deliverables(f.matter_id, output_key=key)
+            data = unwrap_api_response(resp)
+            items = (data.get("deliverables") if isinstance(data, dict) else None) or []
+            if not items:
+                return False
+            d0 = items[0] if isinstance(items[0], dict) else {}
+            if not str(d0.get("file_id") or "").strip():
+                return False
+        return True
 
-    await flow.run_until(_strategy_report_ready, max_steps=80, description="civil_complaint deliverable")
+    await flow.run_until(_all_docx_ready, max_steps=140, description="docx deliverables (bundle)")
 
     # Verify generated DOCX has no unresolved template placeholders and contains key facts.
     deliverables_resp = unwrap_api_response(await lawyer_client.list_deliverables(flow.matter_id, output_key="civil_complaint"))
@@ -258,6 +270,8 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
     docx_bytes = await lawyer_client.download_file_bytes(file_id)
     text = extract_docx_text(docx_bytes)
     assert_docx_has_no_template_placeholders(text)
+    # Avoid leaking Python repr like "['...']" into delivered docx.
+    assert "['" not in text, f"civil_complaint contains python-list repr: {text[:800]}"
     assert_docx_contains(
         text,
         must_include=[
@@ -270,3 +284,37 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
             "右桡骨",
         ],
     )
+
+    # Also sanity-check other execute-phase deliverables (they are part of the standard litigation bundle).
+    async def _download_doc_text(output_key: str) -> str:
+        resp = unwrap_api_response(await lawyer_client.list_deliverables(flow.matter_id, output_key=output_key))
+        dels = resp.get("deliverables") if isinstance(resp, dict) else None
+        assert isinstance(dels, list) and dels, f"missing deliverables for {output_key}: {resp}"
+        d = dels[0] if isinstance(dels[0], dict) else {}
+        fid = str(d.get("file_id") or "").strip()
+        assert fid, d
+        b = await lawyer_client.download_file_bytes(fid)
+        return extract_docx_text(b)
+
+    strategy_text = await _download_doc_text("litigation_strategy_report")
+    assert_docx_has_no_template_placeholders(strategy_text)
+    assert "['" not in strategy_text, f"litigation_strategy_report contains python-list repr: {strategy_text[:800]}"
+
+    evidence_text = await _download_doc_text("evidence_list")
+    assert_docx_has_no_template_placeholders(evidence_text)
+    # Evidence purposes should be filled (at least best-effort) so the table isn't empty.
+    assert any(
+        x in evidence_text
+        for x in [
+            "证明乘车事实",
+            "证明伤情",
+            "证明乘车",
+            "证明伤",
+            "证明原告",
+            "证明因伤",
+        ]
+    ), evidence_text[:800]
+
+    calc_text = await _download_doc_text("compensation_calculation")
+    assert_docx_has_no_template_placeholders(calc_text)
+    assert "医疗费" in calc_text, calc_text[:800]

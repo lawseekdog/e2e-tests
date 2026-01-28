@@ -148,6 +148,8 @@ async def test_civil_prosecution_private_lending_generates_multiple_documents(la
             assert any(x in text for x in ["100000", "100,000", "10万元", "10万"]), text[:2000]
         elif out_key == "litigation_strategy_report":
             assert any(x in text for x in ["诉讼策略报告", "策略"]), text[:2000]
+            # Regression guard: private lending strategy reports should not drift into admin/public-interest wording.
+            assert "行政公益诉讼" not in text, text[:3000]
             _assert_strategy_report_tables_filled(docx_bytes)
         elif out_key == "evidence_list":
             assert any(x in text for x in ["证据目录", "证据"]), text[:2000]

@@ -191,7 +191,11 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         must_include=["party:plaintiff:primary"],
         timeout_s=float(os.getenv("E2E_MEMORY_TIMEOUT_S", "120") or 120),
     )
-    assert_fact_content_contains(facts, entity_key="party:plaintiff:primary", must_include=["张三E2E_BUS01"])
+    assert_fact_content_contains(
+        facts,
+        entity_key="party:plaintiff:primary",
+        must_include=["张三E2E_BUS01"],
+    )
 
     # Continue through evidence -> strategy -> work_plan -> execute.
     async def _strategy_pending(f: WorkbenchFlow) -> bool:

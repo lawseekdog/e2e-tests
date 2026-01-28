@@ -170,9 +170,10 @@ async def test_memory_extraction_preferences_are_global_scope(client):
 
 @pytest.mark.e2e
 async def test_memory_service_route2_strict_blocks_public_case_writes(client):
-    """route2 服务端强约束：/api/v1/memory/facts 禁止写入 case 事实（仅允许 summary:skill:* 例外）。"""
+    """route2 服务端强约束：/internal/memory/facts 禁止写入 case 事实（仅允许 summary:skill:* 例外）。"""
     user_id = int(client.user_id)
     matter_id = f"e2e-route2-block-{uuid.uuid4()}"
+    ev_iou = "evidence:hint:" + hashlib.md5("借条".encode("utf-8")).hexdigest()[:12]
 
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
@@ -184,7 +185,7 @@ async def test_memory_service_route2_strict_blocks_public_case_writes(client):
                 "scope": "case",
                 "case_id": matter_id,
                 "entities": {"certainty": "confirmed"},
-                "entity_key": "evidence:借条",
+                "entity_key": ev_iou,
                 "source": {"producer": "e2e"},
             },
         )

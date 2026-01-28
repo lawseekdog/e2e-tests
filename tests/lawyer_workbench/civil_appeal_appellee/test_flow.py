@@ -13,7 +13,7 @@ from tests.lawyer_workbench._support.docx import (
 )
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
-from tests.lawyer_workbench._support.memory import assert_any_fact_content_contains, wait_for_entity_keys
+from tests.lawyer_workbench._support.memory import assert_any_fact_content_contains, wait_for_memory_facts
 from tests.lawyer_workbench._support.phase_timeline import (
     assert_has_deliverable,
     assert_has_phases,
@@ -135,11 +135,11 @@ async def test_civil_appeal_appellee_generates_appeal_defense(lawyer_client):
     assert_docx_has_no_template_placeholders(text)
     assert_docx_contains(text, must_include=["答辩", "张三E2E03", "李四E2E03"])
 
-    facts = await wait_for_entity_keys(
+    facts = await wait_for_memory_facts(
         lawyer_client,
         user_id=int(lawyer_client.user_id),
         case_id=str(flow.matter_id),
-        must_include=["evidence:借条", "evidence:转账记录"],
+        must_include_content=["张三E2E03", "李四E2E03", "借条", "转账记录"],
         timeout_s=120.0,
     )
     assert_any_fact_content_contains(

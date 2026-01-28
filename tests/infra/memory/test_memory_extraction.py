@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import uuid
+import hashlib
 
 import httpx
 import pytest
@@ -167,6 +168,52 @@ async def test_memory_extraction_preferences_are_global_scope(client):
     assert all((it.get("scope") == "global") for it in pref)
 
 
+@pytest.mark.e2e
+async def test_memory_service_route2_strict_blocks_public_case_writes(client):
+    """route2 服务端强约束：/api/v1/memory/facts 禁止写入 case 事实（仅允许 summary:skill:* 例外）。"""
+    user_id = int(client.user_id)
+    matter_id = f"e2e-route2-block-{uuid.uuid4()}"
+
+    async with httpx.AsyncClient(timeout=60.0) as c:
+        resp = await c.post(
+            f"{GATEWAY_URL}/internal/memory-service/internal/memory/facts",
+            json={
+                "user_id": user_id,
+                "content": "证据：借条",
+                "category": "evidence",
+                "scope": "case",
+                "case_id": matter_id,
+                "entities": {"certainty": "confirmed"},
+                "entity_key": "evidence:借条",
+                "source": {"producer": "e2e"},
+            },
+        )
+
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.e2e
+async def test_memory_service_blocks_sensitive_pii_on_write(client):
+    """PII 防线（服务端）：即便上游漏拦，也不得落库。"""
+    user_id = int(client.user_id)
+
+    async with httpx.AsyncClient(timeout=60.0) as c:
+        resp = await c.post(
+            f"{GATEWAY_URL}/internal/memory-service/internal/memory/facts",
+            json={
+                "user_id": user_id,
+                "content": f"偏好：请记住我的手机号 {_PII_PHONE}",
+                "category": "preference",
+                "scope": "global",
+                "entities": {"certainty": "confirmed"},
+                "entity_key": "preference:联系方式",
+                "source": {"producer": "e2e"},
+            },
+        )
+
+    assert resp.status_code == 400, resp.text
+
+
 async def _create_matter_and_sync_profile(*, user_id: int) -> str:
     if not INTERNAL_API_KEY:
         raise RuntimeError("INTERNAL_API_KEY is required for E2E materializer test")
@@ -231,8 +278,10 @@ async def test_memory_materializer_builds_case_index_and_recallable(client):
     keys = {str(it.get("entity_key") or "") for it in facts if isinstance(it, dict)}
     assert "party:plaintiff:primary" in keys
     assert "party:defendant:primary" in keys
-    assert "evidence:借条" in keys
-    assert "evidence:转账记录" in keys
+    ev_iou = "evidence:hint:" + hashlib.md5("借条".encode("utf-8")).hexdigest()[:12]
+    ev_tx = "evidence:hint:" + hashlib.md5("转账记录".encode("utf-8")).hexdigest()[:12]
+    assert ev_iou in keys
+    assert ev_tx in keys
     # PII must not be stored in derived index.
     for it in facts:
         if not isinstance(it, dict):
@@ -241,4 +290,4 @@ async def test_memory_materializer_builds_case_index_and_recallable(client):
         assert _PII_PHONE not in str(it.get("content") or "")
 
     recalled = await _recall_from_memory_service(user_id=user_id, case_id=matter_id, query="借条", include_global=False)
-    assert any((it.get("entity_key") == "evidence:借条") for it in (recalled.get("facts") or []) if isinstance(it, dict))
+    assert any((it.get("entity_key") == ev_iou) for it in (recalled.get("facts") or []) if isinstance(it, dict))

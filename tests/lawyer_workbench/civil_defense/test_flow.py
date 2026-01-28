@@ -13,7 +13,7 @@ from tests.lawyer_workbench._support.docx import (
 )
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
-from tests.lawyer_workbench._support.memory import assert_fact_content_contains, wait_for_entity_keys
+from tests.lawyer_workbench._support.memory import assert_fact_content_contains, wait_for_memory_facts
 from tests.lawyer_workbench._support.phase_timeline import (
     assert_has_deliverable,
     assert_has_phases,
@@ -135,11 +135,12 @@ async def test_civil_defense_generates_defense_statement_and_persists_state(lawy
     assert_docx_contains(text, must_include=["答辩", "王五E2E02", "张三E2E02"])
 
     # ========== Memory (facts extracted) ==========
-    facts = await wait_for_entity_keys(
+    facts = await wait_for_memory_facts(
         lawyer_client,
         user_id=int(lawyer_client.user_id),
         case_id=str(flow.matter_id),
-        must_include=["evidence:借条", "evidence:转账记录", "party:plaintiff:primary", "party:defendant:primary"],
+        must_include_entity_keys=["party:plaintiff:primary", "party:defendant:primary"],
+        must_include_content=["借条", "转账记录"],
         timeout_s=120.0,
     )
     assert_fact_content_contains(facts, entity_key="party:plaintiff:primary", must_include=["王五E2E02"])

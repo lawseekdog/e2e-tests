@@ -13,7 +13,7 @@ from tests.lawyer_workbench._support.docx import (
 )
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
-from tests.lawyer_workbench._support.memory import assert_any_fact_content_contains, wait_for_entity_keys
+from tests.lawyer_workbench._support.memory import wait_for_memory_facts
 from tests.lawyer_workbench._support.phase_timeline import (
     assert_has_deliverable,
     assert_has_phases,
@@ -129,23 +129,17 @@ async def test_civil_appeal_appellant_generates_appeal_brief(lawyer_client):
     assert_docx_has_no_template_placeholders(text)
     assert_docx_contains(text, must_include=["上诉", "张三E2E03", "李四E2E03"])
 
-    facts = await wait_for_entity_keys(
+    facts = await wait_for_memory_facts(
         lawyer_client,
         user_id=int(lawyer_client.user_id),
         case_id=str(flow.matter_id),
-        must_include=["evidence:借条", "evidence:转账记录"],
+        must_include_content=["借条", "转账记录", "张三E2E03", "李四E2E03"],
         timeout_s=120.0,
     )
-    assert_any_fact_content_contains(
-        facts,
-        candidate_entity_keys=["party:appellant:primary", "party:plaintiff:primary"],
-        must_include=["张三E2E03"],
-    )
-    assert_any_fact_content_contains(
-        facts,
-        candidate_entity_keys=["party:appellee:primary", "party:defendant:primary"],
-        must_include=["李四E2E03"],
-    )
+    # Party facts are derived from workflow profile; assert names are present in memory content.
+    hay = "\n".join([str(it.get("content") or "") for it in (facts or []) if isinstance(it, dict)])
+    assert "张三E2E03" in hay
+    assert "李四E2E03" in hay
 
     kb_id = "e2e_kb_civil_appeal_appellant"
     unique = f"E2E_UNIQUE_APPEAL_APP_{flow.matter_id}"

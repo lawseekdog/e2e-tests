@@ -7,6 +7,7 @@ entity_key assertions that mirror unit tests.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from typing import Any, Iterable
 
@@ -131,3 +132,52 @@ async def wait_for_entity_keys(
 
     missing = sorted(want - last_keys)
     raise AssertionError(f"Timed out waiting for memory entity_keys. Missing={missing}. Got={sorted(last_keys)[:50]}")
+
+
+def stable_token(value: str) -> str:
+    """Match ai-engine memory materializer stable token (md5[:12])."""
+    s = str(value or "")
+    return hashlib.md5(s.encode("utf-8")).hexdigest()[:12]
+
+
+async def wait_for_memory_facts(
+    client,
+    *,
+    user_id: int,
+    case_id: str,
+    must_include_entity_keys: Iterable[str] | None = None,
+    must_include_content: Iterable[str] | None = None,
+    timeout_s: float = 90.0,
+    interval_s: float = 2.0,
+) -> list[dict[str, Any]]:
+    """Wait until memory facts satisfy both key subset + content fragments (best-effort)."""
+    want_keys = {str(x).strip() for x in (must_include_entity_keys or []) if str(x).strip()}
+    want_fragments = [str(x).strip() for x in (must_include_content or []) if str(x).strip()]
+
+    deadline = time.time() + float(timeout_s)
+    last_keys: set[str] = set()
+    last_facts: list[dict[str, Any]] = []
+
+    while time.time() < deadline:
+        last_facts = await list_case_facts(client, user_id=user_id, case_id=case_id, limit=300)
+        last_keys = entity_keys(last_facts)
+
+        ok_keys = want_keys.issubset(last_keys) if want_keys else True
+
+        hay = "\n".join([str(it.get("content") or "") for it in last_facts if isinstance(it, dict)])
+        ok_content = all(frag in hay for frag in want_fragments) if want_fragments else True
+
+        if ok_keys and ok_content:
+            return last_facts
+        await asyncio.sleep(float(interval_s))
+
+    missing_keys = sorted(want_keys - last_keys)
+    missing_fragments = []
+    if want_fragments:
+        hay = "\n".join([str(it.get("content") or "") for it in last_facts if isinstance(it, dict)])
+        missing_fragments = [x for x in want_fragments if x not in hay]
+
+    raise AssertionError(
+        "Timed out waiting for memory facts. "
+        f"MissingKeys={missing_keys} MissingFragments={missing_fragments} GotKeys={sorted(last_keys)[:50]}"
+    )

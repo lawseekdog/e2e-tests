@@ -1,14 +1,27 @@
 #!/usr/bin/env python3
-"""冒烟测试脚本"""
+"""冒烟测试脚本（对齐当前接口协议）。
+
+说明：
+- 咨询会话服务使用 X-User-Id / X-Organization-Id 等头作为主上下文（网关不解析 JWT）。
+- chat/resume 为 SSE；用 e2e-tests/client/ApiClient 统一处理，避免脚本过时。
+"""
+
+from __future__ import annotations
 
 import asyncio
 import os
 import sys
+from pathlib import Path
 
-import httpx
 from dotenv import load_dotenv
 
-load_dotenv()
+# Allow `from client.*` when running as a script.
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from client.api_client import ApiClient
+
+load_dotenv(ROOT / ".env")
 
 BASE_URL = os.getenv("BASE_URL", "http://localhost:18001")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
@@ -17,49 +30,29 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
 
 async def smoke_test():
     """执行冒烟测试"""
-    print(f"=== LawSeekDog 冒烟测试 ===")
+    print("=== LawSeekDog 冒烟测试 ===")
     print(f"Target: {BASE_URL}")
     print()
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        # 1. 登录
+    async with ApiClient(BASE_URL) as c:
+        # 1. 登录（并自动填充 X-User-Id / X-Organization-Id / X-Is-Superuser）
         print("1. 测试登录...")
-        response = await client.post(
-            f"{BASE_URL}/api/v1/auth/login",
-            json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD}
-        )
-        assert response.status_code == 200, f"登录失败: {response.text}"
-        token = response.json()["data"]["access_token"]
-        print("   ✓ 登录成功")
+        await c.login(ADMIN_USERNAME, ADMIN_PASSWORD)
+        print(f"   ✓ 登录成功 user_id={c.user_id} superuser={c.is_superuser}")
 
-        headers = {"Authorization": f"Bearer {token}"}
-
-        # 2. 获取用户信息
-        print("2. 测试获取用户信息...")
-        response = await client.get(f"{BASE_URL}/api/v1/auth/me", headers=headers)
-        assert response.status_code == 200, f"获取用户信息失败: {response.text}"
-        print("   ✓ 获取用户信息成功")
-
-        # 3. 创建咨询会话
-        print("3. 测试创建咨询会话...")
-        response = await client.post(
-            f"{BASE_URL}/api/v1/consultations/sessions",
-            headers=headers,
-            json={"engagement_mode": "legal_consultation"}
-        )
-        assert response.status_code == 200, f"创建会话失败: {response.text}"
-        session_id = response.json()["data"]["id"]
+        # 2. 创建咨询会话（默认 service_type_id=legal_consultation）
+        print("2. 测试创建咨询会话...")
+        sess = await c.create_session(service_type_id="legal_consultation")
+        session_id = str((sess.get("data") or {}).get("id") or "").strip()
+        assert session_id, f"创建会话失败: {sess}"
         print(f"   ✓ 创建会话成功: {session_id}")
 
-        # 4. 发送消息
-        print("4. 测试发送消息...")
-        response = await client.post(
-            f"{BASE_URL}/api/v1/consultations/sessions/{session_id}/chat",
-            headers=headers,
-            json={"message": "你好"}
-        )
-        assert response.status_code == 200, f"发送消息失败: {response.text}"
-        print("   ✓ 发送消息成功")
+        # 3. 发送消息（SSE）
+        print("3. 测试发送消息（SSE）...")
+        out = await c.chat(session_id, "你好，我想咨询一个法律问题。", attachments=[], max_loops=2)
+        events = out.get("events") if isinstance(out, dict) else None
+        assert isinstance(events, list) and events, f"chat SSE 返回异常: {out}"
+        print(f"   ✓ 发送消息成功 events={len(events)}")
 
         print()
         print("=== 所有冒烟测试通过! ===")

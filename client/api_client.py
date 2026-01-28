@@ -27,7 +27,8 @@ class ApiClient:
 
     async def __aenter__(self):
         # Chat endpoints are SSE streams and may take longer than typical JSON APIs.
-        self._client = httpx.AsyncClient(timeout=600.0)
+        timeout_s = float(os.getenv("E2E_HTTP_TIMEOUT_S", "1800") or 1800)
+        self._client = httpx.AsyncClient(timeout=timeout_s)
         return self
 
     async def __aexit__(self, *args):

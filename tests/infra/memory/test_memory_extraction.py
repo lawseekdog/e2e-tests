@@ -19,6 +19,7 @@ import pytest
 AI_PLATFORM_URL = os.getenv("AI_PLATFORM_URL", "http://localhost:18084").rstrip("/")
 GATEWAY_URL = os.getenv("BASE_URL", "http://localhost:18001").rstrip("/")
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
+_PII_PHONE = "13812345678"
 
 
 async def _run_memory_extract(
@@ -194,7 +195,7 @@ async def _create_matter_and_sync_profile(*, user_id: int) -> str:
             headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "parties": [
-                    {"role": "plaintiff", "role_order": 1, "name": "张三E2E01", "party_type": "person"},
+                    {"role": "plaintiff", "role_order": 1, "name": f"张三E2E01，手机{_PII_PHONE}", "party_type": "person"},
                     {"role": "defendant", "role_order": 1, "name": "李四E2E01", "party_type": "person"},
                 ],
                 "intake_profile": {
@@ -232,6 +233,12 @@ async def test_memory_materializer_builds_case_index_and_recallable(client):
     assert "party:defendant:primary" in keys
     assert "evidence:借条" in keys
     assert "evidence:转账记录" in keys
+    # PII must not be stored in derived index.
+    for it in facts:
+        if not isinstance(it, dict):
+            continue
+        assert _PII_PHONE not in str(it.get("entity_key") or "")
+        assert _PII_PHONE not in str(it.get("content") or "")
 
     recalled = await _recall_from_memory_service(user_id=user_id, case_id=matter_id, query="借条", include_global=False)
     assert any((it.get("entity_key") == "evidence:借条") for it in (recalled.get("facts") or []) if isinstance(it, dict))

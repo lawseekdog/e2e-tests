@@ -20,6 +20,20 @@ _NUDGE_TEXT = "继续"
 _DEBUG = str(os.getenv("E2E_FLOW_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
 
 
+def _read_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+_RESUME_MAX_LOOPS = _read_int_env("E2E_RESUME_MAX_LOOPS", 24)
+
+
 def _debug(msg: str) -> None:
     if _DEBUG:
         print(msg, flush=True)
@@ -228,7 +242,7 @@ class WorkbenchFlow:
             return sse
 
         user_response = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
-        sse = await self.client.resume(self.session_id, user_response, pending_card=card)
+        sse = await self.client.resume(self.session_id, user_response, pending_card=card, max_loops=_RESUME_MAX_LOOPS)
         assert_has_user_message(sse)
         if isinstance(sse, dict):
             self.last_sse = sse

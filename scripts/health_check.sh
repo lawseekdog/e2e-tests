@@ -34,8 +34,8 @@ fi
 # 通过 Gateway 检查各服务
 for service in "${SERVICES[@]}"; do
   echo -n "${service}: "
-  # Java 服务的 actuator 暴露在 /internal/actuator/health，并要求 internal api key
-  response=$(curl -s -H "X-Internal-Api-Key: ${INTERNAL_API_KEY}" -o /dev/null -w "%{http_code}" "${BASE_URL}/internal/${service}/internal/actuator/health" 2>/dev/null || echo "000")
+  # 统一约定：所有服务对外使用 /api/v1 前缀；健康检查使用 /api/v1/internal/actuator/health。
+  response=$(curl -s -H "X-Internal-Api-Key: ${INTERNAL_API_KEY}" -o /dev/null -w "%{http_code}" "${BASE_URL}/internal/${service}/api/v1/internal/actuator/health" 2>/dev/null || echo "000")
   if [ "$response" == "200" ]; then
     echo "✓ healthy"
   else

@@ -8,6 +8,7 @@ INTERNAL_API_KEY="${INTERNAL_API_KEY:-change-me-in-production-32chars}"
 
 SERVICES=(
   "rerank-service"
+  "ai-platform-service"
   "auth-service"
   "user-service"
   "consultations-service"

@@ -155,19 +155,21 @@ async def main() -> None:
     async with ApiClient(base_url) as c:
         await c.login(user, pwd)
 
-        uploaded_file_ids: list[str] = []
-        for p in paths:
-            up = await c.upload_file(str(p), purpose="consultation")
-            fid = str((up.get("data") or {}).get("id") or "").strip()
-            print("uploaded", p.name, fid, flush=True)
-            uploaded_file_ids.append(fid)
-
         sess = await c.create_session(service_type_id="civil_first_instance")
         sid = str((sess.get("data") or {}).get("id") or "").strip()
         print("session", sid, flush=True)
 
+        # Mirror frontend behavior: bind uploads to the session first, then kickoff with facts + attachments.
+        uploaded_file_ids: list[str] = []
+        for p in paths:
+            up = await c.upload_session_attachment(sid, str(p))
+            fid = str((up.get("data") or {}).get("id") or "").strip()
+            print("uploaded", p.name, fid, flush=True)
+            uploaded_file_ids.append(fid)
+
         matter_id = None
         t_start = time.time()
+        kickoff_sent = False
 
         for i in range(260):
             sess2 = await c.get_session(sid)
@@ -196,6 +198,7 @@ async def main() -> None:
                 if skill_id == "system:kickoff":
                     t0 = time.time()
                     await c.chat(sid, str(overrides["profile.facts"]), attachments=list(uploaded_file_ids), max_loops=6)
+                    kickoff_sent = True
                     print("  kickoff chat", round(time.time() - t0, 2), "s", flush=True)
                 else:
                     t0 = time.time()
@@ -203,10 +206,17 @@ async def main() -> None:
                     print("  resume", round(time.time() - t0, 2), "s", flush=True)
                 continue
 
-            print("iter", i, "no card -> continue", "matter_id", matter_id, flush=True)
-            t0 = time.time()
-            await c.chat(sid, "继续", attachments=[], max_loops=12)
-            print("  chat", round(time.time() - t0, 2), "s", flush=True)
+            # Some flows may not immediately surface a kickoff card; send facts once to bootstrap.
+            if not kickoff_sent:
+                print("iter", i, "no card -> kickoff", "matter_id", matter_id, flush=True)
+                t0 = time.time()
+                await c.chat(sid, str(overrides["profile.facts"]), attachments=list(uploaded_file_ids), max_loops=6)
+                kickoff_sent = True
+                print("  kickoff chat", round(time.time() - t0, 2), "s", flush=True)
+            else:
+                # Avoid spamming "继续" (token-costly and can perturb the workflow); just poll.
+                print("iter", i, "no card -> wait", "matter_id", matter_id, flush=True)
+                await asyncio.sleep(3.0)
 
         print("final matter_id", matter_id, flush=True)
 

@@ -26,7 +26,11 @@ async def list_case_facts(
         params={"scope": "case", "case_id": str(case_id), "limit": int(limit)},
     )
     data = unwrap_api_response(resp)
-    # memory-service returns a plain list (no ApiResponse) on this internal route.
+    # memory-service returns ApiResponse<PageResponse<FactResponse>> on this internal route.
+    if isinstance(data, dict):
+        items = data.get("data")
+        if isinstance(items, list):
+            return [it for it in items if isinstance(it, dict)]
     if isinstance(data, list):
         return [it for it in data if isinstance(it, dict)]
     if isinstance(resp, list):

@@ -31,6 +31,8 @@ async def _run_memory_extract(
     tenant_id: str,
     state_patch: dict | None = None,
 ) -> dict:
+    if not INTERNAL_API_KEY:
+        raise RuntimeError("INTERNAL_API_KEY is required for E2E ai-platform-service internal calls")
     async with httpx.AsyncClient(timeout=300.0) as c:
         payload: dict = {
             "user_id": int(user_id),
@@ -43,6 +45,7 @@ async def _run_memory_extract(
         payload["state_patch"] = patch
         resp = await c.post(
             f"{AI_PLATFORM_URL}/api/v1/internal/ai/memory/extract",
+            headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
             json=payload,
         )
         resp.raise_for_status()
@@ -56,10 +59,12 @@ async def _run_memory_extract(
 
 
 async def _recall_from_memory_service(*, user_id: int, tenant_id: str, case_id: str | None, query: str, include_global: bool) -> dict:
+    if not INTERNAL_API_KEY:
+        raise RuntimeError("INTERNAL_API_KEY is required for E2E memory-service internal calls")
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
             f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/recall",
-            headers={"X-Organization-Id": str(tenant_id or "").strip()},
+            headers={"X-Organization-Id": str(tenant_id or "").strip(), "X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "user_id": int(user_id),
                 "query": str(query),
@@ -72,19 +77,29 @@ async def _recall_from_memory_service(*, user_id: int, tenant_id: str, case_id: 
             },
         )
         resp.raise_for_status()
-        return resp.json()
+        body = resp.json()
+        assert body.get("code") == 0, body
+        data = body.get("data") or {}
+        return data if isinstance(data, dict) else {}
 
 
 async def _list_case_facts_from_memory_service(*, user_id: int, tenant_id: str, case_id: str, limit: int = 200) -> list[dict]:
+    if not INTERNAL_API_KEY:
+        raise RuntimeError("INTERNAL_API_KEY is required for E2E memory-service internal calls")
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.get(
             f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/users/{int(user_id)}/facts",
-            headers={"X-Organization-Id": str(tenant_id or "").strip()},
+            headers={"X-Organization-Id": str(tenant_id or "").strip(), "X-Internal-Api-Key": INTERNAL_API_KEY},
             params={"scope": "case", "case_id": str(case_id), "limit": int(limit)},
         )
         resp.raise_for_status()
         body = resp.json()
-        return body if isinstance(body, list) else []
+        assert body.get("code") == 0, body
+        data = body.get("data")
+        if isinstance(data, dict):
+            items = data.get("data")
+            return items if isinstance(items, list) else []
+        return data if isinstance(data, list) else []
 
 
 def _entity_keys(mem: dict) -> set[str]:
@@ -196,7 +211,7 @@ async def test_memory_service_route2_strict_blocks_public_case_writes(client):
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
             f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/facts",
-            headers={"X-Organization-Id": tenant_id},
+            headers={"X-Organization-Id": tenant_id, "X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "user_id": user_id,
                 "content": "证据：借条",
@@ -222,7 +237,7 @@ async def test_memory_service_blocks_sensitive_pii_on_write(client):
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
             f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/facts",
-            headers={"X-Organization-Id": tenant_id},
+            headers={"X-Organization-Id": tenant_id, "X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "user_id": user_id,
                 "content": f"偏好：请记住我的手机号 {_PII_PHONE}",
@@ -291,6 +306,7 @@ async def test_memory_materializer_builds_case_index_and_recallable(client):
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
             f"{AI_PLATFORM_URL}/api/v1/internal/ai/memory/materialize",
+            headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
             json={"user_id": user_id, "matter_id": matter_id, "cleanup_legacy": True, "tenant_id": tenant_id},
         )
         resp.raise_for_status()

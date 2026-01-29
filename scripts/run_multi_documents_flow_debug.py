@@ -143,7 +143,7 @@ async def main() -> None:
         "civil_complaint",
         "litigation_strategy_report",
         "evidence_list_doc",
-        "preservation_application",
+        "compensation_calculation",
     ]
 
     overrides = {

@@ -10,6 +10,15 @@ from typing import Any
 from pathlib import Path
 
 
+AUTH_V1 = "/auth-service/api/v1"
+USER_V1 = "/user-service/api/v1"
+ORG_V1 = "/organization-service/api/v1"
+CONSULTATIONS_V1 = "/consultations-service/api/v1"
+FILES_V1 = "/files-service/api/v1"
+MATTERS_V1 = "/matter-service/api/v1"
+KNOWLEDGE_V1 = "/knowledge-service/api/v1"
+
+
 class ApiClient:
     """API 客户端封装"""
 
@@ -20,7 +29,7 @@ class ApiClient:
         self.user_id: str | None = None
         self.organization_id: str | None = None
         self.is_superuser: bool = False
-        # Internal endpoints (e.g. /api/v1/internal/*) require an internal API key.
+        # Internal endpoints (e.g. /{service}/api/v1/internal/*) require an internal API key.
         # When running E2E locally, pass it via env (docker-compose/java-stack uses INTERNAL_API_KEY).
         self.internal_api_key: str | None = os.getenv("INTERNAL_API_KEY")
         self._client: httpx.AsyncClient | None = None
@@ -167,7 +176,7 @@ class ApiClient:
     async def login(self, username: str, password: str) -> dict[str, Any]:
         # NOTE: auth-service exposes a form login endpoint; JSON login may be disabled by server config.
         # Use x-www-form-urlencoded to keep E2E stable across gateway/service implementations.
-        url = f"{self.base_url}/api/v1/auth/login"
+        url = f"{self.base_url}{AUTH_V1}/auth/login"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         max_attempts = int(os.getenv("E2E_HTTP_LOGIN_RETRIES", "180") or 180)
         transient = {500, 502, 503, 504}
@@ -224,7 +233,7 @@ class ApiClient:
         raise last_exc if last_exc else RuntimeError("login failed")
 
     async def get_me(self) -> dict[str, Any]:
-        return await self.get("/api/v1/auth/me")
+        return await self.get(f"{AUTH_V1}/auth/me")
 
     # ========== Consultations ==========
 
@@ -242,10 +251,10 @@ class ApiClient:
             data["matter_id"] = matter_id
         if client_role:
             data["client_role"] = client_role
-        return await self.post("/api/v1/consultations/sessions", data)
+        return await self.post(f"{CONSULTATIONS_V1}/consultations/sessions", data)
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
-        return await self.get(f"/api/v1/consultations/sessions/{session_id}")
+        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}")
 
     async def chat(
         self,
@@ -261,10 +270,10 @@ class ApiClient:
         }
         if max_loops is not None:
             data["max_loops"] = max_loops
-        return await self._post_sse(f"/api/v1/consultations/sessions/{session_id}/chat", data)
+        return await self._post_sse(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/chat", data)
 
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
-        return await self.get(f"/api/v1/consultations/sessions/{session_id}/pending_card")
+        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/pending_card")
 
     async def upload_session_attachment(self, session_id: str, file_path: str) -> dict[str, Any]:
         """Upload an attachment bound to a consultation session (so canvas.evidence_list can show it)."""
@@ -276,7 +285,7 @@ class ApiClient:
         if not sid:
             raise ValueError("session_id is required")
 
-        url = f"{self.base_url}/api/v1/consultations/sessions/{sid}/attachments"
+        url = f"{self.base_url}{CONSULTATIONS_V1}/consultations/sessions/{sid}/attachments"
         headers = dict(self.headers)
         headers.pop("Content-Type", None)  # Let httpx set multipart boundary.
 
@@ -303,25 +312,25 @@ class ApiClient:
         raise last_exc if last_exc else RuntimeError("upload session attachment failed")
 
     async def get_session_canvas(self, session_id: str) -> dict[str, Any]:
-        return await self.get(f"/api/v1/consultations/sessions/{session_id}/canvas")
+        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/canvas")
 
     async def get_session_timeline(self, session_id: str, limit: int | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(f"/api/v1/consultations/sessions/{session_id}/timeline", params=params)
+        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/timeline", params=params)
 
     async def list_session_traces(self, session_id: str, limit: int | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(f"/api/v1/consultations/sessions/{session_id}/traces", params=params)
+        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/traces", params=params)
 
     async def get_session_trace_detail(self, session_id: str, trace_id: str) -> dict[str, Any]:
         tid = str(trace_id).strip()
         if not tid:
             raise ValueError("trace_id is required")
-        return await self.get(f"/api/v1/consultations/sessions/{session_id}/traces/{tid}")
+        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/traces/{tid}")
 
     async def resume(
         self,
@@ -338,7 +347,7 @@ class ApiClient:
             data["pending_card"] = pending_card
         if max_loops is not None:
             data["max_loops"] = int(max_loops)
-        return await self._post_sse(f"/api/v1/consultations/sessions/{session_id}/resume", data)
+        return await self._post_sse(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/resume", data)
 
     async def switch_service_type(
         self,
@@ -353,7 +362,7 @@ class ApiClient:
             payload["title"] = str(title)
         if cause_of_action_code is not None:
             payload["cause_of_action_code"] = str(cause_of_action_code)
-        return await self.post(f"/api/v1/consultations/sessions/{session_id}/service-type", payload)
+        return await self.post(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/service-type", payload)
 
     # ========== Files ==========
 
@@ -367,7 +376,7 @@ class ApiClient:
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(file_path)
 
-        url = f"{self.base_url}/api/v1/files/upload"
+        url = f"{self.base_url}{FILES_V1}/files/upload"
         headers = dict(self.headers)
         # Let httpx set multipart boundary.
         headers.pop("Content-Type", None)
@@ -403,7 +412,7 @@ class ApiClient:
         fid = str(file_id).strip()
         if not fid:
             raise ValueError("file_id is required")
-        url = f"{self.base_url}/api/v1/files/{fid}/download"
+        url = f"{self.base_url}{FILES_V1}/files/{fid}/download"
         headers = dict(self.headers)
         headers.pop("Content-Type", None)
         resp = await self._client.get(url, headers=headers)
@@ -420,48 +429,48 @@ class ApiClient:
         data = {"service_type_id": service_type_id}
         if client_id:
             data["client_id"] = client_id
-        return await self.post("/api/v1/matters", data)
+        return await self.post(f"{MATTERS_V1}/matters", data)
 
     async def get_matter(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"/api/v1/matters/{matter_id}")
+        return await self.get(f"{MATTERS_V1}/matters/{matter_id}")
 
     async def get_matter_tasks(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"/api/v1/matters/{matter_id}/tasks")
+        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/tasks")
 
     async def complete_task(
         self, matter_id: str, task_id: str, result: dict
     ) -> dict[str, Any]:
         return await self.post(
-            f"/api/v1/matters/{matter_id}/tasks/{task_id}/complete",
+            f"{MATTERS_V1}/matters/{matter_id}/tasks/{task_id}/complete",
             result
         )
 
     async def get_workflow_snapshot(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"/api/v1/matters/{matter_id}/workflow")
+        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/workflow")
 
     async def get_workflow_profile(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"/api/v1/matters/{matter_id}/workflow/profile")
+        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/workflow/profile")
 
     async def list_deliverables(self, matter_id: str, output_key: str | None = None) -> dict[str, Any]:
         params = {}
         if output_key:
             params["output_key"] = output_key
-        return await self.get(f"/api/v1/matters/{matter_id}/deliverables", params=params)
+        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/deliverables", params=params)
 
     async def list_traces(self, matter_id: str, limit: int | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(f"/api/v1/matters/{matter_id}/traces", params=params)
+        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/traces", params=params)
 
     async def get_matter_timeline(self, matter_id: str, limit: int | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(f"/api/v1/matters/{matter_id}/timeline", params=params)
+        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/timeline", params=params)
 
     async def get_matter_phase_timeline(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"/api/v1/matters/{matter_id}/phase-timeline")
+        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/phase-timeline")
 
     # ========== Knowledge ==========
 
@@ -474,4 +483,4 @@ class ApiClient:
         data = {"query": query, "top_k": top_k}
         if doc_types:
             data["doc_types"] = doc_types
-        return await self.post("/api/v1/knowledge/search", data)
+        return await self.post(f"{KNOWLEDGE_V1}/knowledge/search", data)

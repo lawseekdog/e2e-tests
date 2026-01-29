@@ -163,7 +163,13 @@ async def main() -> None:
         uploaded_file_ids: list[str] = []
         for p in paths:
             up = await c.upload_session_attachment(sid, str(p))
-            fid = str((up.get("data") or {}).get("id") or "").strip()
+            # consultations-service returns an attachment item:
+            # - data.id      -> attachment_id (NOT the files-service file_id)
+            # - data.file_id -> files-service file_id (what chat/analysis expects)
+            up_data = up.get("data") or {}
+            fid = str((up_data.get("file_id") or up_data.get("fileId") or "")).strip()
+            if not fid:
+                raise RuntimeError(f"upload_session_attachment did not return file_id: {up}")
             print("uploaded", p.name, fid, flush=True)
             uploaded_file_ids.append(fid)
 

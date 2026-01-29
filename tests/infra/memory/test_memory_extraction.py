@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 
-AI_PLATFORM_URL = os.getenv("AI_PLATFORM_URL", "http://localhost:18084").rstrip("/")
+AI_PLATFORM_URL = os.getenv("AI_PLATFORM_URL", "http://localhost:18001/ai-platform-service").rstrip("/")
 GATEWAY_URL = os.getenv("BASE_URL", "http://localhost:18001").rstrip("/")
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 _PII_PHONE = "13812345678"
@@ -63,7 +63,7 @@ async def _recall_from_memory_service(*, user_id: int, tenant_id: str, case_id: 
         raise RuntimeError("INTERNAL_API_KEY is required for E2E memory-service internal calls")
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
-            f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/recall",
+            f"{GATEWAY_URL}/memory-service/api/v1/internal/memory/recall",
             headers={"X-Organization-Id": str(tenant_id or "").strip(), "X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "user_id": int(user_id),
@@ -88,7 +88,7 @@ async def _list_case_facts_from_memory_service(*, user_id: int, tenant_id: str, 
         raise RuntimeError("INTERNAL_API_KEY is required for E2E memory-service internal calls")
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.get(
-            f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/users/{int(user_id)}/facts",
+            f"{GATEWAY_URL}/memory-service/api/v1/internal/memory/users/{int(user_id)}/facts",
             headers={"X-Organization-Id": str(tenant_id or "").strip(), "X-Internal-Api-Key": INTERNAL_API_KEY},
             params={"scope": "case", "case_id": str(case_id), "limit": int(limit)},
         )
@@ -210,7 +210,7 @@ async def test_memory_service_route2_strict_blocks_public_case_writes(client):
 
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
-            f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/facts",
+            f"{GATEWAY_URL}/memory-service/api/v1/internal/memory/facts",
             headers={"X-Organization-Id": tenant_id, "X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "user_id": user_id,
@@ -236,7 +236,7 @@ async def test_memory_service_blocks_sensitive_pii_on_write(client):
 
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
-            f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/facts",
+            f"{GATEWAY_URL}/memory-service/api/v1/internal/memory/facts",
             headers={"X-Organization-Id": tenant_id, "X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "user_id": user_id,
@@ -258,7 +258,7 @@ async def _create_matter_and_sync_profile(*, user_id: int) -> str:
     session_id = f"e2e-mem-materialize-{uuid.uuid4()}"
     async with httpx.AsyncClient(timeout=60.0) as c:
         created = await c.post(
-            f"{GATEWAY_URL}/api/v1/internal/matter-service/matters/from-consultation",
+            f"{GATEWAY_URL}/matter-service/api/v1/internal/matters/from-consultation",
             headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "session_id": session_id,
@@ -276,7 +276,7 @@ async def _create_matter_and_sync_profile(*, user_id: int) -> str:
 
         # Sync minimal workflow profile: parties + intake_profile.facts (evidence hints)
         resp = await c.post(
-            f"{GATEWAY_URL}/api/v1/internal/matter-service/matters/{mid}/sync/all",
+            f"{GATEWAY_URL}/matter-service/api/v1/internal/matters/{mid}/sync/all",
             headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "parties": [

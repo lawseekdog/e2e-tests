@@ -44,7 +44,7 @@ async def _ensure_seed_packages() -> None:
         # 1) Fast check: if matter-service can list service types, platform config is ready.
         try:
             resp = await c.get(
-                f"{BASE_URL}/api/v1/internal/matter-service/matters/service-types",
+                f"{BASE_URL}/matter-service/api/v1/internal/matters/service-types",
                 headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
                 params={"category": "litigation"},
             )
@@ -60,7 +60,7 @@ async def _ensure_seed_packages() -> None:
         base_payload = {"dry_run": False, "force": False}
         must_packages = ["matters_system_resources", "knowledge_structured_seeds"]
         resp = await c.post(
-            f"{BASE_URL}/api/v1/seed-packages/apply-internal",
+            f"{BASE_URL}/collector-service/api/v1/seed-packages/apply-internal",
             headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
             json={**base_payload, "package_ids": must_packages},
         )
@@ -75,7 +75,7 @@ async def _ensure_seed_packages() -> None:
         # 3) Templates are required for document-generation. Some optional items (sync templates to sys_templates KB)
         # can fail without breaking the workflow; treat as best-effort but require curated_templates_import success.
         resp = await c.post(
-            f"{BASE_URL}/api/v1/seed-packages/apply-internal",
+            f"{BASE_URL}/collector-service/api/v1/seed-packages/apply-internal",
             headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
             json={**base_payload, "package_ids": ["templates_system_resources"]},
         )
@@ -112,7 +112,7 @@ async def client():
         # Fail-fast tenant isolation: internal services require X-Organization-Id.
         # Super admins may not have a default org; pick the first org as the active context for tests.
         if not c.organization_id:
-            org_list = await c.get("/api/v1/admin/organizations?page=1&size=5")
+            org_list = await c.get("/organization-service/api/v1/admin/organizations?page=1&size=5")
             org_id = None
             if isinstance(org_list, dict):
                 items = org_list.get("data") if isinstance(org_list.get("data"), list) else []
@@ -133,7 +133,7 @@ async def lawyer_client():
         await admin.login(ADMIN_USERNAME, ADMIN_PASSWORD)
 
         # Check if lawyer user exists.
-        resp = await admin.get(f"/api/v1/admin/users?page=1&size=5&q={LAWYER_USERNAME}")
+        resp = await admin.get(f"/user-service/api/v1/admin/users?page=1&size=5&q={LAWYER_USERNAME}")
         existing = None
         if isinstance(resp, dict):
             for it in resp.get("data") if isinstance(resp.get("data"), list) else []:
@@ -144,7 +144,7 @@ async def lawyer_client():
         lawyer_user_id = None
         if existing is None:
             created = await admin.post(
-                "/api/v1/admin/users",
+                "/user-service/api/v1/admin/users",
                 {
                     "username": LAWYER_USERNAME,
                     "initial_password": LAWYER_PASSWORD,
@@ -161,7 +161,7 @@ async def lawyer_client():
 
             # Mark as lawyer.
             await admin.put(
-                f"/api/v1/admin/users/{lawyer_user_id}/user-type",
+                f"/user-service/api/v1/admin/users/{lawyer_user_id}/user-type",
                 {"user_type": "lawyer"},
             )
         else:
@@ -172,7 +172,7 @@ async def lawyer_client():
 
         # Ensure there is at least one organization and bind the lawyer user to it so downstream services
         # receive X-Organization-Id and can auto-kickoff matters.
-        org_list = await admin.get("/api/v1/admin/organizations?page=1&size=5")
+        org_list = await admin.get("/organization-service/api/v1/admin/organizations?page=1&size=5")
         org_id = None
         if isinstance(org_list, dict):
             items = org_list.get("data") if isinstance(org_list.get("data"), list) else []
@@ -182,7 +182,7 @@ async def lawyer_client():
 
         if org_id is None:
             created_org = await admin.post(
-                "/api/v1/admin/organizations",
+                "/organization-service/api/v1/admin/organizations",
                 {
                     "name": "E2E Law Firm",
                     "practice_area": "civil",
@@ -197,7 +197,7 @@ async def lawyer_client():
             raise RuntimeError(f"failed to ensure organization: {org_list}")
 
         await admin.patch(
-            f"/api/v1/internal/user-service/users/{lawyer_user_id}/organization",
+            f"/user-service/api/v1/internal/users/{lawyer_user_id}/organization",
             {"organization_id": int(org_id)},
         )
 

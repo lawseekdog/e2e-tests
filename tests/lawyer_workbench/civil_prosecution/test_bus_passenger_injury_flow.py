@@ -88,7 +88,7 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
             "profile.decisions.selected_documents": [
                 "civil_complaint",
                 "litigation_strategy_report",
-                "evidence_list",
+                "evidence_list_doc",
                 "compensation_calculation",
             ],
             # file-insight will always flag video/* as needs_user_action; allow the workflow to continue
@@ -251,7 +251,7 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         await f.refresh()
         if not f.matter_id:
             return False
-        for key in ["civil_complaint", "litigation_strategy_report", "evidence_list", "compensation_calculation"]:
+        for key in ["civil_complaint", "litigation_strategy_report", "evidence_list_doc", "compensation_calculation"]:
             resp = await f.client.list_deliverables(f.matter_id, output_key=key)
             data = unwrap_api_response(resp)
             items = (data.get("deliverables") if isinstance(data, dict) else None) or []
@@ -304,7 +304,7 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
     assert_docx_has_no_template_placeholders(strategy_text)
     assert "['" not in strategy_text, f"litigation_strategy_report contains python-list repr: {strategy_text[:800]}"
 
-    evidence_text = await _download_doc_text("evidence_list")
+    evidence_text = await _download_doc_text("evidence_list_doc")
     assert_docx_has_no_template_placeholders(evidence_text)
     # Evidence purposes should be filled (at least best-effort) so the table isn't empty.
     assert any(

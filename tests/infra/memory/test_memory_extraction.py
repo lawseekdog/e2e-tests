@@ -28,16 +28,19 @@ async def _run_memory_extract(
     user_id: int,
     matter_id: str,
     user_message: str,
+    tenant_id: str,
     state_patch: dict | None = None,
 ) -> dict:
     async with httpx.AsyncClient(timeout=300.0) as c:
         payload: dict = {
             "user_id": int(user_id),
+            "tenant_id": str(tenant_id or "").strip(),
             "matter_id": str(matter_id),
             "user_message": str(user_message),
         }
-        if isinstance(state_patch, dict) and state_patch:
-            payload["state_patch"] = state_patch
+        patch = dict(state_patch) if isinstance(state_patch, dict) else {}
+        patch["tenant_id"] = str(tenant_id or "").strip()
+        payload["state_patch"] = patch
         resp = await c.post(
             f"{AI_PLATFORM_URL}/internal/ai/memory/extract",
             json=payload,
@@ -52,10 +55,11 @@ async def _run_memory_extract(
     return mem
 
 
-async def _recall_from_memory_service(*, user_id: int, case_id: str | None, query: str, include_global: bool) -> dict:
+async def _recall_from_memory_service(*, user_id: int, tenant_id: str, case_id: str | None, query: str, include_global: bool) -> dict:
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
             f"{GATEWAY_URL}/internal/memory-service/internal/memory/recall",
+            headers={"X-Organization-Id": str(tenant_id or "").strip()},
             json={
                 "user_id": int(user_id),
                 "query": str(query),
@@ -71,10 +75,11 @@ async def _recall_from_memory_service(*, user_id: int, case_id: str | None, quer
         return resp.json()
 
 
-async def _list_case_facts_from_memory_service(*, user_id: int, case_id: str, limit: int = 200) -> list[dict]:
+async def _list_case_facts_from_memory_service(*, user_id: int, tenant_id: str, case_id: str, limit: int = 200) -> list[dict]:
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.get(
             f"{GATEWAY_URL}/internal/memory-service/internal/memory/users/{int(user_id)}/facts",
+            headers={"X-Organization-Id": str(tenant_id or "").strip()},
             params={"scope": "case", "case_id": str(case_id), "limit": int(limit)},
         )
         resp.raise_for_status()
@@ -97,12 +102,15 @@ def _entity_keys(mem: dict) -> set[str]:
 async def test_memory_extraction_case_messages_do_not_write_case_facts(client):
     """route2：memory-extraction 不再写入 case 事实（避免与 matter 真源漂移）。"""
     user_id = int(client.user_id)
+    tenant_id = str(client.organization_id or "").strip()
+    assert tenant_id, "missing client.organization_id (tenant)"
     matter_id = f"e2e-mem-no-case-{uuid.uuid4()}"
 
     mem = await _run_memory_extract(
         user_id=user_id,
         matter_id=matter_id,
         user_message="我叫张三，对方李四，2023年1月借给他10万元，有借条和转账记录。",
+        tenant_id=tenant_id,
         # Avoid triggering LLM in E2E: deterministic path is enough for this regression.
         state_patch={"_force_deterministic_memory_extraction": True},
     )
@@ -116,9 +124,11 @@ async def test_memory_extraction_case_messages_do_not_write_case_facts(client):
 async def test_memory_extraction_skip_trivial_message(client):
     """无实质内容：应直接跳过（不写入）。"""
     user_id = int(client.user_id)
+    tenant_id = str(client.organization_id or "").strip()
+    assert tenant_id, "missing client.organization_id (tenant)"
     matter_id = f"e2e-mem-skip-{uuid.uuid4()}"
 
-    mem = await _run_memory_extract(user_id=user_id, matter_id=matter_id, user_message="继续")
+    mem = await _run_memory_extract(user_id=user_id, tenant_id=tenant_id, matter_id=matter_id, user_message="继续")
     assert mem.get("skipped") is True
     assert int(mem.get("stored_count") or 0) == 0
     assert mem.get("facts") == []
@@ -128,6 +138,8 @@ async def test_memory_extraction_skip_trivial_message(client):
 async def test_memory_extraction_blocks_sensitive_pii_in_preferences(client):
     """包含手机号/身份证号时：不得落库敏感信息（即便同一条消息包含偏好指令）。"""
     user_id = int(client.user_id)
+    tenant_id = str(client.organization_id or "").strip()
+    assert tenant_id, "missing client.organization_id (tenant)"
     matter_id = f"e2e-mem-pii-{uuid.uuid4()}"
     phone = "13812345678"
     idno = "11010519491231002X"
@@ -136,6 +148,7 @@ async def test_memory_extraction_blocks_sensitive_pii_in_preferences(client):
         user_id=user_id,
         matter_id=matter_id,
         user_message=f"我叫张三，手机号{phone}，身份证号{idno}。以后请用表格输出，结论放在最前面。",
+        tenant_id=tenant_id,
         state_patch={"_force_deterministic_memory_extraction": True},
     )
 
@@ -153,12 +166,15 @@ async def test_memory_extraction_blocks_sensitive_pii_in_preferences(client):
 async def test_memory_extraction_preferences_are_global_scope(client):
     """用户偏好：必须写入 global scope（避免污染 case 事实）。"""
     user_id = int(client.user_id)
+    tenant_id = str(client.organization_id or "").strip()
+    assert tenant_id, "missing client.organization_id (tenant)"
     matter_id = f"e2e-mem-pref-{uuid.uuid4()}"
 
     mem = await _run_memory_extract(
         user_id=user_id,
         matter_id=matter_id,
         user_message="以后请用表格输出，结论放在最前面，并引用到具体法条号。",
+        tenant_id=tenant_id,
         state_patch={"_force_deterministic_memory_extraction": True},
     )
 
@@ -172,12 +188,15 @@ async def test_memory_extraction_preferences_are_global_scope(client):
 async def test_memory_service_route2_strict_blocks_public_case_writes(client):
     """route2 服务端强约束：/internal/memory/facts 禁止写入 case 事实（仅允许 summary:skill:* 例外）。"""
     user_id = int(client.user_id)
+    tenant_id = str(client.organization_id or "").strip()
+    assert tenant_id, "missing client.organization_id (tenant)"
     matter_id = f"e2e-route2-block-{uuid.uuid4()}"
     ev_iou = "evidence:hint:" + hashlib.md5("借条".encode("utf-8")).hexdigest()[:12]
 
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
             f"{GATEWAY_URL}/internal/memory-service/internal/memory/facts",
+            headers={"X-Organization-Id": tenant_id},
             json={
                 "user_id": user_id,
                 "content": "证据：借条",
@@ -197,10 +216,13 @@ async def test_memory_service_route2_strict_blocks_public_case_writes(client):
 async def test_memory_service_blocks_sensitive_pii_on_write(client):
     """PII 防线（服务端）：即便上游漏拦，也不得落库。"""
     user_id = int(client.user_id)
+    tenant_id = str(client.organization_id or "").strip()
+    assert tenant_id, "missing client.organization_id (tenant)"
 
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
             f"{GATEWAY_URL}/internal/memory-service/internal/memory/facts",
+            headers={"X-Organization-Id": tenant_id},
             json={
                 "user_id": user_id,
                 "content": f"偏好：请记住我的手机号 {_PII_PHONE}",
@@ -221,7 +243,7 @@ async def _create_matter_and_sync_profile(*, user_id: int) -> str:
     session_id = f"e2e-mem-materialize-{uuid.uuid4()}"
     async with httpx.AsyncClient(timeout=60.0) as c:
         created = await c.post(
-            f"{GATEWAY_URL}/internal/matter-service/internal/matters/from-consultation",
+            f"{GATEWAY_URL}/internal/matter-service/api/v1/internal/matters/from-consultation",
             headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "session_id": session_id,
@@ -239,7 +261,7 @@ async def _create_matter_and_sync_profile(*, user_id: int) -> str:
 
         # Sync minimal workflow profile: parties + intake_profile.facts (evidence hints)
         resp = await c.post(
-            f"{GATEWAY_URL}/internal/matter-service/internal/matters/{mid}/sync/all",
+            f"{GATEWAY_URL}/internal/matter-service/api/v1/internal/matters/{mid}/sync/all",
             headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "parties": [
@@ -262,12 +284,14 @@ async def _create_matter_and_sync_profile(*, user_id: int) -> str:
 async def test_memory_materializer_builds_case_index_and_recallable(client):
     """route2：case 索引由 matter -> memory materializer 生成，且 recall 可命中。"""
     user_id = int(client.user_id)
+    tenant_id = str(client.organization_id or "").strip()
+    assert tenant_id, "missing client.organization_id (tenant)"
     matter_id = await _create_matter_and_sync_profile(user_id=user_id)
 
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
             f"{AI_PLATFORM_URL}/internal/ai/memory/materialize",
-            json={"user_id": user_id, "matter_id": matter_id, "cleanup_legacy": True},
+            json={"user_id": user_id, "matter_id": matter_id, "cleanup_legacy": True, "tenant_id": tenant_id},
         )
         resp.raise_for_status()
         body = resp.json()
@@ -275,7 +299,7 @@ async def test_memory_materializer_builds_case_index_and_recallable(client):
         data = body.get("data") or {}
         assert (data.get("success") is True) or ("result" in data), data
 
-    facts = await _list_case_facts_from_memory_service(user_id=user_id, case_id=matter_id, limit=200)
+    facts = await _list_case_facts_from_memory_service(user_id=user_id, tenant_id=tenant_id, case_id=matter_id, limit=200)
     keys = {str(it.get("entity_key") or "") for it in facts if isinstance(it, dict)}
     assert "party:plaintiff:primary" in keys
     assert "party:defendant:primary" in keys
@@ -290,5 +314,5 @@ async def test_memory_materializer_builds_case_index_and_recallable(client):
         assert _PII_PHONE not in str(it.get("entity_key") or "")
         assert _PII_PHONE not in str(it.get("content") or "")
 
-    recalled = await _recall_from_memory_service(user_id=user_id, case_id=matter_id, query="借条", include_global=False)
+    recalled = await _recall_from_memory_service(user_id=user_id, tenant_id=tenant_id, case_id=matter_id, query="借条", include_global=False)
     assert any((it.get("entity_key") == ev_iou) for it in (recalled.get("facts") or []) if isinstance(it, dict))

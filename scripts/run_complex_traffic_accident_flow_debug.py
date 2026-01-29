@@ -146,7 +146,7 @@ async def main() -> None:
     selected_docs = [
         "civil_complaint",
         "litigation_strategy_report",
-        "evidence_list",
+        "evidence_list_doc",
         "compensation_calculation",
         "preservation_application",
     ]
@@ -267,4 +267,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-

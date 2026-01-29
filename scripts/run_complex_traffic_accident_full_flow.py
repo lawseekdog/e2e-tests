@@ -102,7 +102,7 @@ async def main() -> None:
         fid_transcript: str | None = None
 
         print("[2] Create session...", flush=True)
-        sess = await c.create_session(service_type_id="civil_first_instance")
+        sess = await c.create_session(service_type_id="civil_first_instance", client_role="plaintiff")
         sid = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
         if not sid:
             raise RuntimeError(f"create_session failed: {sess}")
@@ -122,7 +122,7 @@ async def main() -> None:
                 "profile.decisions.selected_documents": [
                     "civil_complaint",
                     "litigation_strategy_report",
-                    "evidence_list",
+                    "evidence_list_doc",
                     "compensation_calculation",
                     "preservation_application",
                 ],

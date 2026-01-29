@@ -205,7 +205,13 @@ class ApiClient:
                     raise RuntimeError(f"unexpected /auth/me payload: {me}")
 
                 self.user_id = str(me["data"]["user_id"])
-                org_id = me["data"].get("organization_id")
+                # Downstream Java services require X-Organization-Id. For E2E/local dev we allow forcing
+                # an org id via env, otherwise use /auth/me (and fall back to "0" if missing).
+                forced_org = os.getenv("E2E_ORGANIZATION_ID") or os.getenv("DEFAULT_ORGANIZATION_ID")
+                if forced_org and str(forced_org).strip():
+                    org_id = forced_org
+                else:
+                    org_id = me["data"].get("organization_id") or me["data"].get("organizationId") or "0"
                 self.organization_id = str(org_id) if org_id is not None and str(org_id).strip() else None
                 self.is_superuser = bool(me["data"].get("is_superuser"))
                 return result
@@ -227,12 +233,15 @@ class ApiClient:
         engagement_mode: str = "start_service",
         service_type_id: str | None = None,
         matter_id: str | None = None,
+        client_role: str | None = None,
     ) -> dict[str, Any]:
         data = {"engagement_mode": engagement_mode}
         if service_type_id:
             data["service_type_id"] = service_type_id
         if matter_id:
             data["matter_id"] = matter_id
+        if client_role:
+            data["client_role"] = client_role
         return await self.post("/api/v1/consultations/sessions", data)
 
     async def get_session(self, session_id: str) -> dict[str, Any]:

@@ -90,7 +90,7 @@ async def test_civil_prosecution_private_lending_generates_multiple_documents(la
     selected_docs = [
         "civil_complaint",
         "litigation_strategy_report",
-        "evidence_list",
+        "evidence_list_doc",
         "preservation_application",
     ]
 
@@ -151,7 +151,7 @@ async def test_civil_prosecution_private_lending_generates_multiple_documents(la
             # Regression guard: private lending strategy reports should not drift into admin/public-interest wording.
             assert "行政公益诉讼" not in text, text[:3000]
             _assert_strategy_report_tables_filled(docx_bytes)
-        elif out_key == "evidence_list":
+        elif out_key == "evidence_list_doc":
             assert any(x in text for x in ["证据目录", "证据"]), text[:2000]
         elif out_key == "preservation_application":
             assert any(x in text for x in ["保全", "财产保全申请书"]), text[:2000]

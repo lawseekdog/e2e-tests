@@ -44,7 +44,7 @@ async def _ensure_seed_packages() -> None:
         # 1) Fast check: if matter-service can list service types, platform config is ready.
         try:
             resp = await c.get(
-                f"{BASE_URL}/internal/matter-service/internal/matters/service-types",
+                f"{BASE_URL}/internal/matter-service/api/v1/internal/matters/service-types",
                 headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
                 params={"category": "litigation"},
             )
@@ -109,6 +109,18 @@ async def client():
     """已登录的 API 客户端"""
     async with ApiClient(BASE_URL) as c:
         await c.login(ADMIN_USERNAME, ADMIN_PASSWORD)
+        # Fail-fast tenant isolation: internal services require X-Organization-Id.
+        # Super admins may not have a default org; pick the first org as the active context for tests.
+        if not c.organization_id:
+            org_list = await c.get("/api/v1/admin/organizations?page=1&size=5")
+            org_id = None
+            if isinstance(org_list, dict):
+                items = org_list.get("data") if isinstance(org_list.get("data"), list) else []
+                if items:
+                    first = items[0] if isinstance(items[0], dict) else {}
+                    org_id = first.get("id")
+            if org_id is not None and str(org_id).strip():
+                c.organization_id = str(org_id).strip()
         yield c
 
 
@@ -185,7 +197,7 @@ async def lawyer_client():
             raise RuntimeError(f"failed to ensure organization: {org_list}")
 
         await admin.patch(
-            f"/internal/user-service/internal/users/{lawyer_user_id}/organization",
+            f"/internal/user-service/api/v1/internal/users/{lawyer_user_id}/organization",
             {"organization_id": int(org_id)},
         )
 

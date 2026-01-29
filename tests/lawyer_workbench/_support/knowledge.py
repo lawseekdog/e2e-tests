@@ -27,7 +27,7 @@ async def ingest_doc(
         "metadata": metadata or {},
         "overwrite": bool(overwrite),
     }
-    resp = await client.post("/internal/knowledge-service/internal/knowledge/ingest", payload)
+    resp = await client.post("/api/v1/internal/knowledge-service/knowledge/ingest", payload)
     data = unwrap_api_response(resp)
     if not isinstance(data, dict):
         raise AssertionError(f"knowledge ingest returned unexpected payload: {resp}")
@@ -50,7 +50,7 @@ async def search(
         "include_content": bool(include_content),
         "include_metadata": bool(include_metadata),
     }
-    resp = await client.post("/internal/knowledge-service/internal/knowledge/search", payload)
+    resp = await client.post("/api/v1/internal/knowledge-service/knowledge/search", payload)
     data = unwrap_api_response(resp)
     if not isinstance(data, dict):
         raise AssertionError(f"knowledge search returned unexpected payload: {resp}")
@@ -77,4 +77,3 @@ async def wait_for_search_hit(
                 return last
         await asyncio.sleep(float(interval_s))
     raise AssertionError(f"Timed out waiting for knowledge search hit: file_id={want}. Last={last}")
-

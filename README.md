@@ -56,7 +56,7 @@ cp .env.example .env
 
 - `BASE_URL`: gateway 地址（默认 `http://localhost:18001`）
 - `AI_PLATFORM_URL`: ai-engine 地址（默认 `http://localhost:18084`，用于 memory-extraction infra 测试）
-- `INTERNAL_API_KEY`: 访问 `/internal/*` 路由所需（默认 `test_internal_key`，与 docker-compose 对齐）
+- `INTERNAL_API_KEY`: 访问 `/api/v1/internal/*` 路由所需（默认 `test_internal_key`，与 docker-compose 对齐）
 - `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY`: 真实 LLM Key（由你的 docker-compose / .env 决定）
 
 ## 运行测试

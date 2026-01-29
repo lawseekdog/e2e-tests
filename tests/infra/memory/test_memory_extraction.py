@@ -42,7 +42,7 @@ async def _run_memory_extract(
         patch["tenant_id"] = str(tenant_id or "").strip()
         payload["state_patch"] = patch
         resp = await c.post(
-            f"{AI_PLATFORM_URL}/internal/ai/memory/extract",
+            f"{AI_PLATFORM_URL}/api/v1/internal/ai/memory/extract",
             json=payload,
         )
         resp.raise_for_status()
@@ -58,7 +58,7 @@ async def _run_memory_extract(
 async def _recall_from_memory_service(*, user_id: int, tenant_id: str, case_id: str | None, query: str, include_global: bool) -> dict:
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
-            f"{GATEWAY_URL}/internal/memory-service/internal/memory/recall",
+            f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/recall",
             headers={"X-Organization-Id": str(tenant_id or "").strip()},
             json={
                 "user_id": int(user_id),
@@ -78,7 +78,7 @@ async def _recall_from_memory_service(*, user_id: int, tenant_id: str, case_id: 
 async def _list_case_facts_from_memory_service(*, user_id: int, tenant_id: str, case_id: str, limit: int = 200) -> list[dict]:
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.get(
-            f"{GATEWAY_URL}/internal/memory-service/internal/memory/users/{int(user_id)}/facts",
+            f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/users/{int(user_id)}/facts",
             headers={"X-Organization-Id": str(tenant_id or "").strip()},
             params={"scope": "case", "case_id": str(case_id), "limit": int(limit)},
         )
@@ -186,7 +186,7 @@ async def test_memory_extraction_preferences_are_global_scope(client):
 
 @pytest.mark.e2e
 async def test_memory_service_route2_strict_blocks_public_case_writes(client):
-    """route2 服务端强约束：/internal/memory/facts 禁止写入 case 事实（仅允许 summary:skill:* 例外）。"""
+    """route2 服务端强约束：/api/v1/internal/memory/facts 禁止写入 case 事实（仅允许 summary:skill:* 例外）。"""
     user_id = int(client.user_id)
     tenant_id = str(client.organization_id or "").strip()
     assert tenant_id, "missing client.organization_id (tenant)"
@@ -195,7 +195,7 @@ async def test_memory_service_route2_strict_blocks_public_case_writes(client):
 
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
-            f"{GATEWAY_URL}/internal/memory-service/internal/memory/facts",
+            f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/facts",
             headers={"X-Organization-Id": tenant_id},
             json={
                 "user_id": user_id,
@@ -221,7 +221,7 @@ async def test_memory_service_blocks_sensitive_pii_on_write(client):
 
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
-            f"{GATEWAY_URL}/internal/memory-service/internal/memory/facts",
+            f"{GATEWAY_URL}/api/v1/internal/memory-service/memory/facts",
             headers={"X-Organization-Id": tenant_id},
             json={
                 "user_id": user_id,
@@ -243,7 +243,7 @@ async def _create_matter_and_sync_profile(*, user_id: int) -> str:
     session_id = f"e2e-mem-materialize-{uuid.uuid4()}"
     async with httpx.AsyncClient(timeout=60.0) as c:
         created = await c.post(
-            f"{GATEWAY_URL}/internal/matter-service/api/v1/internal/matters/from-consultation",
+            f"{GATEWAY_URL}/api/v1/internal/matter-service/matters/from-consultation",
             headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "session_id": session_id,
@@ -261,7 +261,7 @@ async def _create_matter_and_sync_profile(*, user_id: int) -> str:
 
         # Sync minimal workflow profile: parties + intake_profile.facts (evidence hints)
         resp = await c.post(
-            f"{GATEWAY_URL}/internal/matter-service/api/v1/internal/matters/{mid}/sync/all",
+            f"{GATEWAY_URL}/api/v1/internal/matter-service/matters/{mid}/sync/all",
             headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
             json={
                 "parties": [
@@ -290,7 +290,7 @@ async def test_memory_materializer_builds_case_index_and_recallable(client):
 
     async with httpx.AsyncClient(timeout=60.0) as c:
         resp = await c.post(
-            f"{AI_PLATFORM_URL}/internal/ai/memory/materialize",
+            f"{AI_PLATFORM_URL}/api/v1/internal/ai/memory/materialize",
             json={"user_id": user_id, "matter_id": matter_id, "cleanup_legacy": True, "tenant_id": tenant_id},
         )
         resp.raise_for_status()

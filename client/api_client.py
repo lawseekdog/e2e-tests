@@ -20,7 +20,7 @@ class ApiClient:
         self.user_id: str | None = None
         self.organization_id: str | None = None
         self.is_superuser: bool = False
-        # Internal endpoints (e.g. /internal/*) require an internal API key.
+        # Internal endpoints (e.g. /api/v1/internal/*) require an internal API key.
         # When running E2E locally, pass it via env (docker-compose/java-stack uses INTERNAL_API_KEY).
         self.internal_api_key: str | None = os.getenv("INTERNAL_API_KEY")
         self._client: httpx.AsyncClient | None = None

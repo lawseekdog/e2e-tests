@@ -22,7 +22,7 @@ async def list_case_facts(
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     resp = await client.get(
-        f"/internal/memory-service/internal/memory/users/{int(user_id)}/facts",
+        f"/api/v1/internal/memory-service/memory/users/{int(user_id)}/facts",
         params={"scope": "case", "case_id": str(case_id), "limit": int(limit)},
     )
     data = unwrap_api_response(resp)

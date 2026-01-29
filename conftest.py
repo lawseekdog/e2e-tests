@@ -44,7 +44,7 @@ async def _ensure_seed_packages() -> None:
         # 1) Fast check: if matter-service can list service types, platform config is ready.
         try:
             resp = await c.get(
-                f"{BASE_URL}/internal/matter-service/api/v1/internal/matters/service-types",
+                f"{BASE_URL}/api/v1/internal/matter-service/matters/service-types",
                 headers={"X-Internal-Api-Key": INTERNAL_API_KEY},
                 params={"category": "litigation"},
             )
@@ -197,7 +197,7 @@ async def lawyer_client():
             raise RuntimeError(f"failed to ensure organization: {org_list}")
 
         await admin.patch(
-            f"/internal/user-service/api/v1/internal/users/{lawyer_user_id}/organization",
+            f"/api/v1/internal/user-service/users/{lawyer_user_id}/organization",
             {"organization_id": int(org_id)},
         )
 

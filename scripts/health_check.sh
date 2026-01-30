@@ -3,8 +3,15 @@
 
 set -e
 
-BASE_URL="${BASE_URL:-http://localhost:18001}"
+BASE_URL="${BASE_URL:-http://localhost:18001/lawseekdog/v1}"
 INTERNAL_API_KEY="${INTERNAL_API_KEY:-change-me-in-production-32chars}"
+
+BASE_URL="${BASE_URL%/}"
+# APISIX exposes a plain health endpoint at the gateway root.
+GATEWAY_ROOT="${BASE_URL%/lawseekdog/v1}"
+if [ "$GATEWAY_ROOT" == "$BASE_URL" ]; then
+  GATEWAY_ROOT="$BASE_URL"
+fi
 
 SERVICES=(
   "rerank-service"
@@ -27,7 +34,7 @@ echo ""
 
 # 检查 Gateway
 echo -n "Gateway: "
-if curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/api-gateway/api/v1/internal/actuator/health" | grep -q "200"; then
+if curl -s -o /dev/null -w "%{http_code}" "${GATEWAY_ROOT}/healthz" | grep -q "200"; then
   echo "✓ healthy"
 else
   echo "✗ unhealthy"

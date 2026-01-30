@@ -34,6 +34,11 @@ class ApiClient:
         # Internal endpoints (e.g. /{service}/api/v1/internal/*) require an internal API key.
         # When running E2E locally, pass it via env (docker-compose/java-stack uses INTERNAL_API_KEY).
         self.internal_api_key: str | None = os.getenv("INTERNAL_API_KEY")
+        # Chat transport (consultations-service):
+        # - legacy: SSE endpoints (/chat, /resume, /actions)
+        # - new: WebSocket endpoint (/ws)
+        # Local stacks may run a prebuilt jar that still exposes SSE. Keep E2E auto-adaptive.
+        self._chat_transport: str | None = None
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self):
@@ -91,20 +96,38 @@ class ApiClient:
         raise last_exc if last_exc else RuntimeError("request failed")
 
     async def _post_ws(
-        self, ws_path: str, msg_type: str, data: dict[str, Any]
+        self,
+        ws_path: str,
+        msg_type: str,
+        data: dict[str, Any],
+        *,
+        max_attempts: int | None = None,
+        open_timeout_s: float | None = None,
     ) -> dict[str, Any]:
         """Connect to WebSocket, authenticate, send message, and collect events until 'end'."""
         parsed = urlparse(self.base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
-        ws_url = f"{scheme}://{parsed.netloc}{ws_path}"
+        # base_url may include a path prefix (e.g. /lawseekdog/v1 behind APISIX).
+        # WebSocket URLs must include the same prefix, otherwise APISIX will 404 the handshake.
+        base_path = (parsed.path or "").rstrip("/")
+        ws_url = f"{scheme}://{parsed.netloc}{base_path}{ws_path}"
 
-        max_attempts = int(os.getenv("E2E_HTTP_WS_RETRIES", "180") or 180)
+        if max_attempts is None:
+            max_attempts = int(os.getenv("E2E_HTTP_WS_RETRIES", "180") or 180)
         last_exc: Exception | None = None
 
         for attempt in range(1, max_attempts + 1):
             events: list[dict[str, Any]] = []
             try:
-                async with websockets.connect(ws_url, close_timeout=10) as ws:
+                async with websockets.connect(
+                    ws_url,
+                    close_timeout=10,
+                    open_timeout=open_timeout_s,
+                    # Consultations-service speaks "ping"/"pong" as app-level JSON events; some
+                    # proxies don't reliably forward WebSocket protocol pings in local dev.
+                    # Disable protocol-level keepalive to avoid spurious 1011 ping timeouts.
+                    ping_interval=None,
+                ) as ws:
                     # Send auth message first
                     auth_msg = {
                         "type": "auth",
@@ -165,6 +188,149 @@ class ApiClient:
                 await asyncio.sleep(min(4.0, 0.5 * attempt))
 
         raise last_exc if last_exc else RuntimeError("websocket request failed")
+
+    async def _post_sse(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
+        """POST an SSE endpoint and parse events into {events, output}."""
+        url = f"{self.base_url}{path}"
+        headers = dict(self.headers)
+        headers["Accept"] = "text/event-stream"
+
+        max_attempts = int(os.getenv("E2E_HTTP_SSE_RETRIES", "60") or 60)
+        transient = {500, 502, 503, 504}
+        last_exc: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            events: list[dict[str, Any]] = []
+            event_name: str | None = None
+            data_lines: list[str] = []
+
+            def _flush_event() -> None:
+                nonlocal event_name, data_lines, events
+                if event_name is None and not data_lines:
+                    return
+                raw = "\n".join(data_lines).strip()
+                payload: Any = raw
+                if raw:
+                    try:
+                        payload = json.loads(raw)
+                    except Exception:
+                        payload = raw
+                events.append({"event": (event_name or "message"), "data": payload})
+                event_name = None
+                data_lines = []
+
+            try:
+                async with self._client.stream(
+                    "POST", url, headers=headers, json=data
+                ) as resp:
+                    if resp.status_code in transient and attempt < max_attempts:
+                        await asyncio.sleep(min(4.0, 0.5 * attempt))
+                        continue
+                    resp.raise_for_status()
+
+                    async for line in resp.aiter_lines():
+                        if line is None:
+                            continue
+                        s = str(line)
+                        if not s:
+                            _flush_event()
+                            continue
+                        if s.startswith(":"):
+                            # comment/heartbeat line
+                            continue
+                        if s.startswith("event:"):
+                            event_name = s[len("event:") :].strip()
+                            continue
+                        if s.startswith("data:"):
+                            data_lines.append(s[len("data:") :].lstrip())
+                            continue
+                        if s.startswith("id:") or s.startswith("retry:"):
+                            continue
+                        # Non-standard line: treat as data (some proxies strip SSE prefixes).
+                        data_lines.append(s)
+
+                # Flush trailing event (if the server ended without a final blank line).
+                _flush_event()
+
+                output = ""
+                for it in reversed(events):
+                    if it.get("event") not in {"end", "complete"}:
+                        continue
+                    data_obj = it.get("data")
+                    if isinstance(data_obj, dict):
+                        output = str(data_obj.get("output") or "")
+                        break
+                    if isinstance(data_obj, str):
+                        output = data_obj
+                        break
+                return {"events": events, "output": output}
+
+            except httpx.HTTPStatusError as e:
+                last_exc = e
+                if e.response is not None and e.response.status_code in transient and attempt < max_attempts:
+                    await asyncio.sleep(min(4.0, 0.5 * attempt))
+                    continue
+                raise
+            except Exception as e:
+                # In local docker, proxies may teardown long SSE connections; treat as a non-fatal partial end.
+                events.append(
+                    {
+                        "event": "error",
+                        "data": {"error": str(e), "partial": True},
+                    }
+                )
+                return {"events": events, "output": ""}
+
+        raise last_exc if last_exc else RuntimeError("sse request failed")
+
+    def _resolve_chat_transport(self) -> str:
+        pref = str(os.getenv("E2E_CHAT_TRANSPORT", "auto") or "auto").strip().lower()
+        if pref in {"ws", "websocket"}:
+            return "ws"
+        if pref in {"sse"}:
+            return "sse"
+        # auto
+        return self._chat_transport or "auto"
+
+    async def _post_chat_auto(
+        self,
+        *,
+        ws_path: str,
+        sse_path: str,
+        msg_type: str,
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        transport = self._resolve_chat_transport()
+        if transport == "ws":
+            return await self._post_ws(ws_path, msg_type, data)
+        if transport == "sse":
+            return await self._post_sse(sse_path, data)
+
+        # auto: try WS once (fast), then downgrade to SSE for this client if handshake fails.
+        try:
+            out = await self._post_ws(
+                ws_path,
+                msg_type,
+                data,
+                max_attempts=1,
+                open_timeout_s=float(os.getenv("E2E_HTTP_WS_OPEN_TIMEOUT_S", "2.5") or 2.5),
+            )
+            self._chat_transport = "ws"
+            return out
+        except Exception as ws_exc:
+            # Some stacks may not expose WS streaming; fallback to SSE if available.
+            # Newer stacks may remove SSE endpoints entirely (406/404). In that case,
+            # surface the WS error instead of masking it with an SSE 406.
+            self._chat_transport = "sse"
+            try:
+                return await self._post_sse(sse_path, data)
+            except httpx.HTTPStatusError as sse_exc:
+                code = sse_exc.response.status_code if sse_exc.response is not None else None
+                if code in {404, 406}:
+                    raise ws_exc
+                raise
+            except Exception:
+                raise ws_exc
 
     async def get(self, path: str, **kwargs) -> dict[str, Any]:
         return await self._request("GET", path, **kwargs)
@@ -299,8 +465,13 @@ class ApiClient:
         }
         if max_loops is not None:
             data["max_loops"] = max_loops
+        if self.user_id:
+            data["user_id"] = int(self.user_id)
         ws_path = f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/ws"
-        return await self._post_ws(ws_path, "chat", data)
+        sse_path = f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/chat"
+        return await self._post_chat_auto(
+            ws_path=ws_path, sse_path=sse_path, msg_type="chat", data=data
+        )
 
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
         return await self.get(
@@ -396,8 +567,13 @@ class ApiClient:
             data["pending_card"] = pending_card
         if max_loops is not None:
             data["max_loops"] = int(max_loops)
+        if self.user_id:
+            data["user_id"] = int(self.user_id)
         ws_path = f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/ws"
-        return await self._post_ws(ws_path, "resume", data)
+        sse_path = f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/resume"
+        return await self._post_chat_auto(
+            ws_path=ws_path, sse_path=sse_path, msg_type="resume", data=data
+        )
 
     async def switch_service_type(
         self,

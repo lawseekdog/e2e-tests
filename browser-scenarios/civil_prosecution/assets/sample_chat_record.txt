@@ -1,0 +1,4 @@
+Chat record (mock)
+2025-01-01 Zhang San: I transferred you 100000 CNY as a loan.
+2025-06-02 Zhang San: Please repay the loan.
+2025-06-03 Li Si: I will repay later.

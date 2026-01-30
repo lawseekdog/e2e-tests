@@ -3,31 +3,83 @@
 from __future__ import annotations
 
 from io import BytesIO
+import zipfile
 from typing import Iterable
 
 
 def extract_docx_text(docx_bytes: bytes) -> str:
-    """Best-effort extraction of visible text from a docx file."""
+    """Best-effort extraction of visible text from a docx file.
+
+    Notes:
+    - Our DOCX templates use content controls (w:sdt). python-docx does not reliably
+      surface w:sdtContent text, so we parse the OOXML directly.
+    - For E2E assertions we only need a stable, human-visible text approximation.
+    """
     if not isinstance(docx_bytes, (bytes, bytearray)) or not docx_bytes:
         return ""
-    from docx import Document  # python-docx
 
-    doc = Document(BytesIO(docx_bytes))
+    def _strip(s: str) -> str:
+        return str(s or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    def _para_text(p) -> str:
+        buf: list[str] = []
+        for el in p.iter():
+            tag = str(getattr(el, "tag", "") or "")
+            if tag.endswith("}t"):
+                if el.text:
+                    buf.append(str(el.text))
+                continue
+            if tag.endswith("}tab"):
+                buf.append("\t")
+                continue
+            if tag.endswith("}br"):
+                buf.append("\n")
+                continue
+        return _strip("".join(buf))
+
     parts: list[str] = []
 
-    for p in doc.paragraphs or []:
-        if p is None:
-            continue
-        t = (p.text or "").strip()
-        if t:
-            parts.append(t)
+    try:
+        with zipfile.ZipFile(BytesIO(docx_bytes)) as z:
+            names = list(z.namelist())
+            xml_names: list[str] = []
+            for n in names:
+                if n == "word/document.xml":
+                    xml_names.append(n)
+                elif n.startswith("word/header") and n.endswith(".xml"):
+                    xml_names.append(n)
+                elif n.startswith("word/footer") and n.endswith(".xml"):
+                    xml_names.append(n)
+                elif n in {"word/footnotes.xml", "word/endnotes.xml"}:
+                    xml_names.append(n)
 
-    for tbl in doc.tables or []:
-        for row in tbl.rows or []:
-            for cell in row.cells or []:
-                t = (cell.text or "").strip()
-                if t:
-                    parts.append(t)
+            import xml.etree.ElementTree as ET
+
+            for name in xml_names:
+                try:
+                    root = ET.fromstring(z.read(name))
+                except Exception:
+                    continue
+                for p in root.iter():
+                    if str(getattr(p, "tag", "") or "").endswith("}p"):
+                        t = _para_text(p)
+                        if t:
+                            parts.append(t)
+
+            # Fallback: if there were no paragraphs, collect raw w:t (rare but harmless).
+            if not parts:
+                for name in xml_names:
+                    try:
+                        root = ET.fromstring(z.read(name))
+                    except Exception:
+                        continue
+                    for el in root.iter():
+                        if str(getattr(el, "tag", "") or "").endswith("}t") and el.text:
+                            t = _strip(el.text)
+                            if t:
+                                parts.append(t)
+    except Exception:
+        return ""
 
     return "\n".join(parts)
 

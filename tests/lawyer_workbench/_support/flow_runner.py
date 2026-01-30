@@ -31,7 +31,9 @@ def _read_int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-_RESUME_MAX_LOOPS = _read_int_env("E2E_RESUME_MAX_LOOPS", 24)
+# Local dev workflows can be multi-skill and may need a larger per-resume loop budget to
+# reliably reach the next interrupt without requiring extra "继续" nudges.
+_RESUME_MAX_LOOPS = _read_int_env("E2E_RESUME_MAX_LOOPS", 80)
 
 
 def _debug(msg: str) -> None:
@@ -226,16 +228,11 @@ class WorkbenchFlow:
         self.seen_card_signatures.append(card_signature(card))
         skill_id = str(card.get("skill_id") or "").strip()
         if skill_id == "system:kickoff":
-            # Avoid a long resume() run on kickoff: send a normal chat message.
-            # ConsultationChatService can auto-complete the kickoff card from the first user_query.
-            facts = _resolve_override_value("profile.facts", self.overrides)
-            facts_text = trim(facts) or "已补充案件事实，请继续推进。"
-            sse = await self.client.chat(
-                self.session_id,
-                facts_text,
-                attachments=list(self.uploaded_file_ids),
-                max_loops=6,
-            )
+            # Use /resume to submit the kickoff card deterministically.
+            # Relying on "auto-resume from chat" is sensitive to max_loops and can appear stuck.
+            user_response = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
+            sse = await self.client.resume(self.session_id, user_response, pending_card=card, max_loops=_RESUME_MAX_LOOPS)
+            assert_has_user_message(sse)
             if isinstance(sse, dict):
                 self.last_sse = sse
                 self.seen_sse.append(sse)

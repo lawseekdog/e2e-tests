@@ -201,22 +201,25 @@ async def main() -> None:
             if card:
                 skill_id = str(card.get("skill_id") or "").strip()
                 print("iter", i, "card", card.get("task_key"), card.get("review_type"), skill_id, flush=True)
+                # For E2E/debug stability, submit cards via /resume (so we don't depend on "auto-resume from chat"
+                # which can be constrained by a small max_loops and appear stuck).
+                t0 = time.time()
+                await c.resume(
+                    sid,
+                    _auto_answer_card(card, overrides, uploaded_file_ids),
+                    pending_card=card,
+                    max_loops=80,
+                )
                 if skill_id == "system:kickoff":
-                    t0 = time.time()
-                    await c.chat(sid, str(overrides["profile.facts"]), attachments=list(uploaded_file_ids), max_loops=6)
                     kickoff_sent = True
-                    print("  kickoff chat", round(time.time() - t0, 2), "s", flush=True)
-                else:
-                    t0 = time.time()
-                    await c.resume(sid, _auto_answer_card(card, overrides, uploaded_file_ids), pending_card=card)
-                    print("  resume", round(time.time() - t0, 2), "s", flush=True)
+                print("  resume", round(time.time() - t0, 2), "s", flush=True)
                 continue
 
             # Some flows may not immediately surface a kickoff card; send facts once to bootstrap.
             if not kickoff_sent:
                 print("iter", i, "no card -> kickoff", "matter_id", matter_id, flush=True)
                 t0 = time.time()
-                await c.chat(sid, str(overrides["profile.facts"]), attachments=list(uploaded_file_ids), max_loops=6)
+                await c.chat(sid, str(overrides["profile.facts"]), attachments=list(uploaded_file_ids), max_loops=80)
                 kickoff_sent = True
                 print("  kickoff chat", round(time.time() - t0, 2), "s", flush=True)
             else:

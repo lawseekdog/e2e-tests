@@ -71,7 +71,14 @@ async def _has_deliverable(client: ApiClient, matter_id: str, output_key: str) -
     resp = await client.list_deliverables(matter_id, output_key=output_key)
     data = unwrap_api_response(resp)
     items = (data.get("deliverables") if isinstance(data, dict) else None) or []
-    return bool(items)
+    # Only treat it as "ready" when a rendered file exists (skill outputs may share output_key).
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        fid = str(it.get("file_id") or "").strip()
+        if fid:
+            return True
+    return False
 
 
 async def main() -> None:
@@ -218,7 +225,8 @@ async def main() -> None:
             if not items:
                 print(f"  - missing deliverable: {out_key}", flush=True)
                 continue
-            d0 = items[0] if isinstance(items[0], dict) else {}
+            # Pick the first rendered deliverable (skill outputs may share output_key but have no file_id).
+            d0 = next((it for it in items if isinstance(it, dict) and str(it.get("file_id") or "").strip()), {})
             file_id = str(d0.get("file_id") or "").strip()
             if not file_id:
                 print(f"  - deliverable {out_key} missing file_id: {d0}", flush=True)

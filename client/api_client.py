@@ -294,15 +294,13 @@ class ApiClient:
         max_loops: int | None = None,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
-            "user_id": int(self.user_id) if self.user_id else None,
             "user_query": user_query,
             "attachments": attachments or [],
         }
         if max_loops is not None:
             data["max_loops"] = max_loops
-        return await self._post_sse(
-            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/chat", data
-        )
+        ws_path = f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/ws"
+        return await self._post_ws(ws_path, "chat", data)
 
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
         return await self.get(
@@ -391,17 +389,15 @@ class ApiClient:
         pending_card: dict[str, Any] | None = None,
         max_loops: int | None = None,
     ) -> dict[str, Any]:
-        data = {
-            "user_id": int(self.user_id) if self.user_id else None,
+        data: dict[str, Any] = {
             "user_response": user_response,
         }
         if pending_card:
             data["pending_card"] = pending_card
         if max_loops is not None:
             data["max_loops"] = int(max_loops)
-        return await self._post_sse(
-            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/resume", data
-        )
+        ws_path = f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/ws"
+        return await self._post_ws(ws_path, "resume", data)
 
     async def switch_service_type(
         self,

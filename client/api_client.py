@@ -6,8 +6,10 @@ import asyncio
 import json
 import os
 import httpx
+import websockets
 from typing import Any
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 AUTH_V1 = "/auth-service/api/v1"
@@ -59,9 +61,7 @@ class ApiClient:
             headers["X-Internal-Api-Key"] = str(self.internal_api_key)
         return headers
 
-    async def _request(
-        self, method: str, path: str, **kwargs
-    ) -> dict[str, Any]:
+    async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         kwargs.setdefault("headers", self.headers)
         # Local docker dev: gateway may transiently return 502/503/504 while a service is being recreated.
@@ -90,82 +90,98 @@ class ApiClient:
                 await asyncio.sleep(min(4.0, 0.5 * attempt))
         raise last_exc if last_exc else RuntimeError("request failed")
 
-    async def _post_sse(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
-        """POST an SSE endpoint and collect events until the stream ends."""
-        url = f"{self.base_url}{path}"
-        headers = dict(self.headers)
-        headers["Accept"] = "text/event-stream"
-        # Local docker: Spring services may take a few minutes to restart (Flyway/JIT warmup),
-        # and the gateway returns 502/503/504 during that window. Keep SSE retries tolerant.
-        # Long-lived workflows + local docker restarts can keep nginx returning 502/503/504 for several minutes.
-        # Keep this tolerant by default; override via env in CI if needed.
-        max_attempts = int(os.getenv("E2E_HTTP_SSE_RETRIES", "180") or 180)
+    async def _post_ws(
+        self, ws_path: str, msg_type: str, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Connect to WebSocket, authenticate, send message, and collect events until 'end'."""
+        parsed = urlparse(self.base_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        ws_url = f"{scheme}://{parsed.netloc}{ws_path}"
+
+        max_attempts = int(os.getenv("E2E_HTTP_WS_RETRIES", "180") or 180)
         last_exc: Exception | None = None
+
         for attempt in range(1, max_attempts + 1):
             events: list[dict[str, Any]] = []
-            current_event: str | None = None
             try:
-                async with self._client.stream("POST", url, headers=headers, json=data) as response:
-                    if response.status_code in {502, 503, 504} and attempt < max_attempts:
-                        await asyncio.sleep(min(4.0, 0.5 * attempt))
-                        continue
-                    response.raise_for_status()
-                    try:
-                        async for line in response.aiter_lines():
-                            if line.startswith("event: "):
-                                current_event = line[7:].strip() or None
+                async with websockets.connect(ws_url, close_timeout=10) as ws:
+                    # Send auth message first
+                    auth_msg = {
+                        "type": "auth",
+                        "user_id": int(self.user_id) if self.user_id else None,
+                        "organization_id": self.organization_id,
+                    }
+                    await ws.send(json.dumps(auth_msg))
+
+                    # Wait for auth_success
+                    auth_response = await asyncio.wait_for(ws.recv(), timeout=30)
+                    auth_data = json.loads(auth_response)
+                    if auth_data.get("event") != "auth_success":
+                        raise RuntimeError(f"WebSocket auth failed: {auth_data}")
+
+                    # Send the actual message
+                    msg = {"type": msg_type, **data}
+                    await ws.send(json.dumps(msg))
+
+                    # Collect events until 'end'
+                    while True:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=300)
+                            payload = json.loads(raw)
+                            evt = payload.get("event")
+                            evt_data = payload.get("data", payload)
+
+                            # Handle ping
+                            if evt == "ping":
+                                await ws.send(json.dumps({"type": "pong"}))
                                 continue
-                            if line.startswith("data: "):
-                                raw = line[6:].strip()
-                                payload: Any = None
-                                if raw:
-                                    try:
-                                        payload = json.loads(raw)
-                                    except Exception:
-                                        payload = {"raw": raw}
-                                evt = current_event or (payload or {}).get("event") if isinstance(payload, dict) else None
-                                events.append({"event": evt, "data": payload})
-                                current_event = None
-                                # Most endpoints use "end" as the last event; stop early to avoid waiting for
-                                # proxy/connection teardown quirks.
-                                if evt in {"end", "complete"}:
-                                    break
-                    except (httpx.RemoteProtocolError, httpx.ReadTimeout) as e:
-                        # SSE is long-lived; reverse proxies or upstreams may terminate the stream abruptly.
-                        # Return whatever we already collected so tests can continue by polling state.
-                        events.append({"event": "error", "data": {"error": str(e), "partial": True}})
+
+                            events.append({"event": evt, "data": evt_data})
+
+                            if evt in {"end", "complete"}:
+                                break
+                        except asyncio.TimeoutError:
+                            events.append(
+                                {
+                                    "event": "error",
+                                    "data": {"error": "timeout", "partial": True},
+                                }
+                            )
+                            break
 
                 output = ""
                 for it in reversed(events):
-                    if it.get("event") in {"end", "complete"} and isinstance(it.get("data"), dict):
+                    if it.get("event") in {"end", "complete"} and isinstance(
+                        it.get("data"), dict
+                    ):
                         output = str(it["data"].get("output") or "")
                         break
                 return {"events": events, "output": output}
-            except httpx.HTTPStatusError as e:
-                last_exc = e
-                code = e.response.status_code if e.response is not None else None
-                if code in {502, 503, 504} and attempt < max_attempts:
-                    await asyncio.sleep(min(4.0, 0.5 * attempt))
-                    continue
-                raise
+
             except Exception as e:
                 last_exc = e
                 if attempt >= max_attempts:
                     raise
                 await asyncio.sleep(min(4.0, 0.5 * attempt))
 
-        raise last_exc if last_exc else RuntimeError("sse request failed")
+        raise last_exc if last_exc else RuntimeError("websocket request failed")
 
     async def get(self, path: str, **kwargs) -> dict[str, Any]:
         return await self._request("GET", path, **kwargs)
 
-    async def post(self, path: str, data: dict | None = None, **kwargs) -> dict[str, Any]:
+    async def post(
+        self, path: str, data: dict | None = None, **kwargs
+    ) -> dict[str, Any]:
         return await self._request("POST", path, json=data, **kwargs)
 
-    async def put(self, path: str, data: dict | None = None, **kwargs) -> dict[str, Any]:
+    async def put(
+        self, path: str, data: dict | None = None, **kwargs
+    ) -> dict[str, Any]:
         return await self._request("PUT", path, json=data, **kwargs)
 
-    async def patch(self, path: str, data: dict | None = None, **kwargs) -> dict[str, Any]:
+    async def patch(
+        self, path: str, data: dict | None = None, **kwargs
+    ) -> dict[str, Any]:
         return await self._request("PATCH", path, json=data, **kwargs)
 
     async def delete(self, path: str, **kwargs) -> dict[str, Any]:
@@ -184,7 +200,11 @@ class ApiClient:
 
         for attempt in range(1, max_attempts + 1):
             try:
-                resp = await self._client.post(url, headers=headers, data={"username": username, "password": password})
+                resp = await self._client.post(
+                    url,
+                    headers=headers,
+                    data={"username": username, "password": password},
+                )
                 if resp.status_code in transient and attempt < max_attempts:
                     # Local docker dev: user-service/auth dependencies may restart and briefly cause 5xx.
                     await asyncio.sleep(min(4.0, 0.5 * attempt))
@@ -200,7 +220,9 @@ class ApiClient:
                         me = await self.get_me()
                         break
                     except httpx.HTTPStatusError as e:
-                        code = e.response.status_code if e.response is not None else None
+                        code = (
+                            e.response.status_code if e.response is not None else None
+                        )
                         if code in transient and j < max_attempts:
                             await asyncio.sleep(min(4.0, 0.5 * j))
                             continue
@@ -216,12 +238,20 @@ class ApiClient:
                 self.user_id = str(me["data"]["user_id"])
                 # Downstream Java services require X-Organization-Id. For E2E/local dev we allow forcing
                 # an org id via env, otherwise use /auth/me (and fall back to "0" if missing).
-                forced_org = os.getenv("E2E_ORGANIZATION_ID") or os.getenv("DEFAULT_ORGANIZATION_ID")
+                forced_org = os.getenv("E2E_ORGANIZATION_ID") or os.getenv(
+                    "DEFAULT_ORGANIZATION_ID"
+                )
                 if forced_org and str(forced_org).strip():
                     org_id = forced_org
                 else:
-                    org_id = me["data"].get("organization_id") or me["data"].get("organizationId") or "0"
-                self.organization_id = str(org_id) if org_id is not None and str(org_id).strip() else None
+                    org_id = (
+                        me["data"].get("organization_id")
+                        or me["data"].get("organizationId")
+                        or "0"
+                    )
+                self.organization_id = (
+                    str(org_id) if org_id is not None and str(org_id).strip() else None
+                )
                 self.is_superuser = bool(me["data"].get("is_superuser"))
                 return result
             except Exception as e:
@@ -270,12 +300,18 @@ class ApiClient:
         }
         if max_loops is not None:
             data["max_loops"] = max_loops
-        return await self._post_sse(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/chat", data)
+        return await self._post_sse(
+            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/chat", data
+        )
 
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
-        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/pending_card")
+        return await self.get(
+            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/pending_card"
+        )
 
-    async def upload_session_attachment(self, session_id: str, file_path: str) -> dict[str, Any]:
+    async def upload_session_attachment(
+        self, session_id: str, file_path: str
+    ) -> dict[str, Any]:
         """Upload an attachment bound to a consultation session (so canvas.evidence_list can show it)."""
         path = Path(file_path)
         if not path.exists() or not path.is_file():
@@ -312,25 +348,41 @@ class ApiClient:
         raise last_exc if last_exc else RuntimeError("upload session attachment failed")
 
     async def get_session_canvas(self, session_id: str) -> dict[str, Any]:
-        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/canvas")
+        return await self.get(
+            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/canvas"
+        )
 
-    async def get_session_timeline(self, session_id: str, limit: int | None = None) -> dict[str, Any]:
+    async def get_session_timeline(
+        self, session_id: str, limit: int | None = None
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/timeline", params=params)
+        return await self.get(
+            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/timeline",
+            params=params,
+        )
 
-    async def list_session_traces(self, session_id: str, limit: int | None = None) -> dict[str, Any]:
+    async def list_session_traces(
+        self, session_id: str, limit: int | None = None
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/traces", params=params)
+        return await self.get(
+            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/traces",
+            params=params,
+        )
 
-    async def get_session_trace_detail(self, session_id: str, trace_id: str) -> dict[str, Any]:
+    async def get_session_trace_detail(
+        self, session_id: str, trace_id: str
+    ) -> dict[str, Any]:
         tid = str(trace_id).strip()
         if not tid:
             raise ValueError("trace_id is required")
-        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/traces/{tid}")
+        return await self.get(
+            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/traces/{tid}"
+        )
 
     async def resume(
         self,
@@ -347,7 +399,9 @@ class ApiClient:
             data["pending_card"] = pending_card
         if max_loops is not None:
             data["max_loops"] = int(max_loops)
-        return await self._post_sse(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/resume", data)
+        return await self._post_sse(
+            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/resume", data
+        )
 
     async def switch_service_type(
         self,
@@ -362,7 +416,10 @@ class ApiClient:
             payload["title"] = str(title)
         if cause_of_action_code is not None:
             payload["cause_of_action_code"] = str(cause_of_action_code)
-        return await self.post(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/service-type", payload)
+        return await self.post(
+            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/service-type",
+            payload,
+        )
 
     # ========== Files ==========
 
@@ -393,7 +450,9 @@ class ApiClient:
             try:
                 with path.open("rb") as f:
                     files = {"file": (path.name, f)}
-                    resp = await self._client.post(url, headers=headers, params=params, files=files)
+                    resp = await self._client.post(
+                        url, headers=headers, params=params, files=files
+                    )
                 if resp.status_code in transient and attempt < max_attempts:
                     await asyncio.sleep(min(4.0, 0.5 * attempt))
                     continue
@@ -441,8 +500,7 @@ class ApiClient:
         self, matter_id: str, task_id: str, result: dict
     ) -> dict[str, Any]:
         return await self.post(
-            f"{MATTERS_V1}/matters/{matter_id}/tasks/{task_id}/complete",
-            result
+            f"{MATTERS_V1}/matters/{matter_id}/tasks/{task_id}/complete", result
         )
 
     async def get_workflow_snapshot(self, matter_id: str) -> dict[str, Any]:
@@ -451,23 +509,33 @@ class ApiClient:
     async def get_workflow_profile(self, matter_id: str) -> dict[str, Any]:
         return await self.get(f"{MATTERS_V1}/matters/{matter_id}/workflow/profile")
 
-    async def list_deliverables(self, matter_id: str, output_key: str | None = None) -> dict[str, Any]:
+    async def list_deliverables(
+        self, matter_id: str, output_key: str | None = None
+    ) -> dict[str, Any]:
         params = {}
         if output_key:
             params["output_key"] = output_key
-        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/deliverables", params=params)
+        return await self.get(
+            f"{MATTERS_V1}/matters/{matter_id}/deliverables", params=params
+        )
 
-    async def list_traces(self, matter_id: str, limit: int | None = None) -> dict[str, Any]:
+    async def list_traces(
+        self, matter_id: str, limit: int | None = None
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
         return await self.get(f"{MATTERS_V1}/matters/{matter_id}/traces", params=params)
 
-    async def get_matter_timeline(self, matter_id: str, limit: int | None = None) -> dict[str, Any]:
+    async def get_matter_timeline(
+        self, matter_id: str, limit: int | None = None
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/timeline", params=params)
+        return await self.get(
+            f"{MATTERS_V1}/matters/{matter_id}/timeline", params=params
+        )
 
     async def get_matter_phase_timeline(self, matter_id: str) -> dict[str, Any]:
         return await self.get(f"{MATTERS_V1}/matters/{matter_id}/phase-timeline")

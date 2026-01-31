@@ -1,0 +1,93 @@
+version: "1.0"
+path: one_shot
+description: 一次性法律意见书生成 - 提供完整信息
+
+rounds:
+  - round: 1
+    description: 上传所有材料并提供完整描述
+    user_action:
+      type: upload_files
+      files:
+        - "{{ assets.equity_transfer_agreement }}"
+        - "{{ assets.company_info }}"
+        - "{{ assets.shareholder_resolution }}"
+      message: "这是一份股权转让协议及相关材料，包括公司基本信息和股东会决议。请帮我生成一份关于股权转让交易合法性与风险分析的法律意见书，重点关注交易主体资格、股权转让程序合规性、以及潜在法律风险。"
+    ai_response:
+      skill_id: legal-opinion-intake
+      wait_for_text: "类型"
+      expect_contains:
+        - "意见书类型"
+        - "选择"
+      card_type: select
+      card_options:
+        - "股权转让法律意见书"
+        - "尽职调查法律意见书"
+        - "合规性法律意见书"
+    has_card_interaction: true
+
+  - round: 2
+    description: 选择意见书类型
+    user_action:
+      type: resume_card
+      card_action: select_option
+      card_data:
+        selected_option: "股权转让法律意见书"
+    ai_response:
+      skill_id: document-generation
+      wait_for_text: "确认"
+      expect_contains:
+        - "意见书"
+        - "生成"
+      card_type: confirm
+      card_fields:
+        - name: document_title
+          value: "关于XX公司股权转让交易的法律意见书"
+        - name: opinion_type
+          value: "股权转让法律意见书"
+        - name: analysis_scope
+          value: "交易主体资格、股权转让程序、法律风险"
+    has_card_interaction: true
+
+  - round: 3
+    description: 确认生成意见书
+    user_action:
+      type: resume_card
+      card_action: confirm
+    ai_response:
+      skill_id: document-generation
+      wait_for_text: "完成"
+      expect_contains:
+        - "意见书"
+        - "下载"
+      output_key: legal_opinion
+      output_format: docx
+    has_card_interaction: false
+    is_final_round: true
+
+quality_checks:
+  - type: skill_invocation
+    skills:
+      - legal-opinion-intake
+      - document-generation
+  
+  - type: card_interaction
+    cards:
+      - type: select
+        round: 1
+      - type: confirm
+        round: 2
+  
+  - type: document_generation
+    output_key: legal_opinion
+    format: docx
+    expect_sections:
+      - "基本情况"
+      - "法律分析"
+      - "风险提示"
+      - "法律意见"
+  
+  - type: content_quality
+    checks:
+      - "包含交易主体资格分析"
+      - "包含股权转让程序合规性分析"
+      - "包含法律风险提示"

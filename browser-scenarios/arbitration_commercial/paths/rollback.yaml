@@ -1,0 +1,254 @@
+id: rollback
+name: 回退补充证据
+description: 文书确认时发现证据不足，触发回退补充证据。适用于测试系统回退机制。
+
+interactions:
+  - id: round_1
+    name: 初始案情输入
+    user_action:
+      type: chat
+      message: |
+        申请人：甲方公司E2E01
+        被申请人：乙方公司E2E01
+        案由：买卖合同纠纷
+        事实：2023年3月1日，申请人与被申请人签订《设备采购合同》，约定被申请人向申请人采购生产设备一批，总价款500万元，交货期为2023年6月30日前。
+        申请人已按约交付设备并经验收合格，但被申请人仅支付200万元，剩余300万元至今未付。
+        证据：采购合同、交货验收单
+        仲裁请求：要求被申请人支付剩余货款300万元，并按合同约定支付逾期付款违约金，承担仲裁费用。
+      attachments:
+        - "{{ assets.contract }}"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "arbitration-intake"
+        - event: delta
+          expect:
+            contains: ["收到", "案件", "买卖合同"]
+        - event: card
+          expect:
+            review_type: "clarify"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "clarify"
+          skill_id: "arbitration-intake"
+
+  - id: round_2
+    name: 补充企业信息
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.applicant.unified_social_credit_code"
+          value: "91110000MA01ABCD01"
+        - field_key: "profile.respondent.unified_social_credit_code"
+          value: "91110000MA01EFGH02"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "cause-recommendation"
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "cause-recommendation"
+
+  - id: round_3
+    name: 确认案由
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.cause_of_action_code"
+          value: "commercial_contract_dispute"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+
+  - id: round_4
+    name: 选择仲裁请求
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.arbitration_requests"
+          value: ["payment_claim", "breach_penalty", "arbitration_costs"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+
+  - id: round_5
+    name: 选择文书类型
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.selected_documents"
+          value: ["arbitration_application"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+
+  - id: round_6
+    name: 审核文书发现证据不足
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: false
+        - field_key: "profile.decisions.review_feedback"
+          value: "违约证据不足，需要补充付款记录和催款函"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "arbitration-intake"
+        - event: delta
+          expect:
+            contains: ["补充", "证据", "违约"]
+        - event: card
+          expect:
+            review_type: "clarify"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "clarify"
+          skill_id: "arbitration-intake"
+          questions:
+            - field_key: "profile.evidence.breach_evidence"
+              input_type: "file_upload"
+              required: true
+
+  - id: round_7
+    name: 补充违约证据
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.evidence.breach_evidence"
+          value: "已上传付款记录和催款函"
+      attachments:
+        - "{{ assets.breach_evidence }}"
+        - "{{ assets.additional_evidence }}"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: delta
+          expect:
+            contains: ["重新生成", "仲裁申请书"]
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+
+  - id: round_8
+    name: 确认最终文书
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: true
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: delta
+          expect:
+            contains: ["仲裁申请书", "生成", "完成"]
+        - event: end
+          expect:
+            reason: "stop"
+      
+      final_state:
+        type: message
+        message:
+          contains: ["仲裁申请书", "生成", "下载"]
+          length: ">= 100"
+        deliverable:
+          output_key: "arbitration_application"
+          file_type: "docx"

@@ -1,0 +1,345 @@
+id: rollback
+name: 回退补充证据
+description: 在文书确认阶段发现证据不足，触发回退补充证据流程。
+
+interactions:
+  - id: round_1
+    name: 初始案情输入
+    user_action:
+      type: chat
+      message: |
+        申请人：王五E2E01
+        被申请人：某科技公司E2E01
+        案由：劳动争议
+        事实：2023年1月1日入职，担任软件工程师，月薪15000元。
+        公司自2024年6月起拖欠工资，累计拖欠3个月共45000元。
+        2024年9月1日公司违法解除劳动合同，未支付经济补偿金。
+        证据：劳动合同、解除通知
+      attachments:
+        - "{{ assets.labor_contract }}"
+        - "{{ assets.dismissal_notice }}"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "labor-arbitration-intake"
+        - event: delta
+          expect:
+            contains: ["收到", "劳动争议", "仲裁"]
+        - event: tool_start
+          expect:
+            tool_name: "knowledge.search"
+        - event: tool_end
+          expect:
+            success: true
+        - event: card
+          expect:
+            review_type: "clarify"
+            questions_count: ">= 2"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "clarify"
+          skill_id: "labor-arbitration-intake"
+          questions:
+            - field_key: "profile.applicant.id_number"
+              input_type: "text"
+              required: true
+            - field_key: "profile.respondent.unified_social_credit_code"
+              input_type: "text"
+              required: true
+      
+      thinking:
+        must_include: ["劳动争议", "工资", "解除"]
+        must_not_include: ["错误", "失败"]
+
+  - id: round_2
+    name: 补充当事人信息
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.applicant.id_number"
+          value: "110101199003033456"
+        - field_key: "profile.respondent.unified_social_credit_code"
+          value: "91110000MA01234567"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "labor-arbitration-intake"
+        - event: delta
+          expect:
+            contains: ["工资", "拖欠"]
+        - event: card
+          expect:
+            review_type: "clarify"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "clarify"
+          skill_id: "labor-arbitration-intake"
+          questions:
+            - field_key: "profile.salary_arrears_months"
+              input_type: "number"
+              required: true
+            - field_key: "profile.salary_arrears_amount"
+              input_type: "number"
+              required: true
+
+  - id: round_3
+    name: 补充工资拖欠信息
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.salary_arrears_months"
+          value: "3"
+        - field_key: "profile.salary_arrears_amount"
+          value: "45000"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "cause-recommendation"
+        - event: delta
+          expect:
+            contains: ["案由", "劳动争议"]
+        - event: tool_start
+          expect:
+            tool_name: "element__rank_causes"
+        - event: tool_end
+          expect:
+            success: true
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "cause-recommendation"
+          questions:
+            - field_key: "profile.cause_of_action_code"
+              input_type: "select"
+              required: true
+
+  - id: round_4
+    name: 确认案由
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.cause_of_action_code"
+          value: "labor_dispute"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: delta
+          expect:
+            contains: ["仲裁请求", "选择"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+          questions:
+            - field_key: "profile.decisions.arbitration_requests"
+              input_type: "multi_select"
+              required: true
+
+  - id: round_5
+    name: 选择仲裁请求
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.arbitration_requests"
+          value: ["salary_payment", "economic_compensation"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: delta
+          expect:
+            contains: ["文书", "劳动仲裁申请书"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+          questions:
+            - field_key: "profile.decisions.selected_documents"
+              input_type: "multi_select"
+              required: true
+
+  - id: round_6
+    name: 选择文书类型并生成
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.selected_documents"
+          value: ["labor_arbitration_application"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+            result:
+              has_file_id: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+          questions:
+            - field_key: "profile.decisions.document_reviewed"
+              input_type: "document_review"
+              required: true
+
+  - id: round_7
+    name: 发现证据不足触发回退
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: false
+          feedback: "缺少工资流水证据，需要补充"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "labor-arbitration-intake"
+        - event: delta
+          expect:
+            contains: ["补充", "工资", "证据"]
+        - event: card
+          expect:
+            review_type: "clarify"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "clarify"
+          skill_id: "labor-arbitration-intake"
+          questions:
+            - field_key: "profile.additional_evidence"
+              input_type: "file_upload"
+              required: true
+
+  - id: round_8
+    name: 补充工资流水证据
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.additional_evidence"
+          value: "{{ assets.additional_evidence }}"
+      attachments:
+        - "{{ assets.salary_record }}"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+            result:
+              has_file_id: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+          questions:
+            - field_key: "profile.decisions.document_reviewed"
+              input_type: "document_review"
+              required: true
+
+  - id: round_9
+    name: 确认文书
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: true
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: delta
+          expect:
+            contains: ["劳动仲裁申请书", "生成", "完成"]
+        - event: end
+          expect:
+            reason: "stop"
+      
+      final_state:
+        type: message
+        message:
+          contains: ["劳动仲裁申请书", "生成", "下载"]
+          length: ">= 100"
+        deliverable:
+          output_key: "labor_arbitration_application"
+          file_type: "docx"

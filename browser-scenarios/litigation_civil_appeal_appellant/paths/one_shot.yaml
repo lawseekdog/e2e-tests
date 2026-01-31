@@ -1,0 +1,188 @@
+id: one_shot
+name: 一次性完整输入
+description: 一次性提供完整信息，跳过 clarify 卡片，直接进入案由确认。
+
+interactions:
+  - id: round_1
+    name: 完整上诉信息输入
+    user_action:
+      type: chat
+      message: |
+        上诉人：张三E2E01，身份证号：110101199001011234
+        被上诉人：李四E2E01，身份证号：110101199002022345
+        案由：民间借贷纠纷
+        一审情况：一审判决驳回我的诉讼请求，认定借款关系不成立。
+        上诉理由：一审认定事实错误，适用法律错误。我有充分证据证明借款关系真实存在，一审法院未充分采信证据。
+        证据：一审判决书、补充证据材料、新证据
+        诉求：撤销一审判决，改判支持我的诉讼请求，返还本金100000元及利息。
+      attachments:
+        - "{{ assets.first_instance_judgment }}"
+        - "{{ assets.appeal_evidence }}"
+        - "{{ assets.additional_evidence }}"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "litigation-intake"
+        - event: delta
+          expect:
+            contains: ["收到", "上诉", "完整信息"]
+        - event: tool_start
+          expect:
+            tool_name: "knowledge.search"
+        - event: tool_end
+          expect:
+            success: true
+        - event: skill_start
+          expect:
+            skill_id: "cause-recommendation"
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "cause-recommendation"
+          questions:
+            - field_key: "profile.cause_of_action_code"
+              input_type: "select"
+              required: true
+
+  - id: round_2
+    name: 确认案由
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.cause_of_action_code"
+          value: "civil_lending"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "litigation-intake"
+        - event: delta
+          expect:
+            contains: ["上诉理由", "选择"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "litigation-intake"
+          questions:
+            - field_key: "profile.appeal_grounds"
+              input_type: "multi_select"
+              required: true
+
+  - id: round_3
+    name: 选择上诉理由
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.appeal_grounds"
+          value: ["fact_error", "law_application_error"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: delta
+          expect:
+            contains: ["文书", "上诉状"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+          questions:
+            - field_key: "profile.decisions.selected_documents"
+              input_type: "multi_select"
+              required: true
+
+  - id: round_4
+    name: 选择文书类型
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.selected_documents"
+          value: ["appeal_brief"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+            result:
+              has_file_id: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+          questions:
+            - field_key: "profile.decisions.document_reviewed"
+              input_type: "document_review"
+              required: true
+
+  - id: round_5
+    name: 确认上诉状
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: true
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: delta
+          expect:
+            contains: ["上诉状", "生成", "完成"]
+        - event: end
+          expect:
+            reason: "stop"
+      
+      final_state:
+        type: message
+        message:
+          contains: ["上诉状", "生成", "下载"]
+          length: ">= 100"
+        deliverable:
+          output_key: "appeal_brief"
+          file_type: "docx"

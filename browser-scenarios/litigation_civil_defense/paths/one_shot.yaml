@@ -1,0 +1,199 @@
+id: one_shot
+name: 一次性完整输入
+description: 一次性提供完整信息，跳过 clarify 环节。适用于信息完整的场景。
+
+interactions:
+  - id: round_1
+    name: 完整应诉信息输入
+    user_action:
+      type: chat
+      message: |
+        原告：王五E2E01（身份证：110101199004044567）
+        被告：赵六E2E01（身份证：110101199003033456）
+        案由：民间借贷纠纷
+        事实：原告起诉称2023年1月1日被告向其借款人民币100000元，约定2023年12月31日前归还。
+        被告辩称：实际借款金额为80000元，已于2023年6月30日归还50000元，剩余30000元将于2024年1月31日前归还。
+        证据：借款合同、还款记录、银行流水、转账凭证
+        诉求：请求法院查明事实，驳回原告不合理诉讼请求，确认剩余债务为30000元。
+        应诉策略：部分抗辩
+      attachments:
+        - "{{ assets.complaint }}"
+        - "{{ assets.loan_contract }}"
+        - "{{ assets.repayment_record }}"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "litigation-intake"
+        - event: delta
+          expect:
+            contains: ["收到", "案件", "民间借贷"]
+        - event: tool_start
+          expect:
+            tool_name: "knowledge.search"
+        - event: tool_end
+          expect:
+            success: true
+        - event: skill_start
+          expect:
+            skill_id: "cause-recommendation"
+        - event: tool_start
+          expect:
+            tool_name: "element__rank_causes"
+        - event: tool_end
+          expect:
+            success: true
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "cause-recommendation"
+          questions:
+            - field_key: "profile.cause_of_action_code"
+              input_type: "select"
+              required: true
+      
+      thinking:
+        must_include: ["民间借贷", "证据", "应诉"]
+        must_not_include: ["错误", "失败"]
+
+  - id: round_2
+    name: 确认案由
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.cause_of_action_code"
+          value: "civil_lending"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "litigation-intake"
+        - event: delta
+          expect:
+            contains: ["应诉", "策略"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "litigation-intake"
+          questions:
+            - field_key: "profile.decisions.defense_strategy"
+              input_type: "select"
+              required: true
+
+  - id: round_3
+    name: 选择应诉策略
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.defense_strategy"
+          value: "partial_defense"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: delta
+          expect:
+            contains: ["文书", "答辩状"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+          questions:
+            - field_key: "profile.decisions.selected_documents"
+              input_type: "multi_select"
+              required: true
+
+  - id: round_4
+    name: 选择文书类型
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.selected_documents"
+          value: ["defense_statement"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+            result:
+              has_file_id: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+          questions:
+            - field_key: "profile.decisions.document_reviewed"
+              input_type: "document_review"
+              required: true
+
+  - id: round_5
+    name: 确认文书
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: true
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: delta
+          expect:
+            contains: ["答辩状", "生成", "完成"]
+        - event: end
+          expect:
+            reason: "stop"
+      
+      final_state:
+        type: message
+        message:
+          contains: ["答辩状", "生成", "下载"]
+          length: ">= 100"
+        deliverable:
+          output_key: "defense_statement"
+          file_type: "docx"

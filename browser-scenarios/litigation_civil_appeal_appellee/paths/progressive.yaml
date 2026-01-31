@@ -1,0 +1,236 @@
+id: progressive
+name: 渐进式对话
+description: 一轮一轮对话，逐步补充信息。适用于被上诉人信息不完整的场景。
+
+interactions:
+  - id: round_1
+    name: 初始上诉情况输入
+    user_action:
+      type: chat
+      message: |
+        我是被上诉人王五E2E01，对方张三E2E01不服一审判决提起上诉。
+        案由：民间借贷纠纷
+        一审判决：判决被告张三E2E01返还原告王五E2E01借款本金100000元及利息。
+        对方上诉理由：认为借款事实不存在，一审判决认定事实错误。
+        我方观点：一审判决认定事实清楚，证据充分，应当维持原判。
+      attachments:
+        - "{{ assets.first_instance_judgment }}"
+        - "{{ assets.appeal_brief }}"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "litigation-intake"
+        - event: delta
+          expect:
+            contains: ["收到", "上诉", "被上诉人"]
+        - event: tool_start
+          expect:
+            tool_name: "knowledge.search"
+        - event: tool_end
+          expect:
+            success: true
+        - event: card
+          expect:
+            review_type: "clarify"
+            questions_count: ">= 2"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "clarify"
+          skill_id: "litigation-intake"
+          questions:
+            - field_key: "profile.appellee.id_number"
+              input_type: "text"
+              required: true
+            - field_key: "profile.appellant.id_number"
+              input_type: "text"
+              required: true
+      
+      thinking:
+        must_include: ["上诉", "被上诉人", "一审判决"]
+        must_not_include: ["错误", "失败"]
+
+  - id: round_2
+    name: 补充当事人身份信息
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.appellee.id_number"
+          value: "110101199003033456"
+        - field_key: "profile.appellant.id_number"
+          value: "110101199001011234"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "cause-recommendation"
+        - event: delta
+          expect:
+            contains: ["案由", "民间借贷"]
+        - event: tool_start
+          expect:
+            tool_name: "element__rank_causes"
+        - event: tool_end
+          expect:
+            success: true
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "cause-recommendation"
+          questions:
+            - field_key: "profile.cause_of_action_code"
+              input_type: "select"
+              required: true
+
+  - id: round_3
+    name: 确认案由
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.cause_of_action_code"
+          value: "civil_lending"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "litigation-intake"
+        - event: delta
+          expect:
+            contains: ["答辩策略", "维持原判"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "litigation-intake"
+          questions:
+            - field_key: "profile.decisions.defense_strategy"
+              input_type: "select"
+              required: true
+              options:
+                - value: "maintain_original_judgment"
+                  label: "维持原判"
+                - value: "partial_support"
+                  label: "部分支持"
+
+  - id: round_4
+    name: 选择答辩策略
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.defense_strategy"
+          value: "maintain_original_judgment"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: delta
+          expect:
+            contains: ["文书", "答辩状"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+          questions:
+            - field_key: "profile.decisions.selected_documents"
+              input_type: "multi_select"
+              required: true
+
+  - id: round_5
+    name: 选择文书类型
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.selected_documents"
+          value: ["appeal_defense"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+            result:
+              has_file_id: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+          questions:
+            - field_key: "profile.decisions.document_reviewed"
+              input_type: "document_review"
+              required: true
+
+  - id: round_6
+    name: 确认文书
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: true
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: delta
+          expect:
+            contains: ["答辩状", "生成", "完成"]
+        - event: end
+          expect:
+            reason: "stop"
+      
+      final_state:
+        type: message
+        message:
+          contains: ["答辩状", "生成", "下载"]
+          length: ">= 100"
+        deliverable:
+          output_key: "appeal_defense"
+          file_type: "docx"

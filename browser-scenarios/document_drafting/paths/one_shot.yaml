@@ -1,0 +1,113 @@
+version: "1.0"
+path_name: one_shot
+description: 一次性文书代写 - 3轮交互（上传材料+完整描述）
+
+rounds:
+  round_1:
+    user_action:
+      type: chat
+      message: "我需要代写劳动仲裁申请书。我叫李四，在上海信息技术有限公司担任产品经理，2021年3月15日入职，2024年11月30日被公司以业绩不达标为由辞退，但实际上是因为我拒绝了违法加班要求。我的月薪18000元，公司未支付最后两个月工资和经济补偿金。我已经准备了劳动合同、工资流水和解除通知等材料。"
+      upload_file: "{{ assets.labor_contract }}"
+    ai_response:
+      expected_skill_id: documents
+      expected_card_type: select
+      expected_keywords:
+        - "文书"
+        - "选择"
+        - "劳动仲裁申请书"
+        - "劳动争议调解申请书"
+      quality_checks:
+        - check_type: card_structure
+          expected_fields:
+            - document_types
+            - descriptions
+        - check_type: skill_invocation
+          expected_skill: documents
+        - check_type: context_extraction
+          verify_fields:
+            - name: "李四"
+            - company: "上海信息技术有限公司"
+            - position: "产品经理"
+            - employment_date: "2021年3月15日"
+            - dismissal_date: "2024年11月30日"
+            - salary: "18000"
+        - check_type: file_processing
+          verify_file_uploaded: true
+          expected_file: labor_contract.txt
+
+  round_2:
+    user_action:
+      type: resume_card
+      message: "选择劳动仲裁申请书"
+    ai_response:
+      expected_skill_id: document-generation
+      expected_card_type: confirm
+      expected_keywords:
+        - "确认"
+        - "劳动仲裁申请书"
+        - "李四"
+        - "上海信息技术有限公司"
+        - "拖欠工资"
+        - "经济补偿金"
+      quality_checks:
+        - check_type: card_structure
+          expected_fields:
+            - document_type
+            - applicant_info
+            - respondent_info
+            - claims
+            - facts_and_reasons
+        - check_type: skill_invocation
+          expected_skill: document-generation
+        - check_type: document_preview
+          verify_content:
+            - "申请人：李四"
+            - "被申请人：上海信息技术有限公司"
+            - "拖欠工资"
+            - "经济补偿金"
+            - "违法解除劳动合同"
+        - check_type: claims_calculation
+          verify_amounts:
+            - unpaid_salary: 36000
+            - economic_compensation: true
+
+  round_3:
+    user_action:
+      type: resume_card
+      message: "确认生成文书"
+    ai_response:
+      expected_output_key: labor_arbitration_application
+      expected_format: docx
+      expected_keywords:
+        - "完成"
+        - "劳动仲裁申请书"
+        - "下载"
+      quality_checks:
+        - check_type: file_generation
+          expected_file: labor_arbitration_application.docx
+          verify_content:
+            - "劳动仲裁申请书"
+            - "申请人：李四"
+            - "被申请人：上海信息技术有限公司"
+            - "仲裁请求"
+            - "支付拖欠工资"
+            - "支付经济补偿金"
+            - "事实与理由"
+            - "2021年3月15日入职"
+            - "2024年11月30日被辞退"
+        - check_type: matter_completion
+          expected_status: completed
+        - check_type: session_artifacts
+          verify_artifacts:
+            - type: document
+              name: labor_arbitration_application.docx
+            - type: uploaded_file
+              name: labor_contract.txt
+        - check_type: document_quality
+          verify_sections:
+            - section: header
+              required_fields: ["申请人", "被申请人", "仲裁请求"]
+            - section: claims
+              required_items: ["拖欠工资", "经济补偿金"]
+            - section: facts
+              required_content: ["入职时间", "辞退时间", "辞退原因"]

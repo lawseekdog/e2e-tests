@@ -1,0 +1,120 @@
+version: "1.0"
+path: progressive
+description: 渐进式法律意见书生成 - 分步补充信息
+
+rounds:
+  - round: 1
+    description: 上传股权转让协议并简单描述
+    user_action:
+      type: upload_file
+      file: "{{ assets.equity_transfer_agreement }}"
+      message: "这是一份股权转让协议，请帮我分析一下"
+    ai_response:
+      skill_id: legal-opinion-intake
+      wait_for_text: "补充"
+      expect_contains:
+        - "意见书"
+        - "主题"
+      card_type: clarify
+      card_fields:
+        - name: opinion_topic
+          label: "意见书主题"
+          type: text
+    has_card_interaction: true
+
+  - round: 2
+    description: 补充意见书主题
+    user_action:
+      type: resume_card
+      card_action: fill_and_submit
+      card_data:
+        opinion_topic: "股权转让交易的合法性与风险分析"
+    ai_response:
+      skill_id: legal-opinion-analysis
+      wait_for_text: "分析"
+      expect_contains:
+        - "股权转让"
+        - "法律风险"
+        - "合规性"
+    has_card_interaction: false
+
+  - round: 3
+    description: 请求生成意见书
+    user_action:
+      type: chat
+      message: "请根据分析结果生成正式的法律意见书"
+    ai_response:
+      skill_id: documents
+      wait_for_text: "类型"
+      expect_contains:
+        - "意见书类型"
+        - "选择"
+      card_type: select
+      card_options:
+        - "股权转让法律意见书"
+        - "尽职调查法律意见书"
+        - "合规性法律意见书"
+    has_card_interaction: true
+
+  - round: 4
+    description: 选择意见书类型
+    user_action:
+      type: resume_card
+      card_action: select_option
+      card_data:
+        selected_option: "股权转让法律意见书"
+    ai_response:
+      skill_id: document-generation
+      wait_for_text: "确认"
+      expect_contains:
+        - "意见书"
+        - "生成"
+      card_type: confirm
+      card_fields:
+        - name: document_title
+          value: "关于XX公司股权转让交易的法律意见书"
+        - name: opinion_type
+          value: "股权转让法律意见书"
+    has_card_interaction: true
+
+  - round: 5
+    description: 确认生成意见书
+    user_action:
+      type: resume_card
+      card_action: confirm
+    ai_response:
+      skill_id: document-generation
+      wait_for_text: "完成"
+      expect_contains:
+        - "意见书"
+        - "下载"
+      output_key: legal_opinion
+      output_format: docx
+    has_card_interaction: false
+    is_final_round: true
+
+quality_checks:
+  - type: skill_invocation
+    skills:
+      - legal-opinion-intake
+      - legal-opinion-analysis
+      - documents
+      - document-generation
+  
+  - type: card_interaction
+    cards:
+      - type: clarify
+        round: 1
+      - type: select
+        round: 3
+      - type: confirm
+        round: 4
+  
+  - type: document_generation
+    output_key: legal_opinion
+    format: docx
+    expect_sections:
+      - "基本情况"
+      - "法律分析"
+      - "风险提示"
+      - "法律意见"

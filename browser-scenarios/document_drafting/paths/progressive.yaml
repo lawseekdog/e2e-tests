@@ -1,0 +1,103 @@
+version: "1.0"
+path_name: progressive
+description: 渐进式文书代写 - 4轮交互
+
+rounds:
+  round_1:
+    user_action:
+      type: chat
+      message: "我和公司发生了劳动争议，被无故辞退，想申请劳动仲裁"
+    ai_response:
+      expected_skill_id: document-drafting-intake
+      expected_card_type: clarify
+      expected_keywords:
+        - "当事人"
+        - "信息"
+        - "劳动关系"
+      quality_checks:
+        - check_type: card_structure
+          expected_fields:
+            - name
+            - company
+            - position
+            - employment_date
+        - check_type: skill_invocation
+          expected_skill: document-drafting-intake
+
+  round_2:
+    user_action:
+      type: resume_card
+      message: "我叫张三，在北京科技有限公司担任软件工程师，2022年1月1日入职，2024年12月15日被辞退，月薪15000元"
+    ai_response:
+      expected_skill_id: documents
+      expected_card_type: select
+      expected_keywords:
+        - "文书"
+        - "选择"
+        - "劳动仲裁申请书"
+        - "劳动争议调解申请书"
+      quality_checks:
+        - check_type: card_structure
+          expected_fields:
+            - document_types
+            - descriptions
+        - check_type: skill_invocation
+          expected_skill: documents
+        - check_type: context_retention
+          verify_fields:
+            - name: "张三"
+            - company: "北京科技有限公司"
+
+  round_3:
+    user_action:
+      type: resume_card
+      message: "选择劳动仲裁申请书"
+    ai_response:
+      expected_skill_id: document-generation
+      expected_card_type: confirm
+      expected_keywords:
+        - "确认"
+        - "劳动仲裁申请书"
+        - "张三"
+        - "北京科技有限公司"
+      quality_checks:
+        - check_type: card_structure
+          expected_fields:
+            - document_type
+            - applicant_info
+            - respondent_info
+            - claims
+        - check_type: skill_invocation
+          expected_skill: document-generation
+        - check_type: document_preview
+          verify_content:
+            - "申请人：张三"
+            - "被申请人：北京科技有限公司"
+            - "违法解除劳动合同"
+
+  round_4:
+    user_action:
+      type: resume_card
+      message: "确认生成文书"
+    ai_response:
+      expected_output_key: labor_arbitration_application
+      expected_format: docx
+      expected_keywords:
+        - "完成"
+        - "劳动仲裁申请书"
+        - "下载"
+      quality_checks:
+        - check_type: file_generation
+          expected_file: labor_arbitration_application.docx
+          verify_content:
+            - "劳动仲裁申请书"
+            - "申请人：张三"
+            - "被申请人：北京科技有限公司"
+            - "仲裁请求"
+            - "事实与理由"
+        - check_type: matter_completion
+          expected_status: completed
+        - check_type: session_artifacts
+          verify_artifacts:
+            - type: document
+              name: labor_arbitration_application.docx

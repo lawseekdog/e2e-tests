@@ -1,0 +1,230 @@
+version: "1.0"
+
+steps:
+  - id: browser_step_1
+    name: 导航到系统首页
+    tool: mcp_chrome-devtools_navigate_page
+    params:
+      url: "{{ config.base_url }}"
+    expect:
+      wait_for_text: "登录"
+    on_failure: abort
+
+  - id: browser_step_2
+    name: 获取页面快照定位登录表单
+    tool: mcp_chrome-devtools_take_snapshot
+    expect:
+      contains_elements:
+        - role: textbox
+        - role: button
+
+  - id: browser_step_3
+    name: 填写登录表单
+    tool: mcp_chrome-devtools_fill_form
+    params:
+      elements:
+        - uid: "{{ browser_step_2.result.username_input_uid }}"
+          value: "{{ credentials.username }}"
+        - uid: "{{ browser_step_2.result.password_input_uid }}"
+          value: "{{ credentials.password }}"
+    on_failure: retry
+    retry:
+      max_attempts: 2
+      delay_ms: 1000
+
+  - id: browser_step_4
+    name: 点击登录按钮
+    tool: mcp_chrome-devtools_click
+    params:
+      uid: "{{ browser_step_2.result.login_button_uid }}"
+    expect:
+      wait_for_text: "工作台"
+    on_failure: abort
+
+  - id: browser_step_5
+    name: 获取工作台快照
+    tool: mcp_chrome-devtools_take_snapshot
+    expect:
+      contains_elements:
+        - text: "新建"
+
+  - id: browser_step_6
+    name: 点击新建按钮创建会话
+    tool: mcp_chrome-devtools_click
+    params:
+      uid: "{{ browser_step_5.result.new_button_uid }}"
+    expect:
+      wait_for_text: "输入"
+    on_failure: abort
+
+  - id: browser_step_7
+    name: 获取会话页面快照
+    tool: mcp_chrome-devtools_take_snapshot
+
+  # Round 1: 用户输入
+  - id: browser_step_8
+    name: Round 1 - 填写用户输入
+    tool: mcp_chrome-devtools_fill
+    params:
+      uid: "{{ browser_step_7.result.input_textarea_uid }}"
+      value: "{{ current_path.round_1.user_action.message }}"
+
+  - id: browser_step_9
+    name: Round 1 - 上传文件（如果有）
+    tool: mcp_chrome-devtools_upload_file
+    params:
+      uid: "{{ browser_step_7.result.file_input_uid }}"
+      filePath: "{{ current_path.round_1.user_action.upload_file }}"
+    condition: "{{ current_path.round_1.user_action.upload_file is defined }}"
+    on_failure: retry
+    retry:
+      max_attempts: 2
+      delay_ms: 1000
+
+  - id: browser_step_10
+    name: Round 1 - 发送消息
+    tool: mcp_chrome-devtools_click
+    params:
+      uid: "{{ browser_step_7.result.send_button_uid }}"
+    on_failure: abort
+
+  - id: browser_step_11
+    name: Round 1 - 等待 AI 响应
+    tool: mcp_chrome-devtools_wait_for
+    params:
+      text: "{{ current_path.round_1.ai_response.expected_card_type }}"
+      timeout: 60000
+    on_failure: abort
+
+  - id: browser_step_12
+    name: Round 1 - 获取响应快照
+    tool: mcp_chrome-devtools_take_snapshot
+    expect:
+      contains_text: "{{ current_path.round_1.ai_response.expected_keywords }}"
+
+  # Round 2: 用户继续交互
+  - id: browser_step_13
+    name: Round 2 - 点击恢复卡片
+    tool: mcp_chrome-devtools_click
+    params:
+      uid: "{{ browser_step_12.result.resume_card_button_uid }}"
+    on_failure: abort
+
+  - id: browser_step_14
+    name: Round 2 - 填写用户输入
+    tool: mcp_chrome-devtools_fill
+    params:
+      uid: "{{ browser_step_7.result.input_textarea_uid }}"
+      value: "{{ current_path.round_2.user_action.message }}"
+
+  - id: browser_step_15
+    name: Round 2 - 发送消息
+    tool: mcp_chrome-devtools_click
+    params:
+      uid: "{{ browser_step_7.result.send_button_uid }}"
+    on_failure: abort
+
+  - id: browser_step_16
+    name: Round 2 - 等待 AI 响应
+    tool: mcp_chrome-devtools_wait_for
+    params:
+      text: "{{ current_path.round_2.ai_response.expected_card_type }}"
+      timeout: 60000
+    on_failure: abort
+
+  - id: browser_step_17
+    name: Round 2 - 获取响应快照
+    tool: mcp_chrome-devtools_take_snapshot
+    expect:
+      contains_text: "{{ current_path.round_2.ai_response.expected_keywords }}"
+
+  # Round 3: 用户继续交互
+  - id: browser_step_18
+    name: Round 3 - 点击恢复卡片
+    tool: mcp_chrome-devtools_click
+    params:
+      uid: "{{ browser_step_17.result.resume_card_button_uid }}"
+    on_failure: abort
+
+  - id: browser_step_19
+    name: Round 3 - 填写用户输入
+    tool: mcp_chrome-devtools_fill
+    params:
+      uid: "{{ browser_step_7.result.input_textarea_uid }}"
+      value: "{{ current_path.round_3.user_action.message }}"
+
+  - id: browser_step_20
+    name: Round 3 - 发送消息
+    tool: mcp_chrome-devtools_click
+    params:
+      uid: "{{ browser_step_7.result.send_button_uid }}"
+    on_failure: abort
+
+  - id: browser_step_21
+    name: Round 3 - 等待 AI 响应
+    tool: mcp_chrome-devtools_wait_for
+    params:
+      text: "{{ current_path.round_3.ai_response.expected_card_type }}"
+      timeout: 60000
+    on_failure: abort
+
+  - id: browser_step_22
+    name: Round 3 - 获取响应快照
+    tool: mcp_chrome-devtools_take_snapshot
+    expect:
+      contains_text: "{{ current_path.round_3.ai_response.expected_keywords }}"
+
+  # Round 4: 最后一轮（仅 progressive 路径）
+  - id: browser_step_23
+    name: Round 4 - 点击恢复卡片
+    tool: mcp_chrome-devtools_click
+    params:
+      uid: "{{ browser_step_22.result.resume_card_button_uid }}"
+    condition: "{{ current_path.round_4 is defined }}"
+    on_failure: abort
+
+  - id: browser_step_24
+    name: Round 4 - 填写用户输入
+    tool: mcp_chrome-devtools_fill
+    params:
+      uid: "{{ browser_step_7.result.input_textarea_uid }}"
+      value: "{{ current_path.round_4.user_action.message }}"
+    condition: "{{ current_path.round_4 is defined }}"
+
+  - id: browser_step_25
+    name: Round 4 - 发送消息
+    tool: mcp_chrome-devtools_click
+    params:
+      uid: "{{ browser_step_7.result.send_button_uid }}"
+    condition: "{{ current_path.round_4 is defined }}"
+    on_failure: abort
+
+  - id: browser_step_26
+    name: Round 4 - 等待 AI 响应
+    tool: mcp_chrome-devtools_wait_for
+    params:
+      text: "完成"
+      timeout: 60000
+    condition: "{{ current_path.round_4 is defined }}"
+    on_failure: abort
+
+  - id: browser_step_27
+    name: Round 4 - 获取最终快照
+    tool: mcp_chrome-devtools_take_snapshot
+    condition: "{{ current_path.round_4 is defined }}"
+
+  # 验证与截图
+  - id: browser_step_28
+    name: 验证文书生成完成
+    tool: mcp_chrome-devtools_take_snapshot
+    expect:
+      contains_text:
+        - "劳动仲裁"
+        - "申请书"
+
+  - id: browser_step_29
+    name: 截图保存验证结果
+    tool: mcp_chrome-devtools_take_screenshot
+    params:
+      filePath: docs/verification.png
+    on_failure: continue

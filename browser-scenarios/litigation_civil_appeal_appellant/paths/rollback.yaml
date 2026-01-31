@@ -1,0 +1,249 @@
+id: rollback
+name: 回退补充场景
+description: 在确认文书时发现问题，触发回退补充上诉理由。
+
+interactions:
+  - id: round_1
+    name: 初始上诉案情输入
+    user_action:
+      type: chat
+      message: |
+        上诉人：张三E2E01
+        被上诉人：李四E2E01
+        案由：民间借贷纠纷
+        一审情况：一审判决驳回我的诉讼请求，认定借款关系不成立。
+        上诉理由：一审认定事实错误，我有充分证据证明借款关系真实存在。
+        证据：一审判决书、补充证据材料
+        诉求：撤销一审判决，改判支持我的诉讼请求。
+      attachments:
+        - "{{ assets.first_instance_judgment }}"
+        - "{{ assets.appeal_evidence }}"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "litigation-intake"
+        - event: delta
+          expect:
+            contains: ["收到", "上诉", "民间借贷"]
+        - event: card
+          expect:
+            review_type: "clarify"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "clarify"
+          skill_id: "litigation-intake"
+
+  - id: round_2
+    name: 补充上诉人身份信息
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.appellant.id_number"
+          value: "110101199001011234"
+        - field_key: "profile.appellee.id_number"
+          value: "110101199002022345"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "cause-recommendation"
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "cause-recommendation"
+
+  - id: round_3
+    name: 确认案由
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.cause_of_action_code"
+          value: "civil_lending"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "litigation-intake"
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "litigation-intake"
+
+  - id: round_4
+    name: 选择上诉理由
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.appeal_grounds"
+          value: ["fact_error"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+
+  - id: round_5
+    name: 选择文书类型
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.selected_documents"
+          value: ["appeal_brief"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+
+  - id: round_6
+    name: 审核文书发现问题触发回退
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: false
+        - field_key: "profile.decisions.revision_reason"
+          value: "上诉理由不够充分，需要补充法律适用错误的理由"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "litigation-intake"
+        - event: delta
+          expect:
+            contains: ["理解", "补充", "上诉理由"]
+        - event: card
+          expect:
+            review_type: "clarify"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "clarify"
+          skill_id: "litigation-intake"
+          questions:
+            - field_key: "profile.appeal_grounds_additional"
+              input_type: "text"
+              required: true
+
+  - id: round_7
+    name: 补充上诉理由后重新生成
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.appeal_grounds_additional"
+          value: "一审法院适用法律错误，未正确适用民间借贷司法解释相关规定"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+
+  - id: round_8
+    name: 确认修改后的上诉状
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: true
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: delta
+          expect:
+            contains: ["上诉状", "生成", "完成"]
+        - event: end
+          expect:
+            reason: "stop"
+      
+      final_state:
+        type: message
+        message:
+          contains: ["上诉状", "生成", "下载"]
+          length: ">= 100"
+        deliverable:
+          output_key: "appeal_brief"
+          file_type: "docx"

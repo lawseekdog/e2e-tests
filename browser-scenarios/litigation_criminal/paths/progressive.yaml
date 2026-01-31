@@ -1,0 +1,233 @@
+id: progressive
+name: 渐进式对话
+description: 一轮一轮对话，逐步补充信息。适用于信息不完整的场景。
+
+interactions:
+  - id: round_1
+    name: 初始案情输入
+    user_action:
+      type: chat
+      message: |
+        被告人：王某E2E01
+        案由：盗窃罪
+        案情：2023年6月15日凌晨，被告人王某E2E01在某小区内盗窃电动车一辆，价值人民币3000元。
+        被告人已被公安机关抓获，现羁押于看守所。
+        证据：起诉书、现场监控录像、被害人陈述
+        辩护方向：初犯、认罪态度好、积极退赃
+      attachments:
+        - "{{ assets.indictment }}"
+        - "{{ assets.case_materials }}"
+        - "{{ assets.evidence_list }}"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "criminal-defense-intake"
+        - event: delta
+          expect:
+            contains: ["收到", "案件", "盗窃"]
+        - event: tool_start
+          expect:
+            tool_name: "knowledge.search"
+        - event: tool_end
+          expect:
+            success: true
+        - event: card
+          expect:
+            review_type: "clarify"
+            questions_count: ">= 2"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "clarify"
+          skill_id: "criminal-defense-intake"
+          questions:
+            - field_key: "profile.defendant.id_number"
+              input_type: "text"
+              required: true
+            - field_key: "profile.defendant.age"
+              input_type: "text"
+              required: true
+      
+      thinking:
+        must_include: ["盗窃", "证据", "辩护"]
+        must_not_include: ["错误", "失败"]
+
+  - id: round_2
+    name: 补充被告人信息
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.defendant.id_number"
+          value: "110101199501011234"
+        - field_key: "profile.defendant.age"
+          value: "28"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "charge-analysis"
+        - event: delta
+          expect:
+            contains: ["罪名", "盗窃"]
+        - event: tool_start
+          expect:
+            tool_name: "element__analyze_charges"
+        - event: tool_end
+          expect:
+            success: true
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "charge-analysis"
+          questions:
+            - field_key: "profile.charge_code"
+              input_type: "select"
+              required: true
+
+  - id: round_3
+    name: 确认罪名
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.charge_code"
+          value: "theft"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "charge-analysis"
+        - event: delta
+          expect:
+            contains: ["辩护策略", "量刑"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "charge-analysis"
+          questions:
+            - field_key: "profile.decisions.defense_strategy"
+              input_type: "multi_select"
+              required: true
+
+  - id: round_4
+    name: 选择辩护策略
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.defense_strategy"
+          value: ["first_offense", "good_attitude", "restitution"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: delta
+          expect:
+            contains: ["文书", "辩护意见"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+          questions:
+            - field_key: "profile.decisions.selected_documents"
+              input_type: "multi_select"
+              required: true
+
+  - id: round_5
+    name: 选择文书类型
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.selected_documents"
+          value: ["defense_opinion"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+            result:
+              has_file_id: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+          questions:
+            - field_key: "profile.decisions.document_reviewed"
+              input_type: "document_review"
+              required: true
+
+  - id: round_6
+    name: 确认文书
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: true
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: delta
+          expect:
+            contains: ["辩护意见", "生成", "完成"]
+        - event: end
+          expect:
+            reason: "stop"
+      
+      final_state:
+        type: message
+        message:
+          contains: ["辩护意见", "生成", "下载"]
+          length: ">= 100"
+        deliverable:
+          output_key: "defense_opinion"
+          file_type: "docx"

@@ -1,0 +1,24 @@
+version: "1.0"
+scenario: arbitration_labor
+description: 劳动仲裁场景 - 劳动争议仲裁申请
+
+config:
+  base_url: http://localhost:5175
+  timeout: 180000
+  screenshot_on_failure: true
+
+credentials:
+  username: admin
+  password: admin123456
+
+assets:
+  labor_contract: assets/labor_contract.txt
+  salary_record: assets/salary_record.txt
+  dismissal_notice: assets/dismissal_notice.txt
+  additional_evidence: assets/additional_evidence.txt
+
+output:
+  screenshots:
+    - docs/verification.png
+  documents:
+    - docs/labor_arbitration_application.docx

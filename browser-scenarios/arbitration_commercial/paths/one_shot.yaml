@@ -1,0 +1,202 @@
+id: one_shot
+name: 一次性完整输入
+description: 一次性提供完整信息，跳过澄清环节。适用于信息完整的场景。
+
+interactions:
+  - id: round_1
+    name: 完整案情输入
+    user_action:
+      type: chat
+      message: |
+        申请人：甲方公司E2E01（统一社会信用代码：91110000MA01ABCD01）
+        被申请人：乙方公司E2E01（统一社会信用代码：91110000MA01EFGH02）
+        案由：买卖合同纠纷
+        
+        事实与理由：
+        2023年3月1日，申请人与被申请人签订《设备采购合同》（合同编号：CGHT-2023-001），约定被申请人向申请人采购生产设备一批，总价款500万元，交货期为2023年6月30日前，付款方式为货到验收合格后30日内付清全款。
+        
+        申请人已于2023年6月20日按约交付全部设备，并于2023年6月25日经被申请人验收合格。被申请人于2023年7月15日支付首笔货款200万元，但剩余300万元至今未付。申请人多次催收无果。
+        
+        根据合同第8条约定，本合同争议提交北京仲裁委员会仲裁解决。
+        
+        证据材料：
+        1. 设备采购合同
+        2. 交货验收单
+        3. 付款记录及催款函
+        4. 合同仲裁条款
+        
+        仲裁请求：
+        1. 裁决被申请人支付剩余货款300万元
+        2. 裁决被申请人按合同约定支付逾期付款违约金（按日万分之五计算）
+        3. 本案仲裁费用由被申请人承担
+      attachments:
+        - "{{ assets.contract }}"
+        - "{{ assets.breach_evidence }}"
+        - "{{ assets.arbitration_clause }}"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "arbitration-intake"
+        - event: delta
+          expect:
+            contains: ["收到", "完整", "买卖合同"]
+        - event: tool_start
+          expect:
+            tool_name: "knowledge.search"
+        - event: tool_end
+          expect:
+            success: true
+        - event: skill_start
+          expect:
+            skill_id: "cause-recommendation"
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "cause-recommendation"
+          questions:
+            - field_key: "profile.cause_of_action_code"
+              input_type: "select"
+              required: true
+
+  - id: round_2
+    name: 确认案由
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.cause_of_action_code"
+          value: "commercial_contract_dispute"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: delta
+          expect:
+            contains: ["仲裁请求", "选择"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+          questions:
+            - field_key: "profile.decisions.arbitration_requests"
+              input_type: "multi_select"
+              required: true
+
+  - id: round_3
+    name: 选择仲裁请求
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.arbitration_requests"
+          value: ["payment_claim", "breach_penalty", "arbitration_costs"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: delta
+          expect:
+            contains: ["文书", "仲裁申请书"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+          questions:
+            - field_key: "profile.decisions.selected_documents"
+              input_type: "multi_select"
+              required: true
+
+  - id: round_4
+    name: 选择文书类型
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.selected_documents"
+          value: ["arbitration_application"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+            result:
+              has_file_id: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+          questions:
+            - field_key: "profile.decisions.document_reviewed"
+              input_type: "document_review"
+              required: true
+
+  - id: round_5
+    name: 确认文书
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: true
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: delta
+          expect:
+            contains: ["仲裁申请书", "生成", "完成"]
+        - event: end
+          expect:
+            reason: "stop"
+      
+      final_state:
+        type: message
+        message:
+          contains: ["仲裁申请书", "生成", "下载"]
+          length: ">= 100"
+        deliverable:
+          output_key: "arbitration_application"
+          file_type: "docx"

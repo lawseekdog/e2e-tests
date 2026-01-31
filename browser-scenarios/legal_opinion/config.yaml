@@ -1,0 +1,23 @@
+version: "1.0"
+scenario: legal_opinion
+description: 法律意见书场景 - 股权转让法律意见
+
+config:
+  base_url: http://localhost:5175
+  timeout: 180000
+  screenshot_on_failure: true
+
+credentials:
+  username: admin
+  password: admin123456
+
+assets:
+  equity_transfer_agreement: assets/equity_transfer_agreement.txt
+  company_info: assets/company_info.txt
+  shareholder_resolution: assets/shareholder_resolution.txt
+
+output:
+  screenshots:
+    - docs/verification.png
+  documents:
+    - docs/legal_opinion.docx

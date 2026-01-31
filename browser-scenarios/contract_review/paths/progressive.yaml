@@ -1,0 +1,182 @@
+id: progressive
+name: 渐进式对话
+description: 信息不完整，通过多轮对话逐步补充。适用于用户初次描述简单的场景。
+
+interactions:
+  - id: round_1
+    name: 上传合同并简单描述
+    user_action:
+      type: upload_file
+      attachments:
+        - "{{ assets.contract }}"
+      message: |
+        请帮我审查这份采购合同，我是买方。
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "contract-intake"
+        - event: delta
+          expect:
+            contains: ["合同", "审查"]
+        - event: card
+          expect:
+            review_type: "clarify"
+            questions_count: ">= 1"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "clarify"
+          skill_id: "contract-intake"
+          questions:
+            - field_key: "profile.review_focus"
+              input_type: "textarea"
+              required: true
+            - field_key: "data.non_litigation.intake_stop_ask"
+              input_type: "boolean"
+              required: true
+      
+      thinking:
+        must_include: ["合同", "审查"]
+        must_not_include: ["错误", "失败"]
+
+  - id: round_2
+    name: 补充审查重点
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.review_focus"
+          value: |
+            重点关注：违约责任、免责条款、争议解决方式、付款条件。
+            特别注意对我方不利的条款。
+        - field_key: "data.non_litigation.intake_stop_ask"
+          value: false
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "contract-review"
+        - event: delta
+          expect:
+            contains: ["风险", "条款"]
+        - event: tool_start
+          expect:
+            tool_name: "knowledge.search"
+        - event: tool_end
+          expect:
+            success: true
+        - event: end
+          expect:
+            reason: "stop"
+      
+      final_state:
+        type: message
+        message:
+          contains: ["风险", "条款", "建议", "违约"]
+          not_contains: ["错误", "失败"]
+          length: ">= 400"
+      
+      thinking:
+        must_include: ["合同", "风险", "条款"]
+        must_not_include: ["错误", "失败"]
+
+  - id: round_3
+    name: 请求生成审查报告
+    user_action:
+      type: chat
+      message: "请生成合同审查报告"
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "documents"
+        - event: delta
+          expect:
+            contains: ["报告", "文书"]
+        - event: card
+          expect:
+            review_type: "select"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "select"
+          skill_id: "documents"
+          questions:
+            - field_key: "profile.decisions.selected_documents"
+              input_type: "multi_select"
+              required: true
+
+  - id: round_4
+    name: 选择报告类型并确认
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.selected_documents"
+          value: ["contract_review_report"]
+    
+    ai_response:
+      sse_events:
+        - event: skill_start
+          expect:
+            skill_id: "document-generation"
+        - event: tool_start
+          expect:
+            tool_name: "template__render_batch_to_files"
+        - event: tool_end
+          expect:
+            success: true
+            result:
+              has_file_id: true
+        - event: card
+          expect:
+            review_type: "confirm"
+        - event: end
+          expect:
+            reason: "card"
+      
+      final_state:
+        type: card
+        card:
+          review_type: "confirm"
+          skill_id: "document-generation"
+          questions:
+            - field_key: "profile.decisions.document_reviewed"
+              input_type: "document_review"
+              required: true
+
+  - id: round_5
+    name: 确认报告
+    user_action:
+      type: resume_card
+      card_answers:
+        - field_key: "profile.decisions.document_reviewed"
+          value: true
+    
+    ai_response:
+      sse_events:
+        - event: delta
+          expect:
+            contains: ["报告", "生成", "完成"]
+        - event: end
+          expect:
+            reason: "stop"
+      
+      final_state:
+        type: message
+        message:
+          contains: ["报告", "生成", "下载"]
+          length: ">= 100"
+        deliverable:
+          output_key: "contract_review_report"
+          file_type: "docx"

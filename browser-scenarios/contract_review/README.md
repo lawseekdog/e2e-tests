@@ -6,6 +6,7 @@ url: http://localhost:5175
 credentials:
   username: admin
   password: admin123456
+steps_file: steps.yaml
 ---
 
 # 合同审查 - 采购合同风险审查
@@ -28,55 +29,9 @@ credentials:
 
 ## 测试步骤
 
-1. **导航到系统首页**
-   - URL: http://localhost:5175
-   - 预期: 显示登录页面
+> **注意**: 结构化测试步骤定义在 `steps.yaml` 文件中，供 Chrome DevTools MCP 自动化执行。
 
-2. **登录系统**
-   - 用户名: admin
-   - 密码: admin123456
-   - 预期: 登录成功，跳转到工作台
-
-3. **创建新会话**
-   - 点击「新建」按钮
-   - 预期: 创建新的审查会话
-
-4. **选择服务类型**
-   - 如有服务类型选择，选择「合同审查」
-   - 预期: 进入合同审查流程
-
-5. **上传合同文件**
-   - 上传 assets/sample_contract.txt
-   - 预期: 文件上传成功
-
-6. **填写审查要求**
-   - 在输入框中填写:
-   ```
-   请审查本采购合同，我方为甲方（买方）。
-   请识别对我方不利的风险条款，并提出修改建议。
-   重点关注：违约责任、免责条款、争议解决方式、付款条件。
-   ```
-   - 点击发送
-
-7. **等待 AI 审查**
-   - 等待 AI 完成合同审查
-   - 预期时间: 30-60秒
-
-8. **验证审查结果**
-   - 检查响应包含风险点识别:
-     - 违约金 5%/日 过高（行业惯例为万分之三至千分之一）
-     - 免责声明「不承担任何责任」过于宽泛
-     - 仲裁地点在乙方所在地，对甲方不利
-     - 付款条件「签约后3日内全额支付」风险较高
-
-9. **验证修改建议**
-   - 检查响应包含修改建议:
-     - 建议将违约金调整为合理比例
-     - 建议限定免责范围
-     - 建议修改争议解决条款
-
-10. **截图保存**
-    - 截图保存到: docs/verification.png
+详见 [steps.yaml](./steps.yaml)
 
 ## 预期产物
 
@@ -92,3 +47,94 @@ credentials:
 - [ ] 审查意见识别出仲裁条款风险
 - [ ] 审查意见包含修改建议
 - [ ] 截图保存成功
+
+## Quality Check Expectations
+
+```yaml
+memory:
+  retrieval:
+    - entity_key: "party:client:primary"
+      must_include: ["甲方", "北京甲方科技"]
+    - entity_key: "party:counterparty:primary"
+      must_include: ["乙方", "上海乙方供应链"]
+    - entity_key: "amount:contract:total"
+      must_include: ["200000", "20万"]
+    - entity_key: "risk:identified"
+      must_include: ["违约金", "免责", "仲裁"]
+  storage:
+    - entity_key: "party:client:primary"
+      scope: case
+      expected_value_contains: "甲方"
+    - entity_key: "contract:type"
+      scope: case
+      expected_value_contains: "采购"
+    - entity_key: "risk:penalty_clause"
+      scope: case
+    - entity_key: "risk:disclaimer_clause"
+      scope: case
+    - entity_key: "risk:arbitration_clause"
+      scope: case
+
+knowledge:
+  hits:
+    - query_type: "legal_basis"
+      must_match_count: ">= 1"
+      must_include_keywords: ["合同法", "违约责任", "免责条款"]
+    - query_type: "contract_template"
+      must_match_count: ">= 0"
+
+matter:
+  records:
+    - table: "matters"
+      count: 1
+      conditions:
+        service_type: "contract_review"
+    - table: "matter_tasks"
+      count: ">= 1"
+    - table: "matter_evidence_list_items"
+      count: ">= 1"
+
+skills:
+  executed:
+    - skill_id: "contract-intake"
+      status: "completed"
+    - skill_id: "contract-analysis"
+      status: "completed"
+    - skill_id: "risk-identification"
+      status: "completed"
+
+trace:
+  expectations:
+    - span_name: "run_skill"
+      count: ">= 3"
+    - span_name: "llm_call"
+      count: ">= 5"
+
+phase_gates:
+  checkpoints:
+    - phase: "intake"
+      status: "completed"
+      required_outputs: ["profile.client", "profile.contract_type"]
+    - phase: "analysis"
+      status: "completed"
+      required_outputs: ["risk_assessment", "recommendations"]
+
+document:
+  quality:
+    format:
+      not_applicable: true
+    style:
+      legal_terms_check: true
+      formal_language: true
+    content:
+      must_include:
+        - "违约金"
+        - "5%"
+        - "免责"
+        - "仲裁"
+        - "风险"
+        - "建议"
+      must_not_include:
+        - "{{.*}}"
+        - "TODO"
+```

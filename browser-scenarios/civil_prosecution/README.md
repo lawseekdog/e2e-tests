@@ -6,6 +6,7 @@ url: http://localhost:5175
 credentials:
   username: admin
   password: admin123456
+steps_file: steps.yaml
 ---
 
 # 民事起诉 - 民间借贷纠纷
@@ -31,61 +32,9 @@ credentials:
 
 ## 测试步骤
 
-1. **导航到系统首页**
-   - URL: http://localhost:5175
-   - 预期: 显示登录页面
+> **注意**: 结构化测试步骤定义在 `steps.yaml` 文件中，供 Chrome DevTools MCP 自动化执行。
 
-2. **登录系统**
-   - 用户名: admin
-   - 密码: admin123456
-   - 预期: 登录成功，跳转到工作台
-
-3. **创建新会话**
-   - 点击「新建」按钮
-   - 预期: 创建新的诉讼会话
-
-4. **选择服务类型**
-   - 如有服务类型选择，选择「民事诉讼」或「民事起诉」
-   - 预期: 进入民事诉讼流程
-
-5. **上传证据文件**
-   - 上传 assets/iou.txt
-   - 上传 assets/sample_transfer_record.txt
-   - 上传 assets/sample_chat_record.txt
-   - 预期: 文件上传成功
-
-6. **填写案情信息**
-   - 在输入框中填写:
-   ```
-   原告：张三E2E01
-   被告：李四E2E01
-   案由：民间借贷纠纷
-   事实：2023年1月1日，被告向原告借款人民币100000元，约定2023年12月31日前归还。
-   原告已通过银行转账交付借款，被告出具借条。到期后被告未还，原告多次催收无果。
-   证据：借条、转账记录、聊天记录
-   诉求：返还本金100000元，并按年利率6%支付逾期利息，承担诉讼费。
-   ```
-   - 点击发送
-
-7. **等待 AI 处理**
-   - 等待 AI 分析案情并生成起诉状
-   - 预期时间: 60-120秒
-
-8. **验证起诉状生成**
-   - 检查是否生成起诉状文档
-   - 预期: 显示起诉状预览或下载链接
-
-9. **下载起诉状**
-   - 下载生成的起诉状 DOCX 文件
-   - 保存到: docs/civil_complaint.docx
-
-10. **验证起诉状内容**
-    - 检查包含: 张三E2E01、李四E2E01
-    - 检查包含: 100000 或 10万
-    - 检查包含: 民间借贷
-
-11. **截图保存**
-    - 截图保存到: docs/verification.png
+详见 [steps.yaml](./steps.yaml)
 
 ## 预期产物
 
@@ -101,3 +50,116 @@ credentials:
 - [ ] 起诉状内容包含当事人信息
 - [ ] 起诉状内容包含借款金额
 - [ ] 截图和文档保存成功
+
+## Quality Check Expectations
+
+```yaml
+memory:
+  retrieval:
+    - entity_key: "party:plaintiff:primary"
+      must_include: ["张三E2E01"]
+    - entity_key: "party:defendant:primary"
+      must_include: ["李四E2E01"]
+    - entity_key: "amount:claim:principal"
+      must_include: ["100000", "10万"]
+    - entity_key: "date:loan"
+      must_include: ["2023年1月1日"]
+    - entity_key: "date:due"
+      must_include: ["2023年12月31日"]
+  storage:
+    - entity_key: "party:plaintiff:primary"
+      scope: case
+      expected_value_contains: "张三E2E01"
+    - entity_key: "party:defendant:primary"
+      scope: case
+      expected_value_contains: "李四E2E01"
+    - entity_key: "cause_of_action"
+      scope: case
+      expected_value_contains: "民间借贷"
+    - entity_key: "amount:claim:principal"
+      scope: case
+
+knowledge:
+  hits:
+    - query_type: "legal_basis"
+      must_match_count: ">= 1"
+      must_include_keywords: ["民间借贷", "合同法", "借款合同"]
+    - query_type: "case_reference"
+      must_match_count: ">= 0"
+
+matter:
+  records:
+    - table: "matters"
+      count: 1
+      conditions:
+        cause_of_action_code: "civil_loan"
+    - table: "matter_deliverables"
+      output_key: "civil_complaint"
+      count: 1
+    - table: "matter_evidence_list_items"
+      count: ">= 3"
+    - table: "matter_parties"
+      count: 2
+      conditions:
+        roles: ["plaintiff", "defendant"]
+
+skills:
+  executed:
+    - skill_id: "litigation-intake"
+      status: "completed"
+    - skill_id: "evidence-analysis"
+      status: "completed"
+    - skill_id: "issue-identification"
+      status: "completed"
+    - skill_id: "strategy-formulation"
+      status: "completed"
+    - skill_id: "document-generation"
+      status: "completed"
+
+trace:
+  expectations:
+    - span_name: "run_skill"
+      count: ">= 5"
+    - span_name: "llm_call"
+      count: ">= 10"
+    - span_name: "tool_call"
+      count: ">= 3"
+
+phase_gates:
+  checkpoints:
+    - phase: "intake"
+      status: "completed"
+      required_outputs: ["profile.plaintiff", "profile.defendant", "profile.facts"]
+    - phase: "analysis"
+      status: "completed"
+      required_outputs: ["evidence_list", "issues", "strategies"]
+    - phase: "document"
+      status: "completed"
+      required_outputs: ["civil_complaint"]
+
+document:
+  quality:
+    format:
+      title_centered: true
+      signature_right_aligned: true
+      page_margins: "standard"
+    style:
+      legal_terms_check: true
+      formal_language: true
+      no_colloquial_expressions: true
+    content:
+      must_include:
+        - "原告"
+        - "被告"
+        - "诉讼请求"
+        - "事实与理由"
+        - "张三E2E01"
+        - "李四E2E01"
+        - "100000"
+        - "民间借贷"
+      must_not_include:
+        - "{{.*}}"
+        - "TODO"
+        - "PLACEHOLDER"
+        - "undefined"
+```

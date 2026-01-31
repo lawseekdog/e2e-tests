@@ -1,0 +1,19 @@
+version: "1.0"
+scenario: legal_consultation
+description: 法律咨询场景 - 租赁押金纠纷咨询
+
+config:
+  base_url: http://localhost:5175
+  timeout: 120000
+  screenshot_on_failure: true
+
+credentials:
+  username: admin
+  password: admin123456
+
+assets:
+  consult_note: assets/consult_note.txt
+
+output:
+  screenshots:
+    - docs/verification.png

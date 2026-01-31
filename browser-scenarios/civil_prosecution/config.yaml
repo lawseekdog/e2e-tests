@@ -1,0 +1,25 @@
+version: "1.0"
+scenario: civil_prosecution
+description: 民事起诉场景 - 民间借贷纠纷（原告）
+
+config:
+  base_url: http://localhost:5175
+  timeout: 180000
+  screenshot_on_failure: true
+
+credentials:
+  username: admin
+  password: admin123456
+
+assets:
+  iou: assets/iou.txt
+  transfer_record: assets/sample_transfer_record.txt
+  chat_record: assets/sample_chat_record.txt
+  # 用于 rollback 路径的额外证据
+  additional_evidence: assets/additional_evidence.txt
+
+output:
+  screenshots:
+    - docs/verification.png
+  documents:
+    - docs/civil_complaint.docx

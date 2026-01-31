@@ -1,0 +1,23 @@
+version: "1.0"
+scenario: due_diligence
+description: 尽职调查场景 - 目标公司投资尽调
+
+config:
+  base_url: http://localhost:5175
+  timeout: 180000
+  screenshot_on_failure: true
+
+credentials:
+  username: admin
+  password: admin123456
+
+assets:
+  business_license: assets/business_license.txt
+  financial_report: assets/financial_report.txt
+  major_contracts: assets/major_contracts.txt
+
+output:
+  screenshots:
+    - docs/verification.png
+  documents:
+    - docs/due_diligence_report.docx

@@ -92,6 +92,8 @@ class QualityChecker:
             if not self.matter_id:
                 raise ValueError(f"Session {self.session_id} 没有关联的 matter_id")
 
+            if not client.user_id:
+                raise RuntimeError("登录后未获取到 user_id")
             self.user_id = int(client.user_id)
             self.organization_id = client.organization_id
 
@@ -116,8 +118,12 @@ class QualityChecker:
 
         try:
             # 获取记忆事实
+            if self.user_id is None or not self.matter_id:
+                raise RuntimeError("测试上下文未初始化")
+            user_id = int(self.user_id)
+            case_id = str(self.matter_id)
             facts = await list_case_facts(
-                client, user_id=self.user_id, case_id=self.matter_id, limit=300
+                client, user_id=user_id, case_id=case_id, limit=300
             )
 
             for check in retrieval_checks:
@@ -164,8 +170,12 @@ class QualityChecker:
         success = 0
 
         try:
+            if self.user_id is None or not self.matter_id:
+                raise RuntimeError("测试上下文未初始化")
+            user_id = int(self.user_id)
+            case_id = str(self.matter_id)
             facts = await list_case_facts(
-                client, user_id=self.user_id, case_id=self.matter_id, limit=300
+                client, user_id=user_id, case_id=case_id, limit=300
             )
 
             for check in storage_checks:
@@ -241,6 +251,8 @@ class QualityChecker:
         success = 0
 
         try:
+            if not self.matter_id:
+                raise RuntimeError("测试上下文未初始化")
             matter_id_int = int(self.matter_id)
 
             for check in records_checks:
@@ -317,7 +329,10 @@ class QualityChecker:
 
         try:
             # 获取 traces
-            traces_resp = await client.list_traces(self.matter_id, limit=200)
+            if not self.matter_id:
+                raise RuntimeError("测试上下文未初始化")
+            matter_id = str(self.matter_id)
+            traces_resp = await client.list_traces(matter_id, limit=200)
             traces_data = unwrap_api_response(traces_resp)
             traces = traces_data.get("traces", [])
 
@@ -366,7 +381,10 @@ class QualityChecker:
         success = 0
 
         try:
-            traces_resp = await client.list_traces(self.matter_id, limit=200)
+            if not self.matter_id:
+                raise RuntimeError("测试上下文未初始化")
+            matter_id = str(self.matter_id)
+            traces_resp = await client.list_traces(matter_id, limit=200)
             traces_data = unwrap_api_response(traces_resp)
             traces = traces_data.get("traces", [])
 
@@ -418,7 +436,10 @@ class QualityChecker:
         success = 0
 
         try:
-            pt_resp = await client.get_matter_phase_timeline(self.matter_id)
+            if not self.matter_id:
+                raise RuntimeError("测试上下文未初始化")
+            matter_id = str(self.matter_id)
+            pt_resp = await client.get_matter_phase_timeline(matter_id)
             pt_data = unwrap_api_response(pt_resp)
             phases = pt_data.get("phases", [])
 
@@ -475,7 +496,10 @@ class QualityChecker:
 
         try:
             # 获取交付物
-            dels_resp = await client.list_deliverables(self.matter_id)
+            if not self.matter_id:
+                raise RuntimeError("测试上下文未初始化")
+            matter_id = str(self.matter_id)
+            dels_resp = await client.list_deliverables(matter_id)
             dels_data = unwrap_api_response(dels_resp)
             deliverables = dels_data.get("deliverables", [])
 

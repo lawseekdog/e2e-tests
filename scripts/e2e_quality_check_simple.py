@@ -66,7 +66,7 @@ async def main():
     base_url = (
         os.getenv("E2E_BASE_URL")
         or os.getenv("BASE_URL")
-        or "http://localhost:18001/lawseekdog/v1"
+        or "http://localhost:18001/api/v1"
     )
     username = os.getenv("E2E_USERNAME") or os.getenv("ADMIN_USERNAME") or "admin"
     password = os.getenv("E2E_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "admin123456"

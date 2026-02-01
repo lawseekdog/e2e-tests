@@ -651,7 +651,7 @@ async def main():
         await checker.load_expectations()
 
         # 创建 API 客户端
-        base_url = os.getenv("E2E_BASE_URL", "http://localhost:18001/lawseekdog/v1")
+        base_url = os.getenv("E2E_BASE_URL", "http://localhost:18001/api/v1")
         username = os.getenv("E2E_USERNAME", "admin")
         password = os.getenv("E2E_PASSWORD", "admin123456")
 

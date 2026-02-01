@@ -12,13 +12,15 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-AUTH_V1 = "/auth-service/api/v1"
-USER_V1 = "/user-service/api/v1"
-ORG_V1 = "/organization-service/api/v1"
-CONSULTATIONS_V1 = "/consultations-service/api/v1"
-FILES_V1 = "/files-service/api/v1"
-MATTERS_V1 = "/matter-service/api/v1"
-KNOWLEDGE_V1 = "/knowledge-service/api/v1"
+# External gateway is standardized to: /api/v1/<service>/**
+# So within the gateway prefix (/api/v1), service routes must NOT include another /api/v1.
+AUTH = "/auth-service"
+USER = "/user-service"
+ORG = "/organization-service"
+CONSULTATIONS = "/consultations-service"
+FILES = "/files-service"
+MATTERS = "/matter-service"
+KNOWLEDGE = "/knowledge-service"
 
 
 class ApiClient:
@@ -41,7 +43,7 @@ class ApiClient:
         self._chat_transport: str | None = None
         self._client: httpx.AsyncClient | None = None
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "ApiClient":
         # Chat endpoints are SSE streams and may take longer than typical JSON APIs.
         timeout_s = float(os.getenv("E2E_HTTP_TIMEOUT_S", "1800") or 1800)
         self._client = httpx.AsyncClient(timeout=timeout_s)
@@ -69,6 +71,11 @@ class ApiClient:
     async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         kwargs.setdefault("headers", self.headers)
+        client = self._client
+        if client is None:
+            raise RuntimeError(
+                "ApiClient is not initialized; use 'async with ApiClient(...)'"
+            )
         # Local docker dev: gateway may transiently return 502/503/504 while a service is being recreated.
         # Use a slightly more patient retry policy for GETs to keep E2E stable.
         # Spring Boot services (esp. matter-service) can take ~50s to start; keep enough headroom.
@@ -81,7 +88,7 @@ class ApiClient:
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
-                response = await self._client.request(method, url, **kwargs)
+                response = await client.request(method, url, **kwargs)
                 if response.status_code in {502, 503, 504} and attempt < max_attempts:
                     # Gateway hiccups happen when services restart in local docker; retry GETs only.
                     await asyncio.sleep(min(4.0, 0.5 * attempt))
@@ -107,7 +114,7 @@ class ApiClient:
         """Connect to WebSocket, authenticate, send message, and collect events until 'end'."""
         parsed = urlparse(self.base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
-        # base_url may include a path prefix (e.g. /lawseekdog/v1 behind APISIX).
+        # base_url may include a path prefix (e.g. /api/v1 behind APISIX).
         # WebSocket URLs must include the same prefix, otherwise APISIX will 404 the handshake.
         base_path = (parsed.path or "").rstrip("/")
         ws_url = f"{scheme}://{parsed.netloc}{base_path}{ws_path}"
@@ -220,7 +227,12 @@ class ApiClient:
                 data_lines = []
 
             try:
-                async with self._client.stream(
+                client = self._client
+                if client is None:
+                    raise RuntimeError(
+                        "ApiClient is not initialized; use 'async with ApiClient(...)'"
+                    )
+                async with client.stream(
                     "POST", url, headers=headers, json=data
                 ) as resp:
                     if resp.status_code in transient and attempt < max_attempts:
@@ -267,7 +279,11 @@ class ApiClient:
 
             except httpx.HTTPStatusError as e:
                 last_exc = e
-                if e.response is not None and e.response.status_code in transient and attempt < max_attempts:
+                if (
+                    e.response is not None
+                    and e.response.status_code in transient
+                    and attempt < max_attempts
+                ):
                     await asyncio.sleep(min(4.0, 0.5 * attempt))
                     continue
                 raise
@@ -313,7 +329,9 @@ class ApiClient:
                 msg_type,
                 data,
                 max_attempts=1,
-                open_timeout_s=float(os.getenv("E2E_HTTP_WS_OPEN_TIMEOUT_S", "2.5") or 2.5),
+                open_timeout_s=float(
+                    os.getenv("E2E_HTTP_WS_OPEN_TIMEOUT_S", "2.5") or 2.5
+                ),
             )
             self._chat_transport = "ws"
             return out
@@ -325,7 +343,11 @@ class ApiClient:
             try:
                 return await self._post_sse(sse_path, data)
             except httpx.HTTPStatusError as sse_exc:
-                code = sse_exc.response.status_code if sse_exc.response is not None else None
+                code = (
+                    sse_exc.response.status_code
+                    if sse_exc.response is not None
+                    else None
+                )
                 if code in {404, 406}:
                     raise ws_exc
                 raise
@@ -336,17 +358,17 @@ class ApiClient:
         return await self._request("GET", path, **kwargs)
 
     async def post(
-        self, path: str, data: dict | None = None, **kwargs
+        self, path: str, data: dict[str, Any] | None = None, **kwargs
     ) -> dict[str, Any]:
         return await self._request("POST", path, json=data, **kwargs)
 
     async def put(
-        self, path: str, data: dict | None = None, **kwargs
+        self, path: str, data: dict[str, Any] | None = None, **kwargs
     ) -> dict[str, Any]:
         return await self._request("PUT", path, json=data, **kwargs)
 
     async def patch(
-        self, path: str, data: dict | None = None, **kwargs
+        self, path: str, data: dict[str, Any] | None = None, **kwargs
     ) -> dict[str, Any]:
         return await self._request("PATCH", path, json=data, **kwargs)
 
@@ -358,7 +380,7 @@ class ApiClient:
     async def login(self, username: str, password: str) -> dict[str, Any]:
         # NOTE: auth-service exposes a form login endpoint; JSON login may be disabled by server config.
         # Use x-www-form-urlencoded to keep E2E stable across gateway/service implementations.
-        url = f"{self.base_url}{AUTH_V1}/auth/login"
+        url = f"{self.base_url}{AUTH}/auth/login"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         max_attempts = int(os.getenv("E2E_HTTP_LOGIN_RETRIES", "180") or 180)
         transient = {500, 502, 503, 504}
@@ -366,7 +388,12 @@ class ApiClient:
 
         for attempt in range(1, max_attempts + 1):
             try:
-                resp = await self._client.post(
+                client = self._client
+                if client is None:
+                    raise RuntimeError(
+                        "ApiClient is not initialized; use 'async with ApiClient(...)'"
+                    )
+                resp = await client.post(
                     url,
                     headers=headers,
                     data={"username": username, "password": password},
@@ -429,7 +456,7 @@ class ApiClient:
         raise last_exc if last_exc else RuntimeError("login failed")
 
     async def get_me(self) -> dict[str, Any]:
-        return await self.get(f"{AUTH_V1}/auth/me")
+        return await self.get(f"{AUTH}/auth/me")
 
     # ========== Consultations ==========
 
@@ -447,10 +474,10 @@ class ApiClient:
             data["matter_id"] = matter_id
         if client_role:
             data["client_role"] = client_role
-        return await self.post(f"{CONSULTATIONS_V1}/consultations/sessions", data)
+        return await self.post(f"{CONSULTATIONS}/consultations/sessions", data)
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
-        return await self.get(f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}")
+        return await self.get(f"{CONSULTATIONS}/consultations/sessions/{session_id}")
 
     async def chat(
         self,
@@ -467,15 +494,15 @@ class ApiClient:
             data["max_loops"] = max_loops
         if self.user_id:
             data["user_id"] = int(self.user_id)
-        ws_path = f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/ws"
-        sse_path = f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/chat"
+        ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
+        sse_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/chat"
         return await self._post_chat_auto(
             ws_path=ws_path, sse_path=sse_path, msg_type="chat", data=data
         )
 
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
         return await self.get(
-            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/pending_card"
+            f"{CONSULTATIONS}/consultations/sessions/{session_id}/pending_card"
         )
 
     async def upload_session_attachment(
@@ -490,7 +517,7 @@ class ApiClient:
         if not sid:
             raise ValueError("session_id is required")
 
-        url = f"{self.base_url}{CONSULTATIONS_V1}/consultations/sessions/{sid}/attachments"
+        url = f"{self.base_url}{CONSULTATIONS}/consultations/sessions/{sid}/attachments"
         headers = dict(self.headers)
         headers.pop("Content-Type", None)  # Let httpx set multipart boundary.
 
@@ -498,11 +525,16 @@ class ApiClient:
         transient = {500, 502, 503, 504}
         last_exc: Exception | None = None
 
+        client = self._client
+        if client is None:
+            raise RuntimeError(
+                "ApiClient is not initialized; use 'async with ApiClient(...)'"
+            )
         for attempt in range(1, max_attempts + 1):
             try:
                 with path.open("rb") as f:
                     files = {"file": (path.name, f)}
-                    resp = await self._client.post(url, headers=headers, files=files)
+                    resp = await client.post(url, headers=headers, files=files)
                 if resp.status_code in transient and attempt < max_attempts:
                     await asyncio.sleep(min(4.0, 0.5 * attempt))
                     continue
@@ -518,7 +550,7 @@ class ApiClient:
 
     async def get_session_canvas(self, session_id: str) -> dict[str, Any]:
         return await self.get(
-            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/canvas"
+            f"{CONSULTATIONS}/consultations/sessions/{session_id}/canvas"
         )
 
     async def get_session_timeline(
@@ -528,7 +560,7 @@ class ApiClient:
         if limit is not None:
             params["limit"] = int(limit)
         return await self.get(
-            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/timeline",
+            f"{CONSULTATIONS}/consultations/sessions/{session_id}/timeline",
             params=params,
         )
 
@@ -539,7 +571,7 @@ class ApiClient:
         if limit is not None:
             params["limit"] = int(limit)
         return await self.get(
-            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/traces",
+            f"{CONSULTATIONS}/consultations/sessions/{session_id}/traces",
             params=params,
         )
 
@@ -550,7 +582,7 @@ class ApiClient:
         if not tid:
             raise ValueError("trace_id is required")
         return await self.get(
-            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/traces/{tid}"
+            f"{CONSULTATIONS}/consultations/sessions/{session_id}/traces/{tid}"
         )
 
     async def resume(
@@ -569,8 +601,8 @@ class ApiClient:
             data["max_loops"] = int(max_loops)
         if self.user_id:
             data["user_id"] = int(self.user_id)
-        ws_path = f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/ws"
-        sse_path = f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/resume"
+        ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
+        sse_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/resume"
         return await self._post_chat_auto(
             ws_path=ws_path, sse_path=sse_path, msg_type="resume", data=data
         )
@@ -589,7 +621,7 @@ class ApiClient:
         if cause_of_action_code is not None:
             payload["cause_of_action_code"] = str(cause_of_action_code)
         return await self.post(
-            f"{CONSULTATIONS_V1}/consultations/sessions/{session_id}/service-type",
+            f"{CONSULTATIONS}/consultations/sessions/{session_id}/service-type",
             payload,
         )
 
@@ -605,7 +637,7 @@ class ApiClient:
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(file_path)
 
-        url = f"{self.base_url}{FILES_V1}/files/upload"
+        url = f"{self.base_url}{FILES}/files/upload"
         headers = dict(self.headers)
         # Let httpx set multipart boundary.
         headers.pop("Content-Type", None)
@@ -618,11 +650,16 @@ class ApiClient:
         transient = {500, 502, 503, 504}
         last_exc: Exception | None = None
 
+        client = self._client
+        if client is None:
+            raise RuntimeError(
+                "ApiClient is not initialized; use 'async with ApiClient(...)'"
+            )
         for attempt in range(1, max_attempts + 1):
             try:
                 with path.open("rb") as f:
                     files = {"file": (path.name, f)}
-                    resp = await self._client.post(
+                    resp = await client.post(
                         url, headers=headers, params=params, files=files
                     )
                 if resp.status_code in transient and attempt < max_attempts:
@@ -643,10 +680,15 @@ class ApiClient:
         fid = str(file_id).strip()
         if not fid:
             raise ValueError("file_id is required")
-        url = f"{self.base_url}{FILES_V1}/files/{fid}/download"
+        url = f"{self.base_url}{FILES}/files/{fid}/download"
         headers = dict(self.headers)
         headers.pop("Content-Type", None)
-        resp = await self._client.get(url, headers=headers)
+        client = self._client
+        if client is None:
+            raise RuntimeError(
+                "ApiClient is not initialized; use 'async with ApiClient(...)'"
+            )
+        resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         return resp.content
 
@@ -660,26 +702,26 @@ class ApiClient:
         data = {"service_type_id": service_type_id}
         if client_id:
             data["client_id"] = client_id
-        return await self.post(f"{MATTERS_V1}/matters", data)
+        return await self.post(f"{MATTERS}/matters", data)
 
     async def get_matter(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"{MATTERS_V1}/matters/{matter_id}")
+        return await self.get(f"{MATTERS}/matters/{matter_id}")
 
     async def get_matter_tasks(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/tasks")
+        return await self.get(f"{MATTERS}/matters/{matter_id}/tasks")
 
     async def complete_task(
-        self, matter_id: str, task_id: str, result: dict
+        self, matter_id: str, task_id: str, result: dict[str, Any]
     ) -> dict[str, Any]:
         return await self.post(
-            f"{MATTERS_V1}/matters/{matter_id}/tasks/{task_id}/complete", result
+            f"{MATTERS}/matters/{matter_id}/tasks/{task_id}/complete", result
         )
 
     async def get_workflow_snapshot(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/workflow")
+        return await self.get(f"{MATTERS}/matters/{matter_id}/workflow")
 
     async def get_workflow_profile(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/workflow/profile")
+        return await self.get(f"{MATTERS}/matters/{matter_id}/workflow/profile")
 
     async def list_deliverables(
         self, matter_id: str, output_key: str | None = None
@@ -688,7 +730,7 @@ class ApiClient:
         if output_key:
             params["output_key"] = output_key
         return await self.get(
-            f"{MATTERS_V1}/matters/{matter_id}/deliverables", params=params
+            f"{MATTERS}/matters/{matter_id}/deliverables", params=params
         )
 
     async def list_traces(
@@ -697,7 +739,7 @@ class ApiClient:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/traces", params=params)
+        return await self.get(f"{MATTERS}/matters/{matter_id}/traces", params=params)
 
     async def get_matter_timeline(
         self, matter_id: str, limit: int | None = None
@@ -705,12 +747,10 @@ class ApiClient:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(
-            f"{MATTERS_V1}/matters/{matter_id}/timeline", params=params
-        )
+        return await self.get(f"{MATTERS}/matters/{matter_id}/timeline", params=params)
 
     async def get_matter_phase_timeline(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"{MATTERS_V1}/matters/{matter_id}/phase-timeline")
+        return await self.get(f"{MATTERS}/matters/{matter_id}/phase-timeline")
 
     # ========== Knowledge ==========
 
@@ -720,7 +760,7 @@ class ApiClient:
         doc_types: list[str] | None = None,
         top_k: int = 10,
     ) -> dict[str, Any]:
-        data = {"query": query, "top_k": top_k}
+        data: dict[str, Any] = {"query": query, "top_k": top_k}
         if doc_types:
             data["doc_types"] = doc_types
-        return await self.post(f"{KNOWLEDGE_V1}/knowledge/search", data)
+        return await self.post(f"{KNOWLEDGE}/knowledge/search", data)

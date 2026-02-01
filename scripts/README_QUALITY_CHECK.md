@@ -63,7 +63,7 @@ python scripts/e2e_quality_check_simple.py contract_review 1
 
 ```bash
 # API 连接
-E2E_BASE_URL=http://localhost:18001/lawseekdog/v1
+E2E_BASE_URL=http://localhost:18001/api/v1
 E2E_USERNAME=admin
 E2E_PASSWORD=admin123456
 

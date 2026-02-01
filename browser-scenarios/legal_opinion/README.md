@@ -75,6 +75,44 @@ assets/
 
 ## Quality Check Expectations
 
+```yaml
+memory:
+  retrieval: []
+  storage: []
+
+knowledge:
+  hits: []
+
+matter:
+  records:
+    - table: "matters"
+      count: 1
+    - table: "matter_deliverables"
+      output_key: "legal_opinion"
+      count: 1
+
+skills:
+  executed: []
+
+trace:
+  expectations: []
+
+phase_gates:
+  checkpoints: []
+
+document:
+  quality:
+    content:
+      must_include:
+        - "法律意见书"
+        - "股权转让"
+      must_not_include:
+        - "{{.*}}"
+        - "TODO"
+        - "PLACEHOLDER"
+        - "undefined"
+```
+
 ### 1. Skill调用验证
 - ✅ 正确调用 `legal-opinion-intake` skill
 - ✅ 正确调用 `legal-opinion-analysis` skill（仅progressive路径）

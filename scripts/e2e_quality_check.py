@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from client.api_client import ApiClient
 from tests.lawyer_workbench._support.db import PgTarget, count, fetch_all, fetch_one
+from tests.lawyer_workbench._support.docx import extract_docx_text
 from tests.lawyer_workbench._support.memory import list_case_facts
 from tests.lawyer_workbench._support.utils import unwrap_api_response
 
@@ -263,7 +264,7 @@ class QualityChecker:
                 # 构建查询
                 if table == "matters":
                     sql = "SELECT COUNT(1) FROM matters WHERE id = %s"
-                    params = [matter_id_int]
+                    params: list[Any] = [matter_id_int]
                     if conditions.get("service_type"):
                         sql += " AND service_type = %s"
                         params.append(conditions["service_type"])
@@ -273,6 +274,22 @@ class QualityChecker:
                 elif table == "matter_evidence_list_items":
                     sql = "SELECT COUNT(1) FROM matter_evidence_list_items WHERE matter_id = %s"
                     params = [matter_id_int]
+                elif table == "matter_deliverables":
+                    sql = (
+                        "SELECT COUNT(1) FROM matter_deliverables WHERE matter_id = %s"
+                    )
+                    params = [matter_id_int]
+                    if conditions.get("output_key"):
+                        sql += " AND output_key = %s"
+                        params.append(str(conditions["output_key"]))
+                elif table == "matter_parties":
+                    sql = "SELECT COUNT(1) FROM matter_parties WHERE matter_id = %s"
+                    params = [matter_id_int]
+                    roles = conditions.get("roles")
+                    if isinstance(roles, list) and roles:
+                        # roles column is a string in most stacks; keep a simple IN filter.
+                        sql += " AND role = ANY(%s)"
+                        params.append([str(x) for x in roles])
                 else:
                     warnings.append(f"未知表: {table}")
                     continue
@@ -518,7 +535,8 @@ class QualityChecker:
             # 下载文档内容
             try:
                 doc_bytes = await client.download_file_bytes(file_id)
-                doc_text = doc_bytes.decode("utf-8", errors="ignore")
+                # Deliverables are DOCX (zip). Decode is meaningless; extract visible text instead.
+                doc_text = extract_docx_text(doc_bytes)
             except Exception as e:
                 warnings.append(f"下载文档失败: {e}")
                 return CheckResult(name, False, total, success, details, warnings)

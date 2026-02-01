@@ -1,2 +1,5 @@
 .venv
 tmp/
+
+# Oh-My-OpenCode
+.sisyphus/

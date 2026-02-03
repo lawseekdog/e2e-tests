@@ -29,6 +29,7 @@ from client.api_client import ApiClient
 from tests.lawyer_workbench._support.db import PgTarget, count, fetch_all, fetch_one
 from tests.lawyer_workbench._support.docx import extract_docx_text
 from tests.lawyer_workbench._support.memory import list_case_facts
+from tests.lawyer_workbench._support.timeline import retrieval_snippets, unwrap_timeline
 from tests.lawyer_workbench._support.utils import unwrap_api_response
 
 
@@ -232,11 +233,71 @@ class QualityChecker:
         total = len(hits_checks)
         success = 0
 
-        # 知识库检查需要实际的查询，这里简化处理
-        warnings.append("知识库检查需要实际查询，暂时跳过")
+        try:
+            snippets: list[str] = []
+            # Prefer session timeline (consultations-service). Fallback to matter timeline.
+            if self.session_id:
+                try:
+                    tl_resp = await client.get_session_timeline(self.session_id, limit=50)
+                    tl = unwrap_timeline(tl_resp)
+                    snippets = retrieval_snippets(tl)
+                except Exception as e:
+                    warnings.append(f"会话 timeline 获取失败，尝试 matter timeline: {e}")
+            if not snippets and self.matter_id:
+                try:
+                    mt_resp = await client.get_matter_timeline(self.matter_id, limit=50)
+                    mt = unwrap_timeline(mt_resp)
+                    snippets = retrieval_snippets(mt)
+                except Exception as e:
+                    warnings.append(f"matter timeline 获取失败: {e}")
 
-        passed = True
-        return CheckResult(name, passed, total, success, details, warnings)
+            for check in hits_checks:
+                query_type = str(check.get("query_type") or "")
+                must_match_count = str(check.get("must_match_count") or "").strip()
+                must_include_keywords = check.get("must_include_keywords", []) or []
+
+                # Count snippet hits (any keyword) or total if no keywords provided.
+                if must_include_keywords:
+                    hit_snips = [
+                        s for s in snippets
+                        if any(k in s for k in must_include_keywords if isinstance(k, str))
+                    ]
+                else:
+                    hit_snips = list(snippets)
+
+                count_ok = True
+                if must_match_count.startswith(">="):
+                    try:
+                        min_count = int(must_match_count.split(">=")[1].strip())
+                        count_ok = len(hit_snips) >= min_count
+                    except Exception:
+                        warnings.append(f"{query_type}: 无法解析 must_match_count={must_match_count!r}")
+
+                missing_keywords: list[str] = []
+                if must_include_keywords:
+                    for k in must_include_keywords:
+                        ks = str(k or "").strip()
+                        if ks and not any(ks in s for s in snippets):
+                            missing_keywords.append(ks)
+
+                if count_ok and not missing_keywords:
+                    success += 1
+                    details.append(f"✓ {query_type}: 命中 {len(hit_snips)} 条，关键词齐全")
+                else:
+                    if not count_ok:
+                        details.append(
+                            f"✗ {query_type}: 命中数不足（需要 {must_match_count}）"
+                        )
+                    if missing_keywords:
+                        details.append(
+                            f\"✗ {query_type}: 缺少关键词 {missing_keywords}\"
+                        )
+
+            passed = success == total
+            return CheckResult(name, passed, total, success, details, warnings)
+        except Exception as e:
+            warnings.append(f"检查失败: {e}")
+            return CheckResult(name, False, total, success, details, warnings)
 
     async def check_matter_records(self, client: ApiClient) -> CheckResult:
         """检查 4: Matter 记录"""
@@ -268,11 +329,29 @@ class QualityChecker:
                     if conditions.get("service_type"):
                         sql += " AND service_type = %s"
                         params.append(conditions["service_type"])
+                    if conditions.get("cause_of_action_code"):
+                        sql += " AND cause_of_action_code = %s"
+                        params.append(conditions["cause_of_action_code"])
                 elif table == "matter_tasks":
                     sql = "SELECT COUNT(1) FROM matter_tasks WHERE matter_id = %s"
                     params = [matter_id_int]
                 elif table == "matter_evidence_list_items":
                     sql = "SELECT COUNT(1) FROM matter_evidence_list_items WHERE matter_id = %s"
+                    params = [matter_id_int]
+                elif table == "matter_issues":
+                    sql = "SELECT COUNT(1) FROM matter_issues WHERE matter_id = %s"
+                    params = [matter_id_int]
+                elif table == "matter_issue_key_evidence_items":
+                    sql = (
+                        "SELECT COUNT(1) FROM matter_issue_key_evidence_items "
+                        "WHERE issue_id IN (SELECT id FROM matter_issues WHERE matter_id = %s)"
+                    )
+                    params = [matter_id_int]
+                elif table == "matter_issue_legal_basis_items":
+                    sql = (
+                        "SELECT COUNT(1) FROM matter_issue_legal_basis_items "
+                        "WHERE issue_id IN (SELECT id FROM matter_issues WHERE matter_id = %s)"
+                    )
                     params = [matter_id_int]
                 elif table == "matter_deliverables":
                     sql = (
@@ -330,6 +409,143 @@ class QualityChecker:
 
         passed = success == total
         return CheckResult(name, passed, total, success, details, warnings)
+
+    async def check_dispute_focus(self, client: ApiClient) -> CheckResult:
+        """检查 4.5: 争议焦点落库"""
+        name = "争议焦点落库"
+        details = []
+        warnings = []
+
+        # 仅对民事起诉场景强制检查，其他场景跳过。
+        if self.scenario_name != "civil_prosecution":
+            return CheckResult(name, True, 0, 0, ["场景不要求"], [])
+
+        try:
+            if not self.matter_id:
+                raise RuntimeError("测试上下文未初始化")
+            mid = int(self.matter_id)
+
+            issue_count = await count(
+                self.matter_db, "SELECT COUNT(1) FROM matter_issues WHERE matter_id = %s", [mid]
+            )
+            key_ev_count = await count(
+                self.matter_db,
+                "SELECT COUNT(1) FROM matter_issue_key_evidence_items WHERE issue_id IN "
+                "(SELECT id FROM matter_issues WHERE matter_id = %s)",
+                [mid],
+            )
+            legal_basis_count = await count(
+                self.matter_db,
+                "SELECT COUNT(1) FROM matter_issue_legal_basis_items WHERE issue_id IN "
+                "(SELECT id FROM matter_issues WHERE matter_id = %s)",
+                [mid],
+            )
+
+            total = 3
+            success = 0
+            if issue_count > 0:
+                success += 1
+                details.append(f"✓ matter_issues: {issue_count}")
+            else:
+                details.append("✗ matter_issues: 0")
+
+            if key_ev_count > 0:
+                success += 1
+                details.append(f"✓ matter_issue_key_evidence_items: {key_ev_count}")
+            else:
+                details.append("✗ matter_issue_key_evidence_items: 0")
+
+            if legal_basis_count > 0:
+                success += 1
+                details.append(f"✓ matter_issue_legal_basis_items: {legal_basis_count}")
+            else:
+                details.append("✗ matter_issue_legal_basis_items: 0")
+
+            passed = success == total
+            return CheckResult(name, passed, total, success, details, warnings)
+        except Exception as e:
+            warnings.append(f"检查失败: {e}")
+            return CheckResult(name, False, 0, 0, details, warnings)
+
+    async def check_cause_recommendation(self, client: ApiClient) -> CheckResult:
+        """检查 4.6: 案由推荐一致性"""
+        name = "案由推荐"
+        details = []
+        warnings = []
+
+        expected_codes: list[str] = []
+        for check in self.expectations.get("matter", {}).get("records", []):
+            if check.get("table") == "matters":
+                cond = check.get("conditions", {}) or {}
+                code = str(cond.get("cause_of_action_code") or "").strip()
+                if code:
+                    expected_codes.append(code)
+
+        if not expected_codes:
+            return CheckResult(name, True, 0, 0, ["无检查项"], [])
+
+        try:
+            if not self.matter_id:
+                raise RuntimeError("测试上下文未初始化")
+            mid = int(self.matter_id)
+
+            row = await fetch_one(
+                self.matter_db,
+                "SELECT cause_of_action_code FROM matters WHERE id = %s",
+                [mid],
+            )
+            db_code = str((row or {}).get("cause_of_action_code") or "").strip()
+            if db_code in expected_codes:
+                details.append(f"✓ matters.cause_of_action_code: {db_code}")
+                success_db = 1
+            else:
+                details.append(
+                    f"✗ matters.cause_of_action_code: {db_code} (expected one of {expected_codes})"
+                )
+                success_db = 0
+
+            # Try to locate cause_of_action_code in workflow profile (best-effort).
+            profile = None
+            try:
+                prof_resp = await client.get_workflow_profile(str(self.matter_id))
+                profile = unwrap_api_response(prof_resp)
+            except Exception as e:
+                warnings.append(f"workflow profile 获取失败: {e}")
+
+            success_profile = 0
+            if isinstance(profile, dict):
+                found_codes = set()
+                # shallow scan
+                for k in ["cause_of_action_code", "causeOfActionCode", "cause_of_action"]:
+                    v = profile.get(k)
+                    if isinstance(v, str) and v.strip():
+                        found_codes.add(v.strip())
+                # one-level nested scan
+                for v in profile.values():
+                    if isinstance(v, dict):
+                        for k in ["cause_of_action_code", "causeOfActionCode", "cause_of_action"]:
+                            vv = v.get(k)
+                            if isinstance(vv, str) and vv.strip():
+                                found_codes.add(vv.strip())
+
+                if found_codes:
+                    if any(c in expected_codes for c in found_codes):
+                        success_profile = 1
+                        details.append(f"✓ workflow_profile.cause: {sorted(found_codes)}")
+                    else:
+                        details.append(
+                            f"✗ workflow_profile.cause: {sorted(found_codes)} (expected one of {expected_codes})"
+                        )
+                else:
+                    warnings.append("workflow profile 未包含案由字段（best-effort）")
+
+            total = 2
+            success = success_db + success_profile
+            passed = success_db == 1
+            return CheckResult(name, passed, total, success, details, warnings)
+        except Exception as e:
+            warnings.append(f"检查失败: {e}")
+            return CheckResult(name, False, 0, 0, details, warnings)
 
     async def check_skills_executed(self, client: ApiClient) -> CheckResult:
         """检查 5: 技能执行"""
@@ -468,7 +684,8 @@ class QualityChecker:
                 # 查找匹配的 phase
                 found = False
                 for phase in phases:
-                    if phase.get("phase_id") == phase_id:
+                    pid = phase.get("phase_id") or phase.get("id")
+                    if pid == phase_id:
                         status = phase.get("status")
                         outputs = phase.get("outputs", [])
 
@@ -585,6 +802,8 @@ class QualityChecker:
             ("记忆存储", self.check_memory_storage),
             ("知识库命中", self.check_knowledge_hits),
             ("Matter 记录", self.check_matter_records),
+            ("争议焦点落库", self.check_dispute_focus),
+            ("案由推荐", self.check_cause_recommendation),
             ("技能执行", self.check_skills_executed),
             ("Trace 验证", self.check_trace_expectations),
             ("阶段门控", self.check_phase_gates),

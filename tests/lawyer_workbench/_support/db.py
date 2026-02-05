@@ -1,6 +1,6 @@
 """Postgres helpers for E2E assertions (no mocks).
 
-All Java/Python services in docker-compose.java-stack share a single Postgres instance, but use
+All Java/Python services in docker/docker-compose.java-stack.yml share a single Postgres instance, but use
 different databases. This helper lets tests query each DB for black-box assertions.
 """
 
@@ -95,4 +95,3 @@ async def count(target: PgTarget, sql: str, params: Iterable[Any] | None = None)
         return int(v or 0)
     except Exception:
         return 0
-

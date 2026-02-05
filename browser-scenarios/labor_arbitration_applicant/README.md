@@ -1,5 +1,5 @@
 ---
-name: arbitration_labor
+name: labor_arbitration_applicant
 description: 劳动仲裁场景 - 劳动争议仲裁申请
 service_type: labor_arbitration
 url: http://localhost:5175

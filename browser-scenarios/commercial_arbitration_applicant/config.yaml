@@ -1,6 +1,6 @@
 version: "1.0"
-scenario: litigation_civil_defense
-description: 民事应诉场景 - 民间借贷纠纷（被告）
+scenario: commercial_arbitration_applicant
+description: 商事仲裁场景 - 合同纠纷仲裁申请
 
 config:
   base_url: http://localhost:5175
@@ -12,13 +12,13 @@ credentials:
   password: admin123456
 
 assets:
-  complaint: assets/complaint.txt
-  loan_contract: assets/loan_contract.txt
-  repayment_record: assets/repayment_record.txt
+  contract: assets/contract.txt
+  breach_evidence: assets/breach_evidence.txt
+  arbitration_clause: assets/arbitration_clause.txt
   additional_evidence: assets/additional_evidence.txt
 
 output:
   screenshots:
     - docs/verification.png
   documents:
-    - docs/defense_statement.docx
+    - docs/arbitration_application.docx

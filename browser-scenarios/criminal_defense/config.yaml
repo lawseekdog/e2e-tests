@@ -1,5 +1,5 @@
 version: "1.0"
-scenario: litigation_criminal
+scenario: criminal_defense
 description: 刑事辩护场景 - 刑事案件辩护
 
 config:

@@ -77,9 +77,9 @@
 ## 运行测试
 
 ```bash
-pytest tests/test_browser_scenarios.py::test_litigation_criminal_progressive -v
-pytest tests/test_browser_scenarios.py::test_litigation_criminal_one_shot -v
-pytest tests/test_browser_scenarios.py::test_litigation_criminal_rollback -v
+pytest tests/test_browser_scenarios.py::test_criminal_defense_progressive -v
+pytest tests/test_browser_scenarios.py::test_criminal_defense_one_shot -v
+pytest tests/test_browser_scenarios.py::test_criminal_defense_rollback -v
 ```
 
 ## 验证要点

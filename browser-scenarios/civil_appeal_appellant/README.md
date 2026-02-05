@@ -131,9 +131,9 @@
 ## 运行方式
 
 ```bash
-pytest tests/test_browser_scenarios.py::test_litigation_civil_appeal_appellant_progressive -v
-pytest tests/test_browser_scenarios.py::test_litigation_civil_appeal_appellant_one_shot -v
-pytest tests/test_browser_scenarios.py::test_litigation_civil_appeal_appellant_rollback -v
+pytest tests/test_browser_scenarios.py::test_civil_appeal_appellant_progressive -v
+pytest tests/test_browser_scenarios.py::test_civil_appeal_appellant_one_shot -v
+pytest tests/test_browser_scenarios.py::test_civil_appeal_appellant_rollback -v
 ```
 
 ## 注意事项

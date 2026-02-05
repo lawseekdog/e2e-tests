@@ -1,6 +1,6 @@
 version: "1.0"
-scenario: arbitration_labor
-description: 劳动仲裁场景 - 劳动争议仲裁申请
+scenario: civil_appeal_appellee
+description: 民事上诉场景 - 被上诉人（一审胜诉）
 
 config:
   base_url: http://localhost:5175
@@ -12,13 +12,12 @@ credentials:
   password: admin123456
 
 assets:
-  labor_contract: assets/labor_contract.txt
-  salary_record: assets/salary_record.txt
-  dismissal_notice: assets/dismissal_notice.txt
+  first_instance_judgment: assets/first_instance_judgment.txt
+  appeal_brief: assets/appeal_brief.txt
   additional_evidence: assets/additional_evidence.txt
 
 output:
   screenshots:
     - docs/verification.png
   documents:
-    - docs/labor_arbitration_application.docx
+    - docs/appeal_response.docx

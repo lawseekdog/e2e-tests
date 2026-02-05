@@ -1,5 +1,5 @@
 ---
-name: arbitration_commercial
+name: commercial_arbitration_applicant
 description: 商事仲裁场景 - 买卖合同纠纷（申请人）
 service_type: arbitration
 url: http://localhost:5175

@@ -16,7 +16,7 @@
 ## 目录结构
 
 ```
-litigation_civil_appeal_appellee/
+civil_appeal_appellee/
 ├── config.yaml                    # 场景配置文件
 ├── browser_steps.yaml             # 浏览器操作步骤
 ├── paths/                         # 对话路径
@@ -115,7 +115,7 @@ litigation_civil_appeal_appellee/
 ## 运行测试
 
 ```bash
-pytest tests/test_litigation_civil_appeal_appellee.py -v
+pytest tests/test_civil_appeal_appellee.py -v
 ```
 
 ## 验证要点

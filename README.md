@@ -23,7 +23,6 @@ e2e-tests/
 │   │       └── test_memory_extraction.py
 │   └── lawyer_workbench/    # 律师工作台：按 service_type 分目录的端到端用例
 │       ├── _support/        # 仅工具/断言（不应包含 test_*.py）
-│       ├── legal_consultation/
 │       ├── civil_prosecution/
 │       ├── civil_defense/
 │       ├── civil_appeal_appellant/

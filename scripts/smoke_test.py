@@ -40,9 +40,9 @@ async def smoke_test():
         await c.login(ADMIN_USERNAME, ADMIN_PASSWORD)
         print(f"   ✓ 登录成功 user_id={c.user_id} superuser={c.is_superuser}")
 
-        # 2. 创建咨询会话（默认 service_type_id=legal_consultation）
-        print("2. 测试创建咨询会话...")
-        sess = await c.create_session(service_type_id="legal_consultation")
+        # 2. 创建工作台会话（service_type_id 必须为 vNext 字典中的 leaf id）
+        print("2. 测试创建工作台会话...")
+        sess = await c.create_session(service_type_id="civil_prosecution")
         session_id = str((sess.get("data") or {}).get("id") or "").strip()
         assert session_id, f"创建会话失败: {sess}"
         print(f"   ✓ 创建会话成功: {session_id}")

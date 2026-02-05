@@ -94,9 +94,9 @@
 ## 运行方式
 
 ```bash
-pytest tests/test_browser_scenarios.py::test_litigation_civil_defense_progressive -v
-pytest tests/test_browser_scenarios.py::test_litigation_civil_defense_one_shot -v
-pytest tests/test_browser_scenarios.py::test_litigation_civil_defense_rollback -v
+pytest tests/test_browser_scenarios.py::test_civil_defense_progressive -v
+pytest tests/test_browser_scenarios.py::test_civil_defense_one_shot -v
+pytest tests/test_browser_scenarios.py::test_civil_defense_rollback -v
 ```
 
 ## 注意事项

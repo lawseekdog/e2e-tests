@@ -1,5 +1,5 @@
 version: "1.0"
-scenario: litigation_civil_appeal_appellant
+scenario: civil_appeal_appellant
 description: 民事上诉场景 - 上诉人（一审败诉）
 
 config:

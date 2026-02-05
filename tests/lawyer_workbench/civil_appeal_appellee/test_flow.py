@@ -11,13 +11,12 @@ from tests.lawyer_workbench._support.docx import (
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
-from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
+from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
 from tests.lawyer_workbench._support.memory import assert_any_fact_content_contains, wait_for_memory_facts
 from tests.lawyer_workbench._support.phase_timeline import (
     assert_has_deliverable,
     assert_has_phases,
-    assert_playbook_id,
     assert_phase_status_in,
     unwrap_phase_timeline,
 )
@@ -45,7 +44,7 @@ async def test_civil_appeal_appellee_generates_appeal_defense(lawyer_client):
     appeal_file_id = str(((up2.get("data") or {}) if isinstance(up2, dict) else {}).get("id") or "").strip()
     assert appeal_file_id, up2
 
-    sess = await lawyer_client.create_session(service_type_id="civil_appeal_appellee")
+    sess = await lawyer_client.create_session(service_type_id="workbench", client_role="appellee")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 
@@ -53,25 +52,18 @@ async def test_civil_appeal_appellee_generates_appeal_defense(lawyer_client):
         client=lawyer_client,
         session_id=session_id,
         uploaded_file_ids=[judgment_file_id, appeal_file_id],
-        overrides={
-            "profile.facts": (
-                "我方（被上诉人）张三E2E03，收到对方（上诉人）李四E2E03上诉。"
-                "证据：一审判决书、借条、转账记录、上诉状。"
-                "请分析上诉理由并生成上诉答辩状。"
-            ),
-            # Keep document-generation minimal for E2E: generate only the primary deliverable.
-            "profile.decisions.selected_documents": ["appeal_defense"],
-        },
+        overrides={},
     )
 
-    first_card = await wait_for_initial_card(flow, timeout_s=90.0)
-    assert str(first_card.get("skill_id") or "").strip() == "system:kickoff", first_card
-    qs = first_card.get("questions") if isinstance(first_card.get("questions"), list) else []
-    fks = {str(q.get("field_key") or "").strip() for q in qs if isinstance(q, dict)}
-    assert "profile.facts" in fks, first_card
-    kickoff_sse = await flow.resume_card(first_card)
-    assert_visible_response(kickoff_sse)
-    assert_task_lifecycle(kickoff_sse)
+    first_sse = await flow.nudge(
+        "我方（被上诉人）张三E2E03，收到对方（上诉人）李四E2E03上诉。"
+        "证据：一审判决书、借条、转账记录、上诉状。"
+        "请分析上诉理由并生成上诉答辩状。",
+        attachments=[judgment_file_id, appeal_file_id],
+        max_loops=80,
+    )
+    assert_visible_response(first_sse)
+    assert_task_lifecycle(first_sse)
 
     async def _appeal_defense_ready(f: WorkbenchFlow) -> bool:
         await f.refresh()
@@ -100,23 +92,21 @@ async def test_civil_appeal_appellee_generates_appeal_defense(lawyer_client):
     traces = traces_data.get("traces") if isinstance(traces_data, dict) else None
     assert isinstance(traces, list) and traces, traces_resp
     node_ids = {str(it.get("node_id") or "").strip() for it in traces if isinstance(it, dict)}
-    assert any(x in node_ids for x in {"skill:appeal-intake", "appeal-intake"})
-    assert any(x in node_ids for x in {"skill:judgment-analysis", "judgment-analysis"})
+    assert any(x in node_ids for x in {"skill:appeal-intake", "appeal-intake", "skill:litigation-intake", "litigation-intake"})
     assert any(x in node_ids for x in {"skill:defense-planning", "defense-planning"})
     assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
 
     prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
     prof = unwrap_api_response(prof_resp)
     assert isinstance(prof, dict), prof_resp
-    assert_service_type(prof, "civil_appeal_appellee")
+    assert_service_type(prof, "workbench")
     assert_has_party(prof, role="plaintiff", name_contains="张三")
     assert_has_party(prof, role="defendant", name_contains="李四")
 
     pt_resp = await lawyer_client.get_matter_phase_timeline(flow.matter_id)
     pt = unwrap_phase_timeline(pt_resp)
-    assert_playbook_id(pt, "litigation_civil_appeal_appellee")
-    assert_has_phases(pt, must_include=["kickoff", "intake", "execute"])
-    assert_phase_status_in(pt, phase_id="kickoff", allowed=["completed", "in_progress"])
+    assert_has_phases(pt, must_include=["materials", "intake", "cause", "evidence", "strategy", "output", "docgen"])
+    assert_phase_status_in(pt, phase_id="materials", allowed=["completed", "in_progress"])
     assert_has_deliverable(pt, output_key="appeal_defense")
 
     tl_resp = await lawyer_client.get_matter_timeline(flow.matter_id, limit=50)
@@ -161,7 +151,7 @@ async def test_civil_appeal_appellee_generates_appeal_defense(lawyer_client):
         file_id=appeal_file_id,
         content=f"{unique}\n二审答辩要点：围绕上诉理由逐点反驳，巩固一审有利认定。",
         doc_type="case",
-        metadata={"e2e": True, "service_type_id": "civil_appeal_appellee", "matter_id": flow.matter_id},
+        metadata={"e2e": True, "service_type_id": "workbench", "matter_id": flow.matter_id},
         overwrite=True,
     )
     await wait_for_search_hit(lawyer_client, query=unique, kb_ids=[kb_id], must_file_id=appeal_file_id, timeout_s=90.0)

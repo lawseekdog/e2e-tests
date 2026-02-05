@@ -9,7 +9,7 @@ from tests.lawyer_workbench._support.docx import (
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
-from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
+from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
 from tests.lawyer_workbench._support.sse import assert_visible_response
 from tests.lawyer_workbench._support.utils import unwrap_api_response
 
@@ -81,34 +81,23 @@ async def test_civil_prosecution_private_lending_generates_multiple_documents(la
         assert fid, f"upload failed: {up}"
         uploaded_file_ids.append(fid)
 
-    # Service type ids come from platform-service seeds; in current stack this is "civil_first_instance" (民事诉讼一审).
-    sess = await lawyer_client.create_session(service_type_id="civil_first_instance")
+    # Workbench-mode: no service_type pre-selection from UI; keep internal label only.
+    sess = await lawyer_client.create_session(service_type_id="workbench", client_role="plaintiff")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 
-    # Generate multiple documents in one execute stage run.
-    selected_docs = [
-        "civil_complaint",
-        "litigation_strategy_report",
-        "evidence_list_doc",
-        "preservation_application",
-    ]
+    # Workbench case_analysis defaults (plaintiff): complaint + evidence list + strategy report.
+    selected_docs = ["civil_complaint", "evidence_list_doc", "litigation_strategy_report"]
 
     flow = WorkbenchFlow(
         client=lawyer_client,
         session_id=session_id,
         uploaded_file_ids=uploaded_file_ids,
-        overrides={
-            "profile.facts": _case_facts(),
-            "profile.claims": "返还本金100000元，并按年利率6%支付逾期利息，承担诉讼费。",
-            "profile.decisions.selected_documents": selected_docs,
-        },
+        overrides={},
     )
 
-    first_card = await wait_for_initial_card(flow, timeout_s=90.0)
-    assert str(first_card.get("skill_id") or "").strip() == "system:kickoff", first_card
-    kickoff_sse = await flow.resume_card(first_card)
-    assert_visible_response(kickoff_sse)
+    first_sse = await flow.nudge(_case_facts(), attachments=uploaded_file_ids, max_loops=80)
+    assert_visible_response(first_sse)
 
     async def _all_deliverables_ready(f: WorkbenchFlow) -> bool:
         await f.refresh()
@@ -153,5 +142,4 @@ async def test_civil_prosecution_private_lending_generates_multiple_documents(la
             _assert_strategy_report_tables_filled(docx_bytes)
         elif out_key == "evidence_list_doc":
             assert any(x in text for x in ["证据目录", "证据"]), text[:2000]
-        elif out_key == "preservation_application":
-            assert any(x in text for x in ["保全", "财产保全申请书"]), text[:2000]
+        # No extra document types in the default workbench recommendation set.

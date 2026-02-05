@@ -56,13 +56,6 @@ def deliverable_output_keys(phase_tl: dict[str, Any]) -> set[str]:
     return out
 
 
-def assert_playbook_id(phase_tl: dict[str, Any], expected: str) -> None:
-    want = str(expected or "").strip()
-    got = str((phase_tl or {}).get("playbookId") or (phase_tl or {}).get("playbook_id") or "").strip()
-    if want and got != want:
-        raise AssertionError(f"phase_timeline.playbookId mismatch: expected={want!r} got={got!r}")
-
-
 def assert_has_phases(phase_tl: dict[str, Any], *, must_include: Iterable[str]) -> None:
     have = set(phase_ids(phase_tl))
     want = {str(x).strip() for x in must_include if str(x).strip()}
@@ -94,4 +87,3 @@ def assert_has_deliverable(phase_tl: dict[str, Any], *, output_key: str) -> None
             raise AssertionError(f"phase_timeline deliverable status unexpected: {d}")
         return
     raise AssertionError(f"phase_timeline missing deliverable output_key={want!r}. Have={sorted(deliverable_output_keys(phase_tl))}")
-

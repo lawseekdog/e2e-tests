@@ -102,7 +102,6 @@
   "status": "active",
   "engagement_mode": "start_service",
   "service_type_id": "contract_review",
-  "playbook_id": "contract_review",
   "client_role": "client",
   "message_count": 3,
   "created_at": "2026-01-31T21:07:22.592877Z",
@@ -113,7 +112,6 @@
 **验证结果**:
 - ✅ Session 存在且状态为 active
 - ✅ Service Type 正确: contract_review
-- ✅ Playbook ID 正确: contract_review
 - ✅ Matter ID 已关联: 1
 - ✅ 消息数量: 3 条
 

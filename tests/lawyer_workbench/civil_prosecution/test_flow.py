@@ -11,13 +11,12 @@ from tests.lawyer_workbench._support.docx import (
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
-from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
+from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
 from tests.lawyer_workbench._support.memory import assert_fact_content_contains, wait_for_memory_facts
 from tests.lawyer_workbench._support.phase_timeline import (
     assert_has_deliverable,
     assert_has_phases,
-    assert_playbook_id,
     assert_phase_status_in,
     unwrap_phase_timeline,
 )
@@ -59,8 +58,8 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
         assert fid, f"upload failed: {up}"
         uploaded_file_ids.append(fid)
 
-    # Service type ids come from platform-service seeds; in current stack this is "civil_first_instance" (民事诉讼一审).
-    sess = await lawyer_client.create_session(service_type_id="civil_first_instance")
+    # Workbench-mode: no service_type pre-selection from UI; keep internal label only.
+    sess = await lawyer_client.create_session(service_type_id="workbench", client_role="plaintiff")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 
@@ -68,23 +67,13 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
         client=lawyer_client,
         session_id=session_id,
         uploaded_file_ids=uploaded_file_ids,
-        overrides={
-            "profile.facts": _case_facts(),
-            "profile.claims": "返还本金100000元，并按年利率6%支付逾期利息，承担诉讼费。",
-            # Keep document-generation minimal for E2E: generate only the primary deliverable.
-            "profile.decisions.selected_documents": ["civil_complaint"],
-        },
+        overrides={},
     )
 
-    # Kickoff should generate an interrupt card quickly in a healthy system.
-    first_card = await wait_for_initial_card(flow, timeout_s=90.0)
-    assert str(first_card.get("skill_id") or "").strip() == "system:kickoff", first_card
-    qs = first_card.get("questions") if isinstance(first_card.get("questions"), list) else []
-    fks = {str(q.get("field_key") or "").strip() for q in qs if isinstance(q, dict)}
-    assert "profile.facts" in fks, first_card
-    kickoff_sse = await flow.resume_card(first_card)
-    assert_visible_response(kickoff_sse)
-    assert_task_lifecycle(kickoff_sse)
+    # Workbench-mode: kickoff/playbook removed. Start the workflow by sending the case facts + attachments.
+    first_sse = await flow.nudge(_case_facts(), attachments=uploaded_file_ids, max_loops=80)
+    assert_visible_response(first_sse)
+    assert_task_lifecycle(first_sse)
 
     async def _civil_complaint_ready(f: WorkbenchFlow) -> bool:
         await f.refresh()
@@ -117,7 +106,7 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
     traces = traces_data.get("traces") if isinstance(traces_data, dict) else None
     assert isinstance(traces, list) and traces, traces_resp
     node_ids = {str(it.get("node_id") or "").strip() for it in traces if isinstance(it, dict)}
-    # Core happy-path nodes (playbook-dependent, but stable across envs).
+    # Core happy-path nodes (workflow-dependent, but stable across envs).
     assert any(x in node_ids for x in {"skill:litigation-intake", "litigation-intake"})
     assert any(x in node_ids for x in {"skill:cause-recommendation", "cause-recommendation"})
     assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
@@ -126,16 +115,15 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
     prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
     prof = unwrap_api_response(prof_resp)
     assert isinstance(prof, dict), prof_resp
-    assert_service_type(prof, "civil_first_instance")
+    assert_service_type(prof, "workbench")
     assert_has_party(prof, role="plaintiff", name_contains="张三")
     assert_has_party(prof, role="defendant", name_contains="李四")
 
     # ========== Phase timeline (stage progress UI) ==========
     pt_resp = await lawyer_client.get_matter_phase_timeline(flow.matter_id)
     pt = unwrap_phase_timeline(pt_resp)
-    assert_playbook_id(pt, "litigation_civil_prosecution")
-    assert_has_phases(pt, must_include=["kickoff", "intake", "claim_path", "execute"])
-    assert_phase_status_in(pt, phase_id="kickoff", allowed=["completed", "in_progress"])
+    assert_has_phases(pt, must_include=["materials", "intake", "cause", "evidence", "strategy", "output", "docgen"])
+    assert_phase_status_in(pt, phase_id="materials", allowed=["completed", "in_progress"])
     assert_has_deliverable(pt, output_key="civil_complaint")
 
     # ========== Timeline / round_summary (UI time line) ==========
@@ -179,7 +167,7 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
         file_id=uploaded_file_ids[0],
         content=f"{unique}\n{_case_facts()}",
         doc_type="case",
-        metadata={"e2e": True, "service_type_id": "civil_first_instance", "matter_id": flow.matter_id},
+        metadata={"e2e": True, "service_type_id": "workbench", "matter_id": flow.matter_id},
         overwrite=True,
     )
     await wait_for_search_hit(

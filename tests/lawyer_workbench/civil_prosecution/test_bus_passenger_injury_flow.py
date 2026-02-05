@@ -12,7 +12,7 @@ from tests.lawyer_workbench._support.docx import (
 )
 from tests.lawyer_workbench._support.memory import assert_fact_content_contains, wait_for_entity_keys
 from tests.lawyer_workbench._support.profile import assert_has_party, assert_service_type
-from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
+from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
 from tests.lawyer_workbench._support.sse import assert_has_end, assert_has_progress, assert_no_error, assert_visible_response
 from tests.lawyer_workbench._support.utils import unwrap_api_response
 
@@ -73,7 +73,7 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         uploaded_file_ids.append(fid)
 
     # Service type ids come from platform-service seeds; in current stack this is "civil_first_instance" (民事诉讼一审).
-    sess = await lawyer_client.create_session(service_type_id="civil_first_instance")
+    sess = await lawyer_client.create_session(service_type_id="workbench", client_role="plaintiff")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 
@@ -97,11 +97,9 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
         },
     )
 
-    # Kickoff card should always be present; it is the only allowed way to start a matter now.
-    first_card = await wait_for_initial_card(flow, timeout_s=90.0)
-    assert str(first_card.get("skill_id") or "").strip() == "system:kickoff", first_card
-    kickoff_sse = await flow.resume_card(first_card)
-    assert_visible_response(kickoff_sse)
+    # Workbench-mode: start the workflow by sending initial facts + attachments (no kickoff phase).
+    init_sse = await flow.nudge(_case_facts(), attachments=uploaded_file_ids, max_loops=80)
+    assert_visible_response(init_sse)
 
     async def _cause_recommendation_pending(f: WorkbenchFlow) -> bool:
         card = await f.get_pending_card()
@@ -117,7 +115,7 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
     # Validate cause recommendation is produced and evidence score is non-zero (no 'all zero' regression).
     prof = unwrap_api_response(await lawyer_client.get_workflow_profile(flow.matter_id))
     assert isinstance(prof, dict), prof
-    assert_service_type(prof, "civil_first_instance")
+    assert_service_type(prof, "workbench")
     assert_has_party(prof, role="plaintiff", name_contains="张三E2E_BUS01")
     assert_has_party(prof, role="defendant", name_contains="北京某公交客运有限公司E2E")
 

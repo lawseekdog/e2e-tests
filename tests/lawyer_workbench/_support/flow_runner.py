@@ -155,7 +155,7 @@ def auto_answer_card(
             else:
                 if has_default:
                     value = default
-                elif uploaded_file_ids and (required or skill_id == "system:kickoff"):
+                elif uploaded_file_ids and required:
                     value = uploaded_file_ids
                 else:
                     value = [] if required else None
@@ -226,18 +226,6 @@ class WorkbenchFlow:
         # Keep an audit trail for assertions/debugging.
         self.seen_cards.append(card)
         self.seen_card_signatures.append(card_signature(card))
-        skill_id = str(card.get("skill_id") or "").strip()
-        if skill_id == "system:kickoff":
-            # Use /resume to submit the kickoff card deterministically.
-            # Relying on "auto-resume from chat" is sensitive to max_loops and can appear stuck.
-            user_response = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
-            sse = await self.client.resume(self.session_id, user_response, pending_card=card, max_loops=_RESUME_MAX_LOOPS)
-            assert_has_user_message(sse)
-            if isinstance(sse, dict):
-                self.last_sse = sse
-                self.seen_sse.append(sse)
-            return sse
-
         user_response = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
         sse = await self.client.resume(self.session_id, user_response, pending_card=card, max_loops=_RESUME_MAX_LOOPS)
         assert_has_user_message(sse)
@@ -288,7 +276,7 @@ class WorkbenchFlow:
 
 
 async def wait_for_initial_card(flow: WorkbenchFlow, *, timeout_s: float = 60.0) -> dict[str, Any]:
-    """Wait until the workflow produces a pending card (kickoff/intake/etc)."""
+    """Wait until the workflow produces a pending card (intake/confirm/etc)."""
     deadline = time.time() + float(timeout_s)
     last: dict[str, Any] | None = None
     while time.time() < deadline:

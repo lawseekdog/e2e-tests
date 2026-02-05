@@ -11,13 +11,12 @@ from tests.lawyer_workbench._support.docx import (
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
-from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
+from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
 from tests.lawyer_workbench._support.memory import list_case_facts
 from tests.lawyer_workbench._support.phase_timeline import (
     assert_has_deliverable,
     assert_has_phases,
-    assert_playbook_id,
     assert_phase_status_in,
     unwrap_phase_timeline,
 )
@@ -41,7 +40,7 @@ async def test_contract_review_generates_review_report(lawyer_client):
     contract_file_id = str(((up.get("data") or {}) if isinstance(up, dict) else {}).get("id") or "").strip()
     assert contract_file_id, up
 
-    sess = await lawyer_client.create_session(service_type_id="contract_review")
+    sess = await lawyer_client.create_session(service_type_id="workbench")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 
@@ -49,23 +48,17 @@ async def test_contract_review_generates_review_report(lawyer_client):
         client=lawyer_client,
         session_id=session_id,
         uploaded_file_ids=[contract_file_id],
-        overrides={
-            "profile.facts": (
-                "请审查一份采购合同：甲方北京甲方科技有限公司，乙方上海乙方供应链有限公司。"
-                "重点关注：违约金是否过高、争议解决条款、免责声明条款。"
-            ),
-            "profile.review_focus": "违约金、争议解决、免责声明、付款与交付风险",
-        },
+        overrides={},
     )
 
-    first_card = await wait_for_initial_card(flow, timeout_s=90.0)
-    assert str(first_card.get("skill_id") or "").strip() == "system:kickoff", first_card
-    qs = first_card.get("questions") if isinstance(first_card.get("questions"), list) else []
-    fks = {str(q.get("field_key") or "").strip() for q in qs if isinstance(q, dict)}
-    assert "profile.facts" in fks, first_card
-    kickoff_sse = await flow.resume_card(first_card)
-    assert_visible_response(kickoff_sse)
-    assert_task_lifecycle(kickoff_sse)
+    first_sse = await flow.nudge(
+        "请审查一份采购合同：甲方北京甲方科技有限公司，乙方上海乙方供应链有限公司。"
+        "重点关注：违约金是否过高、争议解决条款、免责声明条款。",
+        attachments=[contract_file_id],
+        max_loops=80,
+    )
+    assert_visible_response(first_sse)
+    assert_task_lifecycle(first_sse)
 
     async def _any_contract_doc_ready(f: WorkbenchFlow) -> bool:
         await f.refresh()
@@ -115,9 +108,8 @@ async def test_contract_review_generates_review_report(lawyer_client):
 
     pt_resp = await lawyer_client.get_matter_phase_timeline(flow.matter_id)
     pt = unwrap_phase_timeline(pt_resp)
-    assert_playbook_id(pt, "contract_review")
-    assert_has_phases(pt, must_include=["kickoff", "qualify", "execute"])
-    assert_phase_status_in(pt, phase_id="kickoff", allowed=["completed", "in_progress"])
+    assert_has_phases(pt, must_include=["materials", "intake", "analyze", "output", "docgen"])
+    assert_phase_status_in(pt, phase_id="materials", allowed=["completed", "in_progress"])
     # Either report is acceptable for this flow.
     try:
         assert_has_deliverable(pt, output_key="contract_review_report")

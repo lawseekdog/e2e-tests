@@ -11,13 +11,12 @@ from tests.lawyer_workbench._support.docx import (
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
-from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, wait_for_initial_card
+from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
 from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
 from tests.lawyer_workbench._support.memory import list_case_facts
 from tests.lawyer_workbench._support.phase_timeline import (
     assert_has_deliverable,
     assert_has_phases,
-    assert_playbook_id,
     assert_phase_status_in,
     unwrap_phase_timeline,
 )
@@ -41,7 +40,7 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
     bg_file_id = str(((up.get("data") or {}) if isinstance(up, dict) else {}).get("id") or "").strip()
     assert bg_file_id, up
 
-    sess = await lawyer_client.create_session(service_type_id="legal_opinion")
+    sess = await lawyer_client.create_session(service_type_id="workbench")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 
@@ -49,24 +48,19 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
         client=lawyer_client,
         session_id=session_id,
         uploaded_file_ids=[bg_file_id],
-        overrides={
-            "profile.facts": (
-                "委托人：某监理公司E2E。\n"
-                "事件：员工赵丽珍非因工死亡（宿舍猝死），家属主张工伤赔偿并要求一次性补偿。\n"
-                "目标：评估是否构成工伤/视同工伤，梳理公司风险与应对策略，给出证据保全与谈判建议。"
-            ),
-            "profile.opinion_topic": "非因工死亡是否构成工伤/视同工伤及公司责任风险评估",
-        },
+        overrides={},
     )
 
-    first_card = await wait_for_initial_card(flow, timeout_s=90.0)
-    assert str(first_card.get("skill_id") or "").strip() == "system:kickoff", first_card
-    qs = first_card.get("questions") if isinstance(first_card.get("questions"), list) else []
-    fks = {str(q.get("field_key") or "").strip() for q in qs if isinstance(q, dict)}
-    assert "profile.facts" in fks, first_card
-    kickoff_sse = await flow.resume_card(first_card)
-    assert_visible_response(kickoff_sse)
-    assert_task_lifecycle(kickoff_sse)
+    first_sse = await flow.nudge(
+        "委托人：某监理公司E2E。\n"
+        "事件：员工赵丽珍非因工死亡（宿舍猝死），家属主张工伤赔偿并要求一次性补偿。\n"
+        "目标：评估是否构成工伤/视同工伤，梳理公司风险与应对策略，给出证据保全与谈判建议。\n"
+        "（不要起诉，只需要法律意见书）",
+        attachments=[bg_file_id],
+        max_loops=80,
+    )
+    assert_visible_response(first_sse)
+    assert_task_lifecycle(first_sse)
 
     async def _opinion_ready(f: WorkbenchFlow) -> bool:
         await f.refresh()
@@ -134,9 +128,8 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
 
     pt_resp = await lawyer_client.get_matter_phase_timeline(flow.matter_id)
     pt = unwrap_phase_timeline(pt_resp)
-    assert_playbook_id(pt, "legal_opinion")
-    assert_has_phases(pt, must_include=["kickoff", "qualify", "execute"])
-    assert_phase_status_in(pt, phase_id="kickoff", allowed=["completed", "in_progress"])
+    assert_has_phases(pt, must_include=["materials", "intake", "analyze", "output", "docgen"])
+    assert_phase_status_in(pt, phase_id="materials", allowed=["completed", "in_progress"])
     assert_has_deliverable(pt, output_key="legal_opinion")
 
     tl_resp = await lawyer_client.get_matter_timeline(flow.matter_id, limit=50)

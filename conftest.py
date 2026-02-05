@@ -89,8 +89,17 @@ async def lawyer_client():
     async with ApiClient(BASE_URL) as admin:
         await admin.login(ADMIN_USERNAME, ADMIN_PASSWORD)
 
+        user_admin_base = "/user-service/api/v1"
+        try:
+            await admin.get(f"{user_admin_base}/admin/users?page=1&size=1")
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 404:
+                user_admin_base = "/user-service"
+            else:
+                raise
+
         # Check if lawyer user exists.
-        resp = await admin.get(f"/user-service/api/v1/admin/users?page=1&size=5&q={LAWYER_USERNAME}")
+        resp = await admin.get(f"{user_admin_base}/admin/users?page=1&size=5&q={LAWYER_USERNAME}")
         existing = None
         if isinstance(resp, dict):
             for it in resp.get("data") if isinstance(resp.get("data"), list) else []:
@@ -101,7 +110,7 @@ async def lawyer_client():
         lawyer_user_id = None
         if existing is None:
             created = await admin.post(
-                "/user-service/api/v1/admin/users",
+                f"{user_admin_base}/admin/users",
                 {
                     "username": LAWYER_USERNAME,
                     "initial_password": LAWYER_PASSWORD,
@@ -118,7 +127,7 @@ async def lawyer_client():
 
             # Mark as lawyer.
             await admin.put(
-                f"/user-service/api/v1/admin/users/{lawyer_user_id}/user-type",
+                f"{user_admin_base}/admin/users/{lawyer_user_id}/user-type",
                 {"user_type": "lawyer"},
             )
         else:
@@ -154,7 +163,7 @@ async def lawyer_client():
             raise RuntimeError(f"failed to ensure organization: {org_list}")
 
         await admin.patch(
-            f"/user-service/api/v1/internal/users/{lawyer_user_id}/organization",
+            f"{user_admin_base}/internal/users/{lawyer_user_id}/organization",
             {"organization_id": int(org_id)},
         )
 

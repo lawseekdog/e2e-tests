@@ -607,6 +607,27 @@ class ApiClient:
             ws_path=ws_path, sse_path=sse_path, msg_type="resume", data=data
         )
 
+    async def workflow_action(
+        self,
+        session_id: str,
+        *,
+        workflow_action: str,
+        workflow_action_params: dict[str, Any] | None = None,
+        attachments: list[str] | None = None,
+        max_loops: int | None = None,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "workflow_action": workflow_action,
+            "workflow_action_params": workflow_action_params or {},
+            "attachments": attachments or [],
+        }
+        if max_loops is not None:
+            data["max_loops"] = int(max_loops)
+        if self.user_id:
+            data["user_id"] = int(self.user_id)
+        ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
+        return await self._post_ws(ws_path, "actions", data)
+
     async def switch_service_type(
         self,
         session_id: str,

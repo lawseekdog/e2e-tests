@@ -39,7 +39,7 @@ async def test_civil_appeal_appellant_generates_appeal_brief(lawyer_client):
     judgment_file_id = str(((up.get("data") or {}) if isinstance(up, dict) else {}).get("id") or "").strip()
     assert judgment_file_id, up
 
-    sess = await lawyer_client.create_session(service_type_id="workbench", client_role="appellant")
+    sess = await lawyer_client.create_session(service_type_id="civil_appeal_appellant", client_role="appellant")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 
@@ -87,13 +87,13 @@ async def test_civil_appeal_appellant_generates_appeal_brief(lawyer_client):
     traces = traces_data.get("traces") if isinstance(traces_data, dict) else None
     assert isinstance(traces, list) and traces, traces_resp
     node_ids = {str(it.get("node_id") or "").strip() for it in traces if isinstance(it, dict)}
-    assert any(x in node_ids for x in {"skill:appeal-intake", "appeal-intake", "skill:litigation-intake", "litigation-intake"})
+    assert any(x in node_ids for x in {"skill:appeal-intake", "appeal-intake"})
     assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
 
     prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
     prof = unwrap_api_response(prof_resp)
     assert isinstance(prof, dict), prof_resp
-    assert_service_type(prof, "workbench")
+    assert_service_type(prof, "civil_appeal_appellant")
     assert_has_party(prof, role="plaintiff", name_contains="张三")
     assert_has_party(prof, role="defendant", name_contains="李四")
 
@@ -139,7 +139,7 @@ async def test_civil_appeal_appellant_generates_appeal_brief(lawyer_client):
         file_id=judgment_file_id,
         content=f"{unique}\n二审上诉要点：利息认定/证据采信/适用法律。",
         doc_type="case",
-        metadata={"e2e": True, "service_type_id": "workbench", "matter_id": flow.matter_id},
+        metadata={"e2e": True, "service_type_id": "civil_appeal_appellant", "matter_id": flow.matter_id},
         overwrite=True,
     )
     await wait_for_search_hit(lawyer_client, query=unique, kb_ids=[kb_id], must_file_id=judgment_file_id, timeout_s=90.0)

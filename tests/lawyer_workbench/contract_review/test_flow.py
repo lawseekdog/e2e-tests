@@ -40,7 +40,7 @@ async def test_contract_review_generates_review_report(lawyer_client):
     contract_file_id = str(((up.get("data") or {}) if isinstance(up, dict) else {}).get("id") or "").strip()
     assert contract_file_id, up
 
-    sess = await lawyer_client.create_session(service_type_id="workbench")
+    sess = await lawyer_client.create_session(service_type_id="contract_review")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 

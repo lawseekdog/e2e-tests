@@ -58,8 +58,7 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
         assert fid, f"upload failed: {up}"
         uploaded_file_ids.append(fid)
 
-    # Workbench-mode: no service_type pre-selection from UI; keep internal label only.
-    sess = await lawyer_client.create_session(service_type_id="workbench", client_role="plaintiff")
+    sess = await lawyer_client.create_session(service_type_id="civil_prosecution", client_role="plaintiff")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 
@@ -115,7 +114,7 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
     prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
     prof = unwrap_api_response(prof_resp)
     assert isinstance(prof, dict), prof_resp
-    assert_service_type(prof, "workbench")
+    assert_service_type(prof, "civil_prosecution")
     assert_has_party(prof, role="plaintiff", name_contains="张三")
     assert_has_party(prof, role="defendant", name_contains="李四")
 
@@ -167,7 +166,7 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
         file_id=uploaded_file_ids[0],
         content=f"{unique}\n{_case_facts()}",
         doc_type="case",
-        metadata={"e2e": True, "service_type_id": "workbench", "matter_id": flow.matter_id},
+        metadata={"e2e": True, "service_type_id": "civil_prosecution", "matter_id": flow.matter_id},
         overwrite=True,
     )
     await wait_for_search_hit(

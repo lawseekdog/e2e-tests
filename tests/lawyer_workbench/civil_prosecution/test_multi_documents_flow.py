@@ -81,8 +81,7 @@ async def test_civil_prosecution_private_lending_generates_multiple_documents(la
         assert fid, f"upload failed: {up}"
         uploaded_file_ids.append(fid)
 
-    # Workbench-mode: no service_type pre-selection from UI; keep internal label only.
-    sess = await lawyer_client.create_session(service_type_id="workbench", client_role="plaintiff")
+    sess = await lawyer_client.create_session(service_type_id="civil_prosecution", client_role="plaintiff")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 

@@ -39,7 +39,7 @@ async def test_civil_defense_generates_defense_statement_and_persists_state(lawy
     complaint_file_id = str(((up.get("data") or {}) if isinstance(up, dict) else {}).get("id") or "").strip()
     assert complaint_file_id, up
 
-    sess = await lawyer_client.create_session(service_type_id="workbench", client_role="defendant")
+    sess = await lawyer_client.create_session(service_type_id="civil_defense", client_role="defendant")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 
@@ -89,7 +89,7 @@ async def test_civil_defense_generates_defense_statement_and_persists_state(lawy
     traces = traces_data.get("traces") if isinstance(traces_data, dict) else None
     assert isinstance(traces, list) and traces, traces_resp
     node_ids = {str(it.get("node_id") or "").strip() for it in traces if isinstance(it, dict)}
-    assert any(x in node_ids for x in {"skill:litigation-intake", "litigation-intake"})
+    assert any(x in node_ids for x in {"skill:defense-intake", "defense-intake"})
     assert any(x in node_ids for x in {"skill:defense-planning", "defense-planning"})
     assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
 
@@ -97,13 +97,13 @@ async def test_civil_defense_generates_defense_statement_and_persists_state(lawy
     prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
     prof = unwrap_api_response(prof_resp)
     assert isinstance(prof, dict), prof_resp
-    assert_service_type(prof, "workbench")
+    assert_service_type(prof, "civil_defense")
     assert_has_party(prof, role="plaintiff", name_contains="王五")
     assert_has_party(prof, role="defendant", name_contains="张三")
 
     pt_resp = await lawyer_client.get_matter_phase_timeline(flow.matter_id)
     pt = unwrap_phase_timeline(pt_resp)
-    assert_has_phases(pt, must_include=["materials", "intake", "cause", "evidence", "strategy", "output", "docgen"])
+    assert_has_phases(pt, must_include=["materials", "intake", "evidence", "strategy", "output", "docgen"])
     assert_phase_status_in(pt, phase_id="materials", allowed=["completed", "in_progress"])
     assert_has_deliverable(pt, output_key="defense_statement")
 
@@ -146,7 +146,7 @@ async def test_civil_defense_generates_defense_statement_and_persists_state(lawy
         file_id=complaint_file_id,
         content=f"{unique}\n（被告侧）应诉要点：借条真实性、款项性质、部分还款。",
         doc_type="case",
-        metadata={"e2e": True, "service_type_id": "workbench", "matter_id": flow.matter_id},
+        metadata={"e2e": True, "service_type_id": "civil_defense", "matter_id": flow.matter_id},
         overwrite=True,
     )
     await wait_for_search_hit(

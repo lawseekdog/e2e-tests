@@ -40,7 +40,7 @@ async def test_legal_opinion_generates_opinion_doc(lawyer_client):
     bg_file_id = str(((up.get("data") or {}) if isinstance(up, dict) else {}).get("id") or "").strip()
     assert bg_file_id, up
 
-    sess = await lawyer_client.create_session(service_type_id="workbench")
+    sess = await lawyer_client.create_session(service_type_id="legal_opinion")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
 

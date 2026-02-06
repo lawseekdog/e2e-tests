@@ -723,10 +723,10 @@ class ApiClient:
         data = {"service_type_id": service_type_id}
         if client_id:
             data["client_id"] = client_id
-        return await self.post(f"{MATTERS}/matters", data)
+        return await self.post(f"{MATTERS}/lawyer/matters", data)
 
     async def get_matter(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"{MATTERS}/matters/{matter_id}")
+        return await self.get(f"{MATTERS}/lawyer/matters/{matter_id}")
 
     async def get_matter_tasks(self, matter_id: str) -> dict[str, Any]:
         return await self.get(f"{MATTERS}/matters/{matter_id}/tasks")
@@ -751,7 +751,7 @@ class ApiClient:
         if output_key:
             params["output_key"] = output_key
         return await self.get(
-            f"{MATTERS}/matters/{matter_id}/deliverables", params=params
+            f"{MATTERS}/lawyer/matters/{matter_id}/deliverables", params=params
         )
 
     async def list_traces(
@@ -760,7 +760,12 @@ class ApiClient:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(f"{MATTERS}/matters/{matter_id}/traces", params=params)
+        try:
+            return await self.get(f"{MATTERS}/lawyer/matters/{matter_id}/traces", params=params)
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return await self.get(f"{MATTERS}/matters/{matter_id}/traces", params=params)
+            raise
 
     async def get_matter_timeline(
         self, matter_id: str, limit: int | None = None
@@ -768,10 +773,20 @@ class ApiClient:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(f"{MATTERS}/matters/{matter_id}/timeline", params=params)
+        try:
+            return await self.get(f"{MATTERS}/lawyer/matters/{matter_id}/timeline", params=params)
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return await self.get(f"{MATTERS}/matters/{matter_id}/timeline", params=params)
+            raise
 
     async def get_matter_phase_timeline(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"{MATTERS}/matters/{matter_id}/phase-timeline")
+        try:
+            return await self.get(f"{MATTERS}/lawyer/matters/{matter_id}/phase-timeline")
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return await self.get(f"{MATTERS}/matters/{matter_id}/phase-timeline")
+            raise
 
     # ========== Knowledge ==========
 

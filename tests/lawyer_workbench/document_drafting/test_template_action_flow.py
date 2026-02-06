@@ -98,8 +98,17 @@ async def test_template_action_flow_generates_docx(lawyer_client):
         uploaded_file_ids.append(fid)
     _debug(f"[tpl-flow] uploaded {len(uploaded_file_ids)} files")
 
-    _debug("[tpl-flow] create session service_type_id=document_drafting")
-    sess = await lawyer_client.create_session(service_type_id="document_drafting")
+    _debug("[tpl-flow] create matter service_type_id=document_drafting")
+    matter = await lawyer_client.create_matter(
+        service_type_id="document_drafting",
+        title="E2E 文书起草（智能模板入口）",
+        file_ids=uploaded_file_ids,
+    )
+    matter_id = str(((matter.get("data") or {}) if isinstance(matter, dict) else {}).get("id") or "").strip()
+    assert matter_id, matter
+
+    _debug("[tpl-flow] create session (bind to matter_id)")
+    sess = await lawyer_client.create_session(matter_id=matter_id)
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
     _debug(f"[tpl-flow] session_id={session_id}")

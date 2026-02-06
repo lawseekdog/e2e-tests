@@ -748,11 +748,23 @@ class ApiClient:
     async def create_matter(
         self,
         service_type_id: str,
-        client_id: str | None = None,
+        title: str | None = None,
+        file_ids: list[str] | None = None,
+        cause_of_action_code: str | None = None,
+        matter_category: str | None = None,
     ) -> dict[str, Any]:
-        data = {"service_type_id": service_type_id}
-        if client_id:
-            data["client_id"] = client_id
+        st = str(service_type_id or "").strip()
+        if not st:
+            raise ValueError("service_type_id is required")
+
+        t = str(title or "").strip() or f"E2E matter ({st})"
+        data: dict[str, Any] = {"title": t, "service_type_id": st}
+        if file_ids:
+            data["file_ids"] = [str(x).strip() for x in file_ids if str(x).strip()]
+        if cause_of_action_code:
+            data["cause_of_action_code"] = str(cause_of_action_code).strip()
+        if matter_category:
+            data["matter_category"] = str(matter_category).strip()
         return await self.post(f"{MATTERS}/lawyer/matters", data)
 
     async def get_matter(self, matter_id: str) -> dict[str, Any]:

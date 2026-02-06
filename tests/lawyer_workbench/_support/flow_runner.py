@@ -215,11 +215,18 @@ class WorkbenchFlow:
     async def refresh(self) -> None:
         sess = unwrap_api_response(await self.client.get_session(self.session_id))
         if isinstance(sess, dict) and sess.get("matter_id") is not None:
-            self.matter_id = str(sess.get("matter_id")).strip()
+            mid = str(sess.get("matter_id")).strip()
+            if mid and mid != (self.matter_id or ""):
+                _debug(f"[flow] session bound matter_id={mid}")
+            self.matter_id = mid
 
     async def get_pending_card(self) -> dict[str, Any] | None:
         resp = await self.client.get_pending_card(self.session_id)
         card = unwrap_api_response(resp)
+        if isinstance(card, dict) and card:
+            _debug(
+                f"[flow] pending card skill_id={card.get('skill_id')} task_key={card.get('task_key')} review_type={card.get('review_type')}"
+            )
         return card if isinstance(card, dict) and card else None
 
     async def resume_card(self, card: dict[str, Any]) -> dict[str, Any]:
@@ -227,6 +234,7 @@ class WorkbenchFlow:
         self.seen_cards.append(card)
         self.seen_card_signatures.append(card_signature(card))
         user_response = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
+        _debug(f"[flow] resume card {card.get('skill_id')} answers={len(user_response.get('answers') or [])}")
         sse = await self.client.resume(self.session_id, user_response, pending_card=card, max_loops=_RESUME_MAX_LOOPS)
         assert_has_user_message(sse)
         if isinstance(sse, dict):
@@ -235,6 +243,7 @@ class WorkbenchFlow:
         return sse
 
     async def nudge(self, text: str = _NUDGE_TEXT, *, attachments: list[str] | None = None, max_loops: int = 12) -> dict[str, Any]:
+        _debug(f"[flow] nudge text={text!r} attachments={len(attachments or [])} max_loops={max_loops}")
         sse = await self.client.chat(self.session_id, text, attachments=attachments or [], max_loops=max_loops)
         if isinstance(sse, dict):
             self.last_sse = sse

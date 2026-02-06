@@ -22,6 +22,8 @@ FILES = "/files-service"
 MATTERS = "/matter-service"
 KNOWLEDGE = "/knowledge-service"
 
+_WS_DEBUG = str(os.getenv("E2E_WS_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
+
 
 class ApiClient:
     """API 客户端封装"""
@@ -89,17 +91,31 @@ class ApiClient:
         for attempt in range(1, max_attempts + 1):
             try:
                 response = await client.request(method, url, **kwargs)
-                if response.status_code in {502, 503, 504} and attempt < max_attempts:
-                    # Gateway hiccups happen when services restart in local docker; retry GETs only.
-                    await asyncio.sleep(min(4.0, 0.5 * attempt))
-                    continue
-                response.raise_for_status()
-                return response.json()
-            except Exception as e:
+            except httpx.RequestError as e:
+                # Network/connect/read timeouts can happen during local service restarts.
                 last_exc = e
                 if attempt >= max_attempts:
                     raise
                 await asyncio.sleep(min(4.0, 0.5 * attempt))
+                continue
+
+            if response.status_code in {502, 503, 504} and attempt < max_attempts:
+                # Gateway hiccups happen when services restart in local docker; retry GETs only.
+                await asyncio.sleep(min(4.0, 0.5 * attempt))
+                continue
+
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                # Do not retry on expected 4xx (e.g. probing legacy endpoints). Only retry transient 5xx.
+                code = e.response.status_code if e.response is not None else None
+                if code in {502, 503, 504} and attempt < max_attempts:
+                    last_exc = e
+                    await asyncio.sleep(min(4.0, 0.5 * attempt))
+                    continue
+                raise
+
+            return response.json()
         raise last_exc if last_exc else RuntimeError("request failed")
 
     async def _post_ws(
@@ -165,6 +181,20 @@ class ApiClient:
                             if evt == "ping":
                                 await ws.send(json.dumps({"type": "pong"}))
                                 continue
+
+                            if _WS_DEBUG and evt and evt not in {"delta", "token"}:
+                                # Keep debug logs small; avoid dumping cards/deltas.
+                                summary = ""
+                                if isinstance(evt_data, dict):
+                                    if evt in {"task_start", "task_end"}:
+                                        summary = str(evt_data.get("node") or evt_data.get("name") or "")
+                                    elif evt == "progress":
+                                        summary = str(evt_data.get("phase") or evt_data.get("message") or "")
+                                    elif evt == "card":
+                                        summary = str(evt_data.get("skill_id") or evt_data.get("title") or "")
+                                    elif evt in {"error", "end"}:
+                                        summary = str(evt_data.get("message") or evt_data.get("output") or "")
+                                print(f"[ws] {evt} {summary}".strip(), flush=True)
 
                             events.append({"event": evt, "data": evt_data})
 

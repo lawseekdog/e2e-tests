@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -14,6 +15,14 @@ from tests.lawyer_workbench._support.docx import (
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
 from tests.lawyer_workbench._support.sse import assert_visible_response
 from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
+
+
+_DEBUG = str(os.getenv("E2E_FLOW_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _debug(msg: str) -> None:
+    if _DEBUG:
+        print(msg, flush=True)
 
 
 def _case_facts() -> str:
@@ -82,15 +91,20 @@ async def test_template_action_flow_generates_docx(lawyer_client):
 
     uploaded_file_ids: list[str] = []
     for p in paths:
+        _debug(f"[tpl-flow] upload {p.name}")
         up = await lawyer_client.upload_file(str(p), purpose="consultation")
         fid = str(((up.get("data") or {}) if isinstance(up, dict) else {}).get("id") or "").strip()
         assert fid, f"upload failed: {up}"
         uploaded_file_ids.append(fid)
+    _debug(f"[tpl-flow] uploaded {len(uploaded_file_ids)} files")
 
+    _debug("[tpl-flow] create session service_type_id=document_drafting")
     sess = await lawyer_client.create_session(service_type_id="document_drafting")
     session_id = str(((sess.get("data") or {}) if isinstance(sess, dict) else {}).get("id") or "").strip()
     assert session_id, sess
+    _debug(f"[tpl-flow] session_id={session_id}")
 
+    _debug("[tpl-flow] list atomic templates")
     templates_payload = await lawyer_client.get("/templates-service/atomic/templates")
     templates = _extract_templates(templates_payload)
     assert templates, templates_payload
@@ -100,7 +114,9 @@ async def test_template_action_flow_generates_docx(lawyer_client):
     assert template_id, tpl
     title = str(tpl.get("name") or "").strip() or f"模板#{template_id}"
     output_key = f"template:{template_id}"
+    _debug(f"[tpl-flow] picked template_id={template_id} output_key={output_key} title={title}")
 
+    _debug("[tpl-flow] send workflow_action=template_draft_start")
     await lawyer_client.workflow_action(
         session_id,
         workflow_action="template_draft_start",
@@ -110,6 +126,7 @@ async def test_template_action_flow_generates_docx(lawyer_client):
             "output_key": output_key,
         },
     )
+    _debug("[tpl-flow] workflow_action ok")
 
     flow = WorkbenchFlow(
         client=lawyer_client,
@@ -118,8 +135,10 @@ async def test_template_action_flow_generates_docx(lawyer_client):
         overrides={},
     )
 
-    first_sse = await flow.nudge(_case_facts(), attachments=uploaded_file_ids, max_loops=80)
+    # Keep loop budget conservative to avoid hitting LangGraph recursion limits on long docgen pipelines.
+    first_sse = await flow.nudge(_case_facts(), attachments=uploaded_file_ids, max_loops=12)
     assert_visible_response(first_sse)
+    _debug("[tpl-flow] first nudge ok")
 
     async def _deliverable_ready(f: WorkbenchFlow) -> bool:
         await f.refresh()

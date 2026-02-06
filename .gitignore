@@ -1,7 +1,12 @@
 .venv
+.venv*/
 tmp/
 
 # Oh-My-OpenCode
 .sisyphus/
+
+# Python bytecode/cache (keep repo clean; tracked legacy pyc files remain tracked)
+__pycache__/
+*.pyc
 
 .DS_Store

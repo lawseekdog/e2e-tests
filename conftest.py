@@ -171,10 +171,17 @@ async def lawyer_client():
         if org_id is None:
             raise RuntimeError(f"failed to ensure organization: {org_list}")
 
-        await admin.patch(
-            f"{user_admin_base}/internal/users/{lawyer_user_id}/organization",
-            {"organization_id": int(org_id)},
-        )
+        try:
+            await admin.patch(
+                f"{user_admin_base}/internal/users/{lawyer_user_id}/organization",
+                {"organization_id": int(org_id)},
+            )
+        except httpx.HTTPStatusError as e:
+            # Remote environments may protect internal endpoints with INTERNAL_API_KEY.
+            if e.response is not None and e.response.status_code in {401, 403}:
+                pass
+            else:
+                raise
 
     async with ApiClient(BASE_URL) as c:
         await c.login(LAWYER_USERNAME, LAWYER_PASSWORD)

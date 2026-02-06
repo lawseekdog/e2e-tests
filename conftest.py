@@ -136,9 +136,18 @@ async def lawyer_client():
         if lawyer_user_id is None:
             raise RuntimeError(f"failed to resolve lawyer user id: {resp}")
 
+        org_admin_base = "/organization-service/api/v1"
+        try:
+            await admin.get(f"{org_admin_base}/admin/organizations?page=1&size=1")
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 404:
+                org_admin_base = "/organization-service"
+            else:
+                raise
+
         # Ensure there is at least one organization and bind the lawyer user to it so downstream services
         # receive X-Organization-Id and can auto-kickoff matters.
-        org_list = await admin.get("/organization-service/api/v1/admin/organizations?page=1&size=5")
+        org_list = await admin.get(f"{org_admin_base}/admin/organizations?page=1&size=5")
         org_id = None
         if isinstance(org_list, dict):
             items = org_list.get("data") if isinstance(org_list.get("data"), list) else []
@@ -148,7 +157,7 @@ async def lawyer_client():
 
         if org_id is None:
             created_org = await admin.post(
-                "/organization-service/api/v1/admin/organizations",
+                f"{org_admin_base}/admin/organizations",
                 {
                     "name": "E2E Law Firm",
                     "practice_area": "civil",

@@ -492,19 +492,35 @@ class ApiClient:
 
     async def create_session(
         self,
-        engagement_mode: str = "start_service",
+        title: str | None = None,
         service_type_id: str | None = None,
         matter_id: str | None = None,
         client_role: str | None = None,
     ) -> dict[str, Any]:
-        data = {"engagement_mode": engagement_mode}
-        if service_type_id:
-            data["service_type_id"] = service_type_id
-        if matter_id:
-            data["matter_id"] = matter_id
-        if client_role:
-            data["client_role"] = client_role
-        return await self.post(f"{CONSULTATIONS}/consultations/sessions", data)
+        """Create a consultation session (hard-cut: sessions are matter-backed).
+
+        consultations-service hard-cuts create-session payload to: {title?, matter_id?}.
+        To keep E2E tests expressive, allow callers to pass service_type_id/client_role and
+        transparently create a matter first.
+        """
+        mid = str(matter_id or "").strip() or None
+        st = str(service_type_id or "").strip() or None
+        # client_role is now inferred from service_type_id in workbench-mode; keep it as a no-op hint.
+        _ = client_role
+
+        payload: dict[str, Any] = {}
+        t = str(title or "").strip()
+        if t:
+            payload["title"] = t
+
+        if mid is None and st:
+            created = await self.create_matter(service_type_id=st, title=t or None)
+            mid = str(((created.get("data") or {}) if isinstance(created, dict) else {}).get("id") or "").strip() or None
+
+        if mid:
+            payload["matter_id"] = mid
+
+        return await self.post(f"{CONSULTATIONS}/consultations/sessions", payload)
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
         return await self.get(f"{CONSULTATIONS}/consultations/sessions/{session_id}")

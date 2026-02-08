@@ -167,14 +167,16 @@ class ApiClient:
                     # Collect events until 'end'
                     while True:
                         try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=300)
+                            ws_event_timeout_s = float(os.getenv("E2E_WS_EVENT_TIMEOUT_S", "120") or 120)
+                            raw = await asyncio.wait_for(ws.recv(), timeout=ws_event_timeout_s)
                             payload = json.loads(raw)
                             evt = payload.get("event")
                             evt_data = payload.get("data", payload)
 
                             # Handle ping
                             if evt == "ping":
-                                await ws.send(json.dumps({"type": "pong"}))
+                                # consultations-service heartbeats are one-way app-level events.
+                                # Do not reply with an unsupported websocket message type.
                                 continue
 
                             if _WS_DEBUG and evt and evt not in {"delta", "token"}:
@@ -377,8 +379,6 @@ class ApiClient:
         }
         if max_loops is not None:
             data["max_loops"] = max_loops
-        if self.user_id:
-            data["user_id"] = int(self.user_id)
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
         return await self._post_ws(ws_path, "chat", data)
 
@@ -481,8 +481,6 @@ class ApiClient:
             data["pending_card"] = pending_card
         if max_loops is not None:
             data["max_loops"] = int(max_loops)
-        if self.user_id:
-            data["user_id"] = int(self.user_id)
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
         return await self._post_ws(ws_path, "resume", data)
 
@@ -502,8 +500,6 @@ class ApiClient:
         }
         if max_loops is not None:
             data["max_loops"] = int(max_loops)
-        if self.user_id:
-            data["user_id"] = int(self.user_id)
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
         return await self._post_ws(ws_path, "actions", data)
 

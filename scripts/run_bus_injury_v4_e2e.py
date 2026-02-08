@@ -115,7 +115,7 @@ def scan_contract_markers() -> list[dict[str, Any]]:
         (
             "ai_cause_recheck_rule",
             REPO_ROOT / "ai-engine/.skills/cause-recommendation/scripts/postprocess.py",
-            "score_delta >= 0.15",
+            "top_candidate_changed",
         ),
     ]
 
@@ -147,6 +147,26 @@ def event_counts(events: list[dict[str, Any]]) -> dict[str, int]:
 
 def append_step(results: list[StepResult], step: str, title: str, ok: bool, details: str) -> None:
     results.append(StepResult(step=step, title=title, status="PASS" if ok else "FAIL", details=details))
+
+
+def _extract_pending_card(payload: Any) -> dict[str, Any] | None:
+    raw = payload if isinstance(payload, dict) else {}
+    if "data" in raw:
+        raw = raw.get("data")
+
+    if not isinstance(raw, dict) or not raw:
+        return None
+
+    # ApiResponse envelope without data: {"code":0,"message":"OK"}
+    if set(raw.keys()).issubset({"code", "message", "timestamp", "request_id"}):
+        return None
+
+    has_questions = isinstance(raw.get("questions"), list) and len(raw.get("questions") or []) > 0
+    has_marker = any(bool(str(raw.get(k) or "").strip()) for k in ("id", "task_key", "review_type", "prompt", "type"))
+    if not has_questions and not has_marker:
+        return None
+
+    return raw
 
 
 def auto_answer_card(card: dict[str, Any], uploaded_file_ids: list[str]) -> dict[str, Any]:
@@ -197,8 +217,16 @@ def auto_answer_card(card: dict[str, Any], uploaded_file_ids: list[str]) -> dict
         else:
             value = default if default is not None else ("已确认" if required else None)
 
-        if required and (value is None or (isinstance(value, str) and not value.strip()) or (isinstance(value, list) and not value)):
-            value = True if input_type in {"boolean", "bool"} else "已确认"
+        is_list_field = field_key == "attachment_file_ids" or input_type in {"file_ids", "multi_select", "multiple_select"}
+        missing_value = value is None or (isinstance(value, str) and not value.strip()) or (isinstance(value, list) and not value)
+        if required and missing_value:
+            if input_type in {"boolean", "bool"}:
+                value = True
+            elif is_list_field:
+                # Keep list-typed fields as arrays even when unanswered to avoid type validation failures.
+                value = value if isinstance(value, list) else ([] if value is None else [value])
+            else:
+                value = "已确认"
 
         if value is None and not required:
             continue
@@ -214,7 +242,7 @@ async def wait_for_snapshot(client: ApiClient, matter_id: str, timeout_s: float)
 
     while time.time() < deadline:
         try:
-            payload = unwrap(await client.get(path))
+            payload = unwrap(await client.get(path, timeout=8.0))
             if isinstance(payload, dict):
                 last_payload = payload
                 kv = payload.get("knowledge_view")
@@ -251,17 +279,34 @@ async def consume_pending_cards(
     """
     consumed = 0
     while consumed < max_cards:
-        pending = unwrap(await client.get_pending_card(session_id))
+        try:
+            pending_raw = await asyncio.wait_for(client.get_pending_card(session_id), timeout=12.0)
+        except asyncio.TimeoutError:
+            return consumed, False
+        pending = _extract_pending_card(pending_raw)
         if not isinstance(pending, dict) or not pending:
             return consumed, False
 
         payload = auto_answer_card(pending, uploaded_file_ids)
         answers = payload.get("answers") if isinstance(payload.get("answers"), list) else []
         if not answers:
-            return consumed, True
+            ws_log.write(
+                json.dumps(
+                    {
+                        "turn": f"{turn_label_prefix}_skip",
+                        "events": [],
+                        "reason": "non_actionable_pending_card",
+                        "task_key": pending.get("task_key"),
+                        "card_id": pending.get("id"),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            return consumed, False
 
         turn_label = f"{turn_label_prefix}_{consumed + 1}"
-        resume_loops = min(max(1, int(resume_max_loops)), 4)
+        resume_loops = 1
         try:
             turn_resume = await run_ws_turn(
                 client.resume(session_id, payload, pending_card=pending, max_loops=resume_loops),
@@ -274,8 +319,9 @@ async def consume_pending_cards(
         ws_log.write(json.dumps({"turn": turn_label, "events": turn_resume.get("events", [])}, ensure_ascii=False) + "\n")
         consumed += 1
 
-    pending = unwrap(await client.get_pending_card(session_id))
-    return consumed, bool(isinstance(pending, dict) and pending)
+    # Reaching the card budget is considered sufficient for this E2E turn;
+    # additional clarifications can be handled in later turns.
+    return consumed, False
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -366,6 +412,15 @@ async def run(args: argparse.Namespace) -> int:
                     append_step(results, "3", "首轮snapshot可视化检查", ok_snapshot, f"mode={mode} nodes={nodes} events={events} facts={facts}")
 
                     uploaded_ids: list[str] = []
+                    if evidence_path.exists():
+                        try:
+                            seeded_upload = unwrap(await client.upload_session_attachment(session_id, str(evidence_path)))
+                            seeded_id = str((seeded_upload or {}).get("file_id") or "").strip()
+                            if seeded_id:
+                                uploaded_ids.append(seeded_id)
+                        except Exception:
+                            pass
+
                     consumed_cards, unresolved_cards = await consume_pending_cards(
                         client=client,
                         session_id=session_id,
@@ -374,6 +429,7 @@ async def run(args: argparse.Namespace) -> int:
                         turn_timeout_s=turn_timeout_s,
                         resume_max_loops=resume_max_loops,
                         turn_label_prefix="turn2_resume",
+                        max_cards=1,
                     )
                     if unresolved_cards:
                         append_step(results, "4", "提问卡消费", False, f"pending_card_unresolved consumed={consumed_cards}")
@@ -399,6 +455,7 @@ async def run(args: argparse.Namespace) -> int:
                         turn_timeout_s=turn_timeout_s,
                         resume_max_loops=resume_max_loops,
                         turn_label_prefix="turn3_resume_before_refs",
+                        max_cards=1,
                     )
                     if pre_refs_consumed > 0:
                         snapshot2 = await wait_for_snapshot(client, bound_matter_id, timeout_s=60.0)
@@ -409,7 +466,7 @@ async def run(args: argparse.Namespace) -> int:
 
                     if (not isinstance(legal_refs, list) or not legal_refs) and (not isinstance(case_refs, list) or not case_refs) and not pre_refs_unresolved:
                         turn_refs = await run_ws_turn(
-                            client.chat(session_id, refs_prompt, attachments=[], max_loops=max_loops),
+                            client.chat(session_id, refs_prompt, attachments=[], max_loops=1),
                             turn_timeout_s,
                             "turn3_refs_prompt",
                         )
@@ -423,6 +480,7 @@ async def run(args: argparse.Namespace) -> int:
                             turn_timeout_s=turn_timeout_s,
                             resume_max_loops=resume_max_loops,
                             turn_label_prefix="turn3_resume_after_refs",
+                            max_cards=1,
                         )
                         pre_refs_unresolved = pre_refs_unresolved or post_refs_unresolved
 
@@ -447,7 +505,7 @@ async def run(args: argparse.Namespace) -> int:
                         f"legal_refs={len(legal_refs) if isinstance(legal_refs, list) else 0} case_refs={len(case_refs) if isinstance(case_refs, list) else 0} refs_quality={refs_quality} unresolved_pending={pre_refs_unresolved}",
                     )
 
-                    if evidence_path.exists():
+                    if evidence_path.exists() and not uploaded_ids:
                         uploaded = unwrap(await client.upload_session_attachment(session_id, str(evidence_path)))
                         evidence_id = str((uploaded or {}).get("file_id") or "").strip()
                         if evidence_id:

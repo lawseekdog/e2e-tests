@@ -141,6 +141,8 @@ class ApiClient:
                     ws_url,
                     close_timeout=10,
                     open_timeout=open_timeout_s,
+                    # Consultations-service can emit large JSON card payloads; disable client frame-size cap.
+                    max_size=None,
                     # Consultations-service speaks "ping"/"pong" as app-level JSON events; some
                     # proxies don't reliably forward WebSocket protocol pings in local dev.
                     # Disable protocol-level keepalive to avoid spurious 1011 ping timeouts.
@@ -383,8 +385,10 @@ class ApiClient:
         return await self._post_ws(ws_path, "chat", data)
 
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
+        timeout_s = float(os.getenv("E2E_PENDING_CARD_TIMEOUT_S", "8") or 8)
         return await self.get(
-            f"{CONSULTATIONS}/consultations/sessions/{session_id}/pending_card"
+            f"{CONSULTATIONS}/consultations/sessions/{session_id}/pending_card",
+            timeout=timeout_s,
         )
 
     async def upload_session_attachment(

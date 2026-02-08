@@ -111,7 +111,7 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
     # Rich facts + parseable text evidence should not trigger extra clarify cards before cause selection.
     assert len(flow.seen_cards) == 1, f"unexpected extra cards before cause-recommendation: {flow.seen_card_signatures}"
 
-    # Validate cause recommendation is produced and evidence score is non-zero (no 'all zero' regression).
+    # Validate cause recommendation context is produced before the mandatory select card.
     prof = unwrap_api_response(await lawyer_client.get_workflow_profile(flow.matter_id))
     assert isinstance(prof, dict), prof
     assert_service_type(prof, "civil_prosecution")
@@ -132,6 +132,9 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
     assert isinstance(select_q, dict), f"missing select question: {cause_card}"
     opts = select_q.get("options") if isinstance(select_q.get("options"), list) else []
     assert opts, f"missing options: {cause_card}"
+    assert len(opts) == 3, f"hard-cut expects exactly 3 cause options: {opts}"
+    option_codes = [str((o or {}).get("value") or "").strip() for o in opts if isinstance(o, dict)]
+    assert "state_compensation" not in option_codes, f"state_compensation must be gated out: {opts}"
     rec_opt = None
     for o in opts:
         if isinstance(o, dict) and o.get("recommended") is True:
@@ -142,10 +145,10 @@ async def test_civil_prosecution_bus_passenger_injury_reaches_cause_recommendati
     # Rich "公交乘客摔伤 + 医疗证据" 场景下，应优先推荐人身侵权（生命权、身体权、健康权纠纷），
     # 运输合同作为相邻备选保留即可，不应长期占据 Top1。
     assert recommended_code == "personal_injury_tort", rec_opt
-    # Ensure the option description includes a non-zero evidence support signal (tool-derived, not LLM-made-up).
+    # Hard-cut: no score/confidence text in option description.
     desc = str(rec_opt.get("description") or "").strip()
-    assert "证据支撑度" in desc, f"missing evidence_support hint in option description: {rec_opt}"
-    assert "证据支撑度 0%" not in desc, f"unexpected evidence_support=0 in option description: {rec_opt}"
+    assert "推荐度" not in desc, f"score-like wording should be removed: {rec_opt}"
+    assert "%" not in desc, f"percentage wording should be removed: {rec_opt}"
     cause_sse = await flow.resume_card(cause_card)
     # Submitting the cause card may trigger a long evidence pipeline; allow an empty assistant bubble
     # as long as the stream is alive (or ended partially) and there are no non-partial errors.

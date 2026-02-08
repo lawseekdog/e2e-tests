@@ -84,7 +84,7 @@ def scan_contract_markers() -> list[dict[str, Any]]:
     checks = [
         (
             "front_entry_seed_matter",
-            REPO_ROOT / "front/src/apps/lawyer/views/WorkbenchPro.vue",
+            REPO_ROOT / "front/src/apps/lawyer/workbench/composables/useWorkbenchEntry.ts",
             "const seededMatterId = await createMatterForEntryIntent",
         ),
         (

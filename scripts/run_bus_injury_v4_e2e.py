@@ -234,6 +234,50 @@ async def run_ws_turn(coro: Any, timeout_s: float, label: str) -> dict[str, Any]
         raise RuntimeError(f"{label} timed out after {int(timeout_s)}s") from exc
 
 
+async def consume_pending_cards(
+    *,
+    client: ApiClient,
+    session_id: str,
+    uploaded_file_ids: list[str],
+    ws_log: Any,
+    turn_timeout_s: float,
+    resume_max_loops: int,
+    turn_label_prefix: str,
+    max_cards: int = 6,
+) -> tuple[int, bool]:
+    """Consume pending cards via /resume until no card is pending.
+
+    Returns: (consumed_count, unresolved_pending)
+    """
+    consumed = 0
+    while consumed < max_cards:
+        pending = unwrap(await client.get_pending_card(session_id))
+        if not isinstance(pending, dict) or not pending:
+            return consumed, False
+
+        payload = auto_answer_card(pending, uploaded_file_ids)
+        answers = payload.get("answers") if isinstance(payload.get("answers"), list) else []
+        if not answers:
+            return consumed, True
+
+        turn_label = f"{turn_label_prefix}_{consumed + 1}"
+        resume_loops = min(max(1, int(resume_max_loops)), 4)
+        try:
+            turn_resume = await run_ws_turn(
+                client.resume(session_id, payload, pending_card=pending, max_loops=resume_loops),
+                turn_timeout_s,
+                turn_label,
+            )
+        except RuntimeError as exc:
+            ws_log.write(json.dumps({"turn": turn_label, "events": [{"event": "error", "data": {"message": str(exc)}}]}, ensure_ascii=False) + "\n")
+            return consumed, True
+        ws_log.write(json.dumps({"turn": turn_label, "events": turn_resume.get("events", [])}, ensure_ascii=False) + "\n")
+        consumed += 1
+
+    pending = unwrap(await client.get_pending_card(session_id))
+    return consumed, bool(isinstance(pending, dict) and pending)
+
+
 async def run(args: argparse.Namespace) -> int:
     load_dotenv(E2E_ROOT / ".env")
 
@@ -322,18 +366,20 @@ async def run(args: argparse.Namespace) -> int:
                     append_step(results, "3", "首轮snapshot可视化检查", ok_snapshot, f"mode={mode} nodes={nodes} events={events} facts={facts}")
 
                     uploaded_ids: list[str] = []
-                    pending = unwrap(await client.get_pending_card(session_id))
-                    if isinstance(pending, dict) and pending:
-                        resume_payload = auto_answer_card(pending, uploaded_ids)
-                        turn_resume = await run_ws_turn(
-                            client.resume(session_id, resume_payload, pending_card=pending, max_loops=resume_max_loops),
-                            turn_timeout_s,
-                            "turn2_resume",
-                        )
-                        ws_log.write(json.dumps({"turn": "turn2_resume", "events": turn_resume.get("events", [])}, ensure_ascii=False) + "\n")
-                        append_step(results, "4", "提问卡消费", True, "pending_card_consumed")
+                    consumed_cards, unresolved_cards = await consume_pending_cards(
+                        client=client,
+                        session_id=session_id,
+                        uploaded_file_ids=uploaded_ids,
+                        ws_log=ws_log,
+                        turn_timeout_s=turn_timeout_s,
+                        resume_max_loops=resume_max_loops,
+                        turn_label_prefix="turn2_resume",
+                    )
+                    if unresolved_cards:
+                        append_step(results, "4", "提问卡消费", False, f"pending_card_unresolved consumed={consumed_cards}")
                     else:
-                        append_step(results, "4", "提问卡消费", True, "no_pending_card")
+                        detail = "no_pending_card" if consumed_cards == 0 else f"pending_card_consumed={consumed_cards}"
+                        append_step(results, "4", "提问卡消费", True, detail)
 
                     snapshot2 = await wait_for_snapshot(client, bound_matter_id, timeout_s=90.0)
                     (out_dir / "snapshot-step-2.json").write_text(json.dumps(snapshot2, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -344,13 +390,45 @@ async def run(args: argparse.Namespace) -> int:
 
                     legal_refs = panels2.get("legal_references") if isinstance(panels2, dict) else []
                     case_refs = panels2.get("case_references") if isinstance(panels2, dict) else []
-                    if (not isinstance(legal_refs, list) or not legal_refs) and (not isinstance(case_refs, list) or not case_refs):
+
+                    pre_refs_consumed, pre_refs_unresolved = await consume_pending_cards(
+                        client=client,
+                        session_id=session_id,
+                        uploaded_file_ids=uploaded_ids,
+                        ws_log=ws_log,
+                        turn_timeout_s=turn_timeout_s,
+                        resume_max_loops=resume_max_loops,
+                        turn_label_prefix="turn3_resume_before_refs",
+                    )
+                    if pre_refs_consumed > 0:
+                        snapshot2 = await wait_for_snapshot(client, bound_matter_id, timeout_s=60.0)
+                        kv2 = snapshot2.get("knowledge_view") if isinstance(snapshot2, dict) else {}
+                        panels2 = (kv2.get("panels") or {}) if isinstance(kv2, dict) else {}
+                        legal_refs = panels2.get("legal_references") if isinstance(panels2, dict) else []
+                        case_refs = panels2.get("case_references") if isinstance(panels2, dict) else []
+
+                    if (not isinstance(legal_refs, list) or not legal_refs) and (not isinstance(case_refs, list) or not case_refs) and not pre_refs_unresolved:
                         turn_refs = await run_ws_turn(
                             client.chat(session_id, refs_prompt, attachments=[], max_loops=max_loops),
                             turn_timeout_s,
                             "turn3_refs_prompt",
                         )
                         ws_log.write(json.dumps({"turn": "turn3_refs_prompt", "events": turn_refs.get("events", [])}, ensure_ascii=False) + "\n")
+
+                        post_refs_consumed, post_refs_unresolved = await consume_pending_cards(
+                            client=client,
+                            session_id=session_id,
+                            uploaded_file_ids=uploaded_ids,
+                            ws_log=ws_log,
+                            turn_timeout_s=turn_timeout_s,
+                            resume_max_loops=resume_max_loops,
+                            turn_label_prefix="turn3_resume_after_refs",
+                        )
+                        pre_refs_unresolved = pre_refs_unresolved or post_refs_unresolved
+
+                        if post_refs_consumed > 0:
+                            ws_log.write(json.dumps({"turn": "turn3_resume_meta", "events": [] , "consumed": post_refs_consumed}, ensure_ascii=False) + "\n")
+
                         snapshot2 = await wait_for_snapshot(client, bound_matter_id, timeout_s=60.0)
                         kv2 = snapshot2.get("knowledge_view") if isinstance(snapshot2, dict) else {}
                         panels2 = (kv2.get("panels") or {}) if isinstance(kv2, dict) else {}
@@ -358,12 +436,15 @@ async def run(args: argparse.Namespace) -> int:
                         case_refs = panels2.get("case_references") if isinstance(panels2, dict) else []
 
                     refs_quality = str((((kv2 or {}).get("evidence_readiness") or {}).get("refs_quality") or ""))
+                    refs_ok = ((isinstance(legal_refs, list) and len(legal_refs) > 0) or (isinstance(case_refs, list) and len(case_refs) > 0)) and refs_quality in {"low", "medium", "high"}
+                    if pre_refs_unresolved:
+                        refs_ok = False
                     append_step(
                         results,
                         "6",
                         "首轮法条/类案展示",
-                        ((isinstance(legal_refs, list) and len(legal_refs) > 0) or (isinstance(case_refs, list) and len(case_refs) > 0)) and refs_quality in {"low", "medium", "high"},
-                        f"legal_refs={len(legal_refs) if isinstance(legal_refs, list) else 0} case_refs={len(case_refs) if isinstance(case_refs, list) else 0} refs_quality={refs_quality}",
+                        refs_ok,
+                        f"legal_refs={len(legal_refs) if isinstance(legal_refs, list) else 0} case_refs={len(case_refs) if isinstance(case_refs, list) else 0} refs_quality={refs_quality} unresolved_pending={pre_refs_unresolved}",
                     )
 
                     if evidence_path.exists():

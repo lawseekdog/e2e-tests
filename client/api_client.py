@@ -382,7 +382,8 @@ class ApiClient:
         if max_loops is not None:
             data["max_loops"] = max_loops
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
-        return await self._post_ws(ws_path, "chat", data)
+        open_timeout_s = float(os.getenv("E2E_WS_OPEN_TIMEOUT_S", "20") or 20)
+        return await self._post_ws(ws_path, "chat", data, open_timeout_s=open_timeout_s)
 
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
         timeout_s = float(os.getenv("E2E_PENDING_CARD_TIMEOUT_S", "8") or 8)
@@ -486,7 +487,8 @@ class ApiClient:
         if max_loops is not None:
             data["max_loops"] = int(max_loops)
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
-        return await self._post_ws(ws_path, "resume", data)
+        open_timeout_s = float(os.getenv("E2E_WS_OPEN_TIMEOUT_S", "20") or 20)
+        return await self._post_ws(ws_path, "resume", data, open_timeout_s=open_timeout_s)
 
     async def workflow_action(
         self,
@@ -505,7 +507,8 @@ class ApiClient:
         if max_loops is not None:
             data["max_loops"] = int(max_loops)
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
-        return await self._post_ws(ws_path, "actions", data)
+        open_timeout_s = float(os.getenv("E2E_WS_OPEN_TIMEOUT_S", "20") or 20)
+        return await self._post_ws(ws_path, "actions", data, open_timeout_s=open_timeout_s)
 
     async def switch_service_type(
         self,

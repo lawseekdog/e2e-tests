@@ -33,7 +33,7 @@ def _pick_recommended_or_first(options):
     return None
 
 
-def _auto_answer_card(card: dict, uploaded_file_id: Optional[str]) -> dict:
+def _auto_answer_card(card: dict, uploaded_file_ids: list[str]) -> dict:
     questions = card.get("questions") if isinstance(card.get("questions"), list) else []
     answers = []
 
@@ -55,10 +55,8 @@ def _auto_answer_card(card: dict, uploaded_file_id: Optional[str]) -> dict:
             first = _pick_recommended_or_first(q.get("options") if isinstance(q.get("options"), list) else [])
             value = [first] if first is not None else []
         elif it in {"file_ids", "file_id"}:
-            # Default: do not upload; the first chat already includes attachments.
-            value = []
-            if required and uploaded_file_id:
-                value = [uploaded_file_id]
+            # Hard-cut workflows may require explicit file_ids for downstream evidence binding.
+            value = list(uploaded_file_ids) if uploaded_file_ids else []
         else:
             if fk == "profile.facts":
                 value = (
@@ -87,10 +85,19 @@ async def main():
     async with ApiClient(base_url) as c:
         await c.login(user, pwd)
 
-        fixture = Path(__file__).resolve().parent.parent / "fixtures" / "sample_iou.pdf"
-        up = await c.upload_file(str(fixture), purpose="consultation")
-        file_id = str((up.get("data") or {}).get("id") or "").strip()
-        print("uploaded file_id", file_id, flush=True)
+        fixture_dir = Path(__file__).resolve().parent.parent / "fixtures"
+        upload_names = [
+            "sample_iou.pdf",
+            "sample_chat_record.txt",
+            "sample_transfer_record.txt",
+        ]
+        uploaded_file_ids: list[str] = []
+        for name in upload_names:
+            up = await c.upload_file(str(fixture_dir / name), purpose="consultation")
+            fid = str((up.get("data") or {}).get("id") or "").strip()
+            if fid:
+                uploaded_file_ids.append(fid)
+            print("uploaded", name, fid, flush=True)
 
         sess = await c.create_session(service_type_id="civil_prosecution")
         sid = str((sess.get("data") or {}).get("id") or "").strip()
@@ -101,7 +108,7 @@ async def main():
             sid,
             "我叫张三，要起诉李四民间借贷纠纷。李四向我借款10万元，到期不还。"
             "我有借条（已上传）和转账记录、聊天记录。诉求：返还借款10万元并支付利息。",
-            attachments=[file_id],
+            attachments=uploaded_file_ids,
             max_loops=12,
         )
         print("first chat done", round(time.time() - t0, 2), "s", flush=True)
@@ -122,7 +129,11 @@ async def main():
             if card:
                 print("iter", i, "card", card.get("task_key"), card.get("review_type"), card.get("skill_id"), flush=True)
                 t = time.time()
-                await c.resume(sid, _auto_answer_card(card, file_id))
+                await c.resume(
+                    sid,
+                    _auto_answer_card(card, uploaded_file_ids),
+                    pending_card=card,
+                )
                 print("  resume", round(time.time() - t, 2), "s", flush=True)
             else:
                 print("iter", i, "no card -> continue", flush=True)

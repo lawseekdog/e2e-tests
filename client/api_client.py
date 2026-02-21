@@ -23,6 +23,109 @@ MATTERS = "/matter-service"
 KNOWLEDGE = "/knowledge-service"
 
 _WS_DEBUG = str(os.getenv("E2E_WS_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
+# Resume calls should include a compact pending_card payload by default.
+# Some remote deployments need the card id/context to apply answers instead of
+# treating them as plain chat text.
+# New resume contract is strict: top-level card_id + user_response; pending_card payload is optional legacy fallback.
+_SEND_PENDING_CARD = str(os.getenv("E2E_SEND_PENDING_CARD", "0") or "").strip().lower() in {"1", "true", "yes"}
+_PENDING_CARD_MAX_OPTIONS = int(os.getenv("E2E_PENDING_CARD_MAX_OPTIONS", "20") or 20)
+
+
+def _clip_text(value: Any, limit: int = 320) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if len(s) <= limit:
+        return s
+    return s[: limit - 1].rstrip() + "…"
+
+
+def _compact_question(question: dict[str, Any]) -> dict[str, Any]:
+    q = question if isinstance(question, dict) else {}
+    out: dict[str, Any] = {}
+    for key in ("field_key", "input_type", "question_type"):
+        v = str(q.get(key) or "").strip()
+        if v:
+            out[key] = v
+
+    for key in ("required", "recommended"):
+        if isinstance(q.get(key), bool):
+            out[key] = bool(q.get(key))
+
+    for key in ("question", "label", "placeholder", "default"):
+        v = q.get(key)
+        if v is None:
+            continue
+        if isinstance(v, (str, int, float, bool)):
+            s = _clip_text(v, 320)
+            if s:
+                out[key] = s
+        else:
+            out[key] = v
+
+    raw_options = q.get("options") if isinstance(q.get("options"), list) else []
+    if raw_options:
+        options: list[dict[str, Any]] = []
+        for row in raw_options[: max(1, _PENDING_CARD_MAX_OPTIONS)]:
+            if not isinstance(row, dict):
+                continue
+            item: dict[str, Any] = {}
+            value = row.get("value")
+            if isinstance(value, (str, int, float, bool)):
+                item["value"] = value
+            option_id = row.get("id")
+            if isinstance(option_id, (str, int, float, bool)):
+                item["id"] = option_id
+                # Many cards only provide {id,label} options. Keep value aligned so
+                # server-side card validators can still resolve selected answers.
+                if "value" not in item:
+                    item["value"] = option_id
+            label = _clip_text(row.get("label"), 200)
+            if label:
+                item["label"] = label
+            if isinstance(row.get("recommended"), bool):
+                item["recommended"] = bool(row.get("recommended"))
+            if item:
+                options.append(item)
+        if options:
+            out["options"] = options
+
+    return out
+
+
+def _compact_pending_card(card: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(card, dict):
+        return {}
+
+    out: dict[str, Any] = {}
+    card_id = str(card.get("card_id") or card.get("id") or "").strip()
+    if card_id:
+        out["card_id"] = card_id
+
+    for key in ("skill_id", "task_key", "review_type"):
+        v = str(card.get(key) or "").strip()
+        if v:
+            out[key] = v
+
+    for key in ("title", "message"):
+        v = _clip_text(card.get(key), 500)
+        if v:
+            out[key] = v
+
+    questions = card.get("questions") if isinstance(card.get("questions"), list) else []
+    if questions:
+        compacted = [_compact_question(q) for q in questions if isinstance(q, dict)]
+        compacted = [q for q in compacted if q]
+        if compacted:
+            out["questions"] = compacted
+
+    return out
+
+
+def _extract_pending_card_id(card: dict[str, Any] | None) -> str:
+    if not isinstance(card, dict):
+        return ""
+    return str(card.get("id") or card.get("card_id") or "").strip()
 
 
 class ApiClient:
@@ -30,6 +133,10 @@ class ApiClient:
 
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
+        # Some environments expose matter-service on a separate gateway path.
+        # When set (e.g. http://localhost:28001/api/v1), all /matter-service/*
+        # requests are routed there with the prefix stripped.
+        self.matter_base_url = str(os.getenv("E2E_MATTER_BASE_URL", "") or "").rstrip("/") or None
         self.token: str | None = None
         # Java services (behind nginx) use these headers as the primary auth/context.
         self.user_id: str | None = None
@@ -66,8 +173,18 @@ class ApiClient:
         return headers
 
     async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
-        url = f"{self.base_url}{path}"
+        route_path = str(path or "")
+        if self.matter_base_url and route_path.startswith(MATTERS):
+            stripped = route_path[len(MATTERS) :]
+            if not stripped.startswith("/"):
+                stripped = f"/{stripped}"
+            url = f"{self.matter_base_url}{stripped}"
+        else:
+            url = f"{self.base_url}{route_path}"
         kwargs.setdefault("headers", self.headers)
+        # Keep per-request timeout bounded so transient upstream stalls don't freeze E2E loops.
+        req_timeout_s = float(os.getenv("E2E_HTTP_REQUEST_TIMEOUT_S", "45") or 45)
+        kwargs.setdefault("timeout", max(5.0, req_timeout_s))
         client = self._client
         if client is None:
             raise RuntimeError(
@@ -94,8 +211,9 @@ class ApiClient:
                 await asyncio.sleep(min(4.0, 0.5 * attempt))
                 continue
 
-            if response.status_code in {502, 503, 504} and attempt < max_attempts:
-                # Gateway hiccups happen when services restart in local docker; retry GETs only.
+            if response.status_code in {500, 502, 503, 504} and attempt < max_attempts:
+                # Remote integration and local docker may return transient 5xx while services recover.
+                # Keep GET polling resilient for long-running workflow E2E scenarios.
                 await asyncio.sleep(min(4.0, 0.5 * attempt))
                 continue
 
@@ -104,7 +222,7 @@ class ApiClient:
             except httpx.HTTPStatusError as e:
                 # Do not retry on expected 4xx (e.g. probing legacy endpoints). Only retry transient 5xx.
                 code = e.response.status_code if e.response is not None else None
-                if code in {502, 503, 504} and attempt < max_attempts:
+                if code in {500, 502, 503, 504} and attempt < max_attempts:
                     last_exc = e
                     await asyncio.sleep(min(4.0, 0.5 * attempt))
                     continue
@@ -167,7 +285,21 @@ class ApiClient:
                     await ws.send(json.dumps(msg))
 
                     # Collect events until 'end'
+                    stream_started = asyncio.get_running_loop().time()
+                    max_stream_s = float(os.getenv("E2E_WS_STREAM_MAX_S", "180") or 180)
                     while True:
+                        if max_stream_s > 0 and (asyncio.get_running_loop().time() - stream_started) > max_stream_s:
+                            events.append(
+                                {
+                                    "event": "error",
+                                    "data": {
+                                        "error": "stream_timeout",
+                                        "partial": True,
+                                        "timeout_s": max_stream_s,
+                                    },
+                                }
+                            )
+                            break
                         try:
                             ws_event_timeout_s = float(os.getenv("E2E_WS_EVENT_TIMEOUT_S", "120") or 120)
                             raw = await asyncio.wait_for(ws.recv(), timeout=ws_event_timeout_s)
@@ -339,6 +471,7 @@ class ApiClient:
         service_type_id: str | None = None,
         matter_id: str | None = None,
         client_role: str | None = None,
+        cause_of_action_code: str | None = None,
     ) -> dict[str, Any]:
         """Create a consultation session (hard-cut: sessions are matter-backed).
 
@@ -348,17 +481,73 @@ class ApiClient:
         """
         mid = str(matter_id or "").strip() or None
         st = str(service_type_id or "").strip() or None
-        # client_role is now inferred from service_type_id in workbench-mode; keep it as a no-op hint.
-        _ = client_role
+        role = str(client_role or "").strip() or None
 
         payload: dict[str, Any] = {}
         t = str(title or "").strip()
         if t:
             payload["title"] = t
 
+        cause_code = str(cause_of_action_code or "").strip() or None
+        transient_codes = {404, 409, 429, 500, 502, 503, 504}
+
+        async def _verify_matter_exists(mid_to_check: str) -> bool:
+            retries = int(os.getenv("E2E_CREATE_SESSION_VERIFY_RETRIES", "10") or 10)
+            for attempt in range(1, max(1, retries) + 1):
+                try:
+                    await self.get_matter(mid_to_check)
+                    return True
+                except httpx.HTTPStatusError as e:
+                    code = e.response.status_code if e.response is not None else None
+                    if code in transient_codes and attempt < retries:
+                        await asyncio.sleep(min(2.0, 0.4 * attempt))
+                        continue
+                    return False
+                except httpx.RequestError:
+                    if attempt < retries:
+                        await asyncio.sleep(min(2.0, 0.4 * attempt))
+                        continue
+                    return False
+            return False
+
+        # For service_type-driven sessions, matter creation can be eventually consistent in remote envs.
+        # Verify the matter is queryable before we return the session to workflow tests.
         if mid is None and st:
-            created = await self.create_matter(service_type_id=st, title=t or None)
-            mid = str(((created.get("data") or {}) if isinstance(created, dict) else {}).get("id") or "").strip() or None
+            max_attempts = int(os.getenv("E2E_CREATE_SESSION_ATTEMPTS", "8") or 8)
+            last_session: dict[str, Any] | None = None
+            for attempt in range(1, max(1, max_attempts) + 1):
+                created = await self.create_matter(
+                    service_type_id=st,
+                    title=t or None,
+                    cause_of_action_code=cause_code,
+                    client_role=role,
+                )
+                mid_candidate = str(
+                    ((created.get("data") or {}) if isinstance(created, dict) else {}).get("id") or ""
+                ).strip()
+                if not mid_candidate:
+                    if attempt < max_attempts:
+                        await asyncio.sleep(min(2.0, 0.4 * attempt))
+                    continue
+
+                req_payload = dict(payload)
+                req_payload["matter_id"] = mid_candidate
+                session_resp = await self.post(f"{CONSULTATIONS}/consultations/sessions", req_payload)
+                last_session = session_resp
+
+                if await _verify_matter_exists(mid_candidate):
+                    return session_resp
+
+                if attempt < max_attempts:
+                    await asyncio.sleep(min(2.0, 0.4 * attempt))
+
+            # Never silently return an unverified matter-backed session.
+            # Downstream workflow tests rely on matter/workbench endpoints and would otherwise
+            # get stuck in long retry loops against a broken session.
+            raise RuntimeError(
+                f"create_session failed to verify matter after {max_attempts} attempts; "
+                f"service_type_id={st}, last_session={last_session}"
+            )
 
         if mid:
             payload["matter_id"] = mid
@@ -478,12 +667,22 @@ class ApiClient:
         user_response: dict[str, Any],
         pending_card: dict[str, Any] | None = None,
         max_loops: int | None = None,
+        card_id: str | None = None,
     ) -> dict[str, Any]:
+        resolved_card_id = str(card_id or "").strip() or _extract_pending_card_id(pending_card)
+        if not resolved_card_id:
+            raise ValueError("resume requires pending card id (card_id)")
+
         data: dict[str, Any] = {
             "user_response": user_response,
+            "card_id": resolved_card_id,
         }
-        if pending_card:
-            data["pending_card"] = pending_card
+        # Some environments close WebSocket frames with 1009 when resume payloads are too large.
+        # Keep pending_card opt-in and compact to the minimum fallback fields.
+        if pending_card and _SEND_PENDING_CARD:
+            compact_pending = _compact_pending_card(pending_card)
+            if compact_pending:
+                data["pending_card"] = compact_pending
         if max_loops is not None:
             data["max_loops"] = int(max_loops)
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
@@ -604,6 +803,7 @@ class ApiClient:
         file_ids: list[str] | None = None,
         cause_of_action_code: str | None = None,
         matter_category: str | None = None,
+        client_role: str | None = None,
     ) -> dict[str, Any]:
         st = str(service_type_id or "").strip()
         if not st:
@@ -617,6 +817,8 @@ class ApiClient:
             data["cause_of_action_code"] = str(cause_of_action_code).strip()
         if matter_category:
             data["matter_category"] = str(matter_category).strip()
+        if client_role:
+            data["client_role"] = str(client_role).strip()
         return await self.post(f"{MATTERS}/lawyer/matters", data)
 
     async def get_matter(self, matter_id: str) -> dict[str, Any]:
@@ -639,11 +841,13 @@ class ApiClient:
         return await self.get(f"{MATTERS}/matters/{matter_id}/workflow/profile")
 
     async def list_deliverables(
-        self, matter_id: str, output_key: str | None = None
+        self, matter_id: str, output_key: str | None = None, include_content: bool = False
     ) -> dict[str, Any]:
         params = {}
         if output_key:
             params["output_key"] = output_key
+        if include_content:
+            params["include_content"] = True
         return await self.get(
             f"{MATTERS}/lawyer/matters/{matter_id}/deliverables", params=params
         )

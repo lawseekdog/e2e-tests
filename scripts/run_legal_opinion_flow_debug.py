@@ -171,7 +171,7 @@ async def main():
                     flush=True,
                 )
                 t = time.time()
-                resp = await c.resume(sid, _auto_answer_card(card, uploaded_file_id))
+                resp = await c.resume(sid, _auto_answer_card(card, uploaded_file_id), pending_card=card)
                 print("  resume", round(time.time() - t, 2), "s", flush=True)
                 err = next((e for e in (resp.get("events") or []) if isinstance(e, dict) and e.get("event") == "error"), None)
                 if err:

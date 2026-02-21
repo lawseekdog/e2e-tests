@@ -189,7 +189,7 @@ async def main() -> None:
                     transcript_uploaded = True
 
                 t0 = time.time()
-                await c.resume(sid, _auto_answer_card(card, overrides, uploaded_file_ids))
+                await c.resume(sid, _auto_answer_card(card, overrides, uploaded_file_ids), pending_card=card)
                 print("  resume", round(time.time() - t0, 2), "s", flush=True)
 
                 # After confirming cause selection, upload dashcam video and nudge once.
@@ -222,4 +222,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-

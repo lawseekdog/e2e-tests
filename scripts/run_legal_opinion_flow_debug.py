@@ -55,6 +55,10 @@ CASE_BACKGROUND = (
 )
 
 
+def _safe_str(value: object) -> str:
+    return str(value or "").strip()
+
+
 def _pick_recommended_or_first(options):
     if not isinstance(options, list) or not options:
         return None
@@ -65,6 +69,74 @@ def _pick_recommended_or_first(options):
         if isinstance(opt, dict) and opt.get("value") is not None:
             return opt.get("value")
     return None
+
+
+def _pick_option_value(question: dict, *, preferred_values: tuple[str, ...] = ()) -> object:
+    options = question.get("options") if isinstance(question.get("options"), list) else []
+    if not options:
+        return None
+
+    for want in preferred_values:
+        target = _safe_str(want).lower()
+        if not target:
+            continue
+        for opt in options:
+            if not isinstance(opt, dict):
+                continue
+            value = _safe_str(opt.get("value") or opt.get("id")).lower()
+            if value == target:
+                return opt.get("value", opt.get("id"))
+
+    picked = _pick_recommended_or_first(options)
+    if picked is not None:
+        return picked
+
+    for opt in options:
+        if isinstance(opt, dict) and opt.get("id") is not None:
+            return opt.get("id")
+    return None
+
+
+def _default_text_answer(field_key: str) -> str:
+    fk = _safe_str(field_key)
+    if fk == "profile.facts":
+        return CASE_FACTS
+    if fk == "profile.background":
+        return CASE_BACKGROUND
+    if fk in {"profile.client_role", "client_role"}:
+        return "client"
+    if fk == "profile.service_type_id":
+        return "legal_opinion"
+    if fk == "data.workbench.goal":
+        return "legal_opinion"
+    return "已确认"
+
+
+def _normalize_required_fallback(*, field_key: str, input_type: str, uploaded_file_id: str | None) -> object:
+    it = _safe_str(input_type).lower()
+    if it in {"boolean", "bool"}:
+        return True
+    if it in {"file_ids", "file_id"}:
+        return [uploaded_file_id] if uploaded_file_id else []
+    return _default_text_answer(field_key)
+
+
+def _is_session_busy_response(resp: dict) -> bool:
+    events = resp.get("events") if isinstance(resp.get("events"), list) else []
+    for row in events:
+        if not isinstance(row, dict):
+            continue
+        evt = _safe_str(row.get("event")).lower()
+        data = row.get("data")
+        if evt == "error":
+            msg = _safe_str((data or {}).get("error") if isinstance(data, dict) else data)
+            if "当前会话正在处理中" in msg:
+                return True
+        if evt == "end":
+            output = _safe_str((data or {}).get("output") if isinstance(data, dict) else data)
+            if "当前会话正在处理中" in output:
+                return True
+    return False
 
 
 def _auto_answer_card(card: dict, uploaded_file_id: Optional[str]) -> dict:
@@ -90,24 +162,26 @@ def _auto_answer_card(card: dict, uploaded_file_id: Optional[str]) -> dict:
         if it in {"boolean", "bool"}:
             value = True
         elif it in {"select", "single_select", "single_choice"}:
-            value = _pick_recommended_or_first(q.get("options") if isinstance(q.get("options"), list) else [])
+            preferred: tuple[str, ...] = ()
+            if fk in {"profile.client_role", "client_role"}:
+                preferred = ("client", "plaintiff")
+            elif fk == "profile.service_type_id":
+                preferred = ("legal_opinion",)
+            elif fk == "data.workbench.goal":
+                preferred = ("legal_opinion",)
+            value = _pick_option_value(q, preferred_values=preferred)
         elif it in {"multi_select", "multiple_select"}:
-            first = _pick_recommended_or_first(q.get("options") if isinstance(q.get("options"), list) else [])
+            first = _pick_option_value(q)
             value = [first] if first is not None else []
         elif it in {"file_ids", "file_id"}:
             value = []
             if required and uploaded_file_id:
                 value = [uploaded_file_id]
         else:
-            if fk == "profile.facts":
-                value = CASE_FACTS
-            elif fk == "profile.background":
-                value = CASE_BACKGROUND
-            else:
-                value = "已确认"
+            value = _default_text_answer(fk)
 
         if required and (value is None or (isinstance(value, str) and not value.strip()) or (isinstance(value, list) and not value)):
-            value = True if it in {"boolean", "bool"} else "已确认"
+            value = _normalize_required_fallback(field_key=fk, input_type=it, uploaded_file_id=uploaded_file_id)
 
         answers.append({"field_key": fk, "value": value})
 
@@ -171,8 +245,16 @@ async def main():
                     flush=True,
                 )
                 t = time.time()
-                resp = await c.resume(sid, _auto_answer_card(card, uploaded_file_id), pending_card=card)
+                resp = await c.resume(
+                    sid,
+                    _auto_answer_card(card, uploaded_file_id),
+                    pending_card=card,
+                    card_id=_safe_str(card.get("id") or card.get("card_id")) or None,
+                )
                 print("  resume", round(time.time() - t, 2), "s", flush=True)
+                if _is_session_busy_response(resp):
+                    print("  resume busy, wait 2s", flush=True)
+                    await asyncio.sleep(2)
                 err = next((e for e in (resp.get("events") or []) if isinstance(e, dict) and e.get("event") == "error"), None)
                 if err:
                     data = err.get("data") if isinstance(err.get("data"), dict) else {"error": err.get("data")}
@@ -186,6 +268,9 @@ async def main():
                 t = time.time()
                 resp = await c.chat(sid, "继续", attachments=[], max_loops=12)
                 print("  chat", round(time.time() - t, 2), "s", flush=True)
+                if _is_session_busy_response(resp):
+                    print("  chat busy, wait 2s", flush=True)
+                    await asyncio.sleep(2)
                 err = next((e for e in (resp.get("events") or []) if isinstance(e, dict) and e.get("event") == "error"), None)
                 if err:
                     data = err.get("data") if isinstance(err.get("data"), dict) else {"error": err.get("data")}

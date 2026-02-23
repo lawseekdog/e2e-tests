@@ -34,6 +34,11 @@ RAW_USER_STATEMENT = """1.怀化市监理公司，给赵丽珍购买了工伤保
 
 CASE_FACTS = RAW_USER_STATEMENT
 CASE_BACKGROUND = RAW_USER_STATEMENT
+_BACKGROUND_ANSWER_COUNT = 0
+REFERENCE_QUERY = (
+    "非因工死亡 工伤认定 三工要件 劳动关系认定 社保参保事实 "
+    "监理公司 管理疏漏责任 项目部 安全保障义务 同席饮酒 侵权责任比例"
+)
 
 
 def _safe_str(value: object) -> str:
@@ -79,18 +84,37 @@ def _pick_option_value(question: dict, *, preferred_values: tuple[str, ...] = ()
 
 
 def _default_text_answer(field_key: str) -> str:
+    global _BACKGROUND_ANSWER_COUNT
     fk = _safe_str(field_key)
     if fk == "profile.facts":
         return CASE_FACTS
     if fk == "profile.background":
-        return CASE_BACKGROUND
+        _BACKGROUND_ANSWER_COUNT += 1
+        if _BACKGROUND_ANSWER_COUNT <= 1:
+            return CASE_BACKGROUND
+        # Keep the "暂无更多事实" cue at the very beginning to survive 400-char replay truncation.
+        return "目前暂无更多事实或附件，先按现有信息继续分析。\n" + CASE_BACKGROUND
     if fk in {"profile.client_role", "client_role"}:
         return "client"
     if fk == "profile.service_type_id":
         return "legal_opinion"
     if fk == "data.workbench.goal":
         return "legal_opinion"
+    if fk == "data.search.query":
+        return REFERENCE_QUERY
     return "已确认"
+
+
+def _pick_upload_source() -> Optional[Path]:
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        repo_root / "关于赵丽珍非因工死亡事件责任分析与应对策略法律意见书.docx",
+        repo_root / "output" / "zhaolizhen_case_statement.txt",
+    ]
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return path
+    return None
 
 
 def _normalize_required_fallback(*, field_key: str, input_type: str, uploaded_file_id: str | None) -> object:
@@ -156,7 +180,7 @@ def _auto_answer_card(card: dict, uploaded_file_id: Optional[str]) -> dict:
             value = [first] if first is not None else []
         elif it in {"file_ids", "file_id"}:
             value = []
-            if required and uploaded_file_id:
+            if uploaded_file_id and (required or fk == "attachment_file_ids"):
                 value = [uploaded_file_id]
         else:
             value = _default_text_answer(fk)
@@ -179,14 +203,15 @@ async def main():
     async with ApiClient(base_url) as c:
         await c.login(user, pwd)
 
-        # Upload a sample material so the kickoff card's required attachment_file_ids can be satisfied.
-        # This also exercises files-service parsing + matter-service prepare (ZIP expand/wait) path.
-        sample_doc = Path(__file__).resolve().parents[2] / "关于赵丽珍非因工死亡事件责任分析与应对策略法律意见书.docx"
+        # Upload sample material so required attachment_file_ids can be satisfied.
+        sample_doc = _pick_upload_source()
         uploaded_file_id: Optional[str] = None
-        if sample_doc.exists():
+        if sample_doc is not None:
             up = await c.upload_file(str(sample_doc), purpose="consultation")
             uploaded_file_id = str((up.get("data") or {}).get("id") or "").strip() or None
-            print("uploaded_file_id", uploaded_file_id, flush=True)
+            print("uploaded_file_id", uploaded_file_id, sample_doc.name, flush=True)
+        else:
+            print("uploaded_file_id", None, "no sample file found", flush=True)
 
         sess = await c.create_session(service_type_id="legal_opinion")
         sid = str((sess.get("data") or {}).get("id") or "").strip()

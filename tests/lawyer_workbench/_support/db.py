@@ -45,14 +45,30 @@ def _connect(target: PgTarget):
     import psycopg2
     import psycopg2.extras
 
-    return psycopg2.connect(
-        dbname=target.dbname,
-        user=target.user,
-        password=target.password,
-        host=target.host,
-        port=int(target.port),
-        cursor_factory=psycopg2.extras.RealDictCursor,
-    )
+    db_candidates = [str(target.dbname or "").strip()]
+    if db_candidates[0] and "-" in db_candidates[0]:
+        fallback = db_candidates[0].replace("-", "_")
+        if fallback and fallback not in db_candidates:
+            db_candidates.append(fallback)
+
+    last_err: Exception | None = None
+    for dbname in db_candidates:
+        try:
+            return psycopg2.connect(
+                dbname=dbname,
+                user=target.user,
+                password=target.password,
+                host=target.host,
+                port=int(target.port),
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            )
+        except psycopg2.OperationalError as e:
+            last_err = e
+            if "does not exist" in str(e).lower() and dbname != db_candidates[-1]:
+                continue
+            raise
+
+    raise last_err if last_err else RuntimeError("failed to connect postgres")
 
 
 def _execute_sync(target: PgTarget, sql: str, params: Iterable[Any] | None, *, fetch: str | None):

@@ -31,6 +31,25 @@ _SEND_PENDING_CARD = str(os.getenv("E2E_SEND_PENDING_CARD", "0") or "").strip().
 _PENDING_CARD_MAX_OPTIONS = int(os.getenv("E2E_PENDING_CARD_MAX_OPTIONS", "20") or 20)
 
 
+def _resolve_ws_proxy() -> str | bool | None:
+    """Resolve websocket proxy behavior from E2E_WS_PROXY env.
+
+    - empty / auto: use websockets default auto-discovery (proxy=True)
+    - off/none/false/0: disable proxy (proxy=None)
+    - otherwise: treat value as explicit proxy URL
+    """
+
+    raw = str(os.getenv("E2E_WS_PROXY", "") or "").strip()
+    if not raw:
+        return True
+    token = raw.lower()
+    if token in {"off", "none", "false", "0", "no"}:
+        return None
+    if token in {"auto", "true", "1", "yes"}:
+        return True
+    return raw
+
+
 def _clip_text(value: Any, limit: int = 320) -> str:
     s = str(value or "").strip()
     if not s:
@@ -257,6 +276,7 @@ class ApiClient:
             try:
                 async with websockets.connect(
                     ws_url,
+                    proxy=_resolve_ws_proxy(),
                     close_timeout=10,
                     open_timeout=open_timeout_s,
                     # Consultations-service can emit large JSON card payloads; disable client frame-size cap.
@@ -425,7 +445,7 @@ class ApiClient:
                             await asyncio.sleep(min(4.0, 0.5 * j))
                             continue
                         raise
-                    except Exception as e:
+                    except Exception:
                         if j >= max_attempts:
                             raise
                         await asyncio.sleep(min(4.0, 0.5 * j))

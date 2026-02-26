@@ -89,6 +89,14 @@ def _default_text_answer(field_key: str) -> str:
         return CASE_FACTS
     if fk == "profile.background":
         return CASE_BACKGROUND
+    if fk == "profile.summary":
+        return "原告张三主张被告李四民间借贷到期不还，请求返还本金10万元并支付逾期利息。"
+    if fk == "profile.plaintiff":
+        return "张三（出借人）"
+    if fk == "profile.defendant":
+        return "李四（借款人）"
+    if fk == "profile.claims":
+        return "1. 判令被告返还借款本金10万元；2. 判令被告支付逾期利息；3. 诉讼费由被告承担。"
     if fk == "profile.legal_issue":
         return "请求确认借款关系成立、支持本金及逾期利息。"
     if fk == "data.search.query":
@@ -210,6 +218,7 @@ async def main():
         print("first chat done", round(time.time() - t0, 2), "s", flush=True)
 
         matter_id = None
+        no_card_streak = 0
         for i in range(40):
             sess2 = await c.get_session(sid)
             matter_id = (sess2.get("data") or {}).get("matter_id")
@@ -223,6 +232,7 @@ async def main():
             pending = await c.get_pending_card(sid)
             card = pending.get("data")
             if card:
+                no_card_streak = 0
                 print("iter", i, "card", card.get("task_key"), card.get("review_type"), card.get("skill_id"), flush=True)
                 t = time.time()
                 resp = await c.resume(
@@ -236,13 +246,23 @@ async def main():
                     print("  resume busy, wait 2s", flush=True)
                     await asyncio.sleep(2)
             else:
-                print("iter", i, "no card -> continue", flush=True)
+                no_card_streak += 1
+                # No-card loops can mean either:
+                # 1) backend still busy (sending "继续" too often triggers busy errors), or
+                # 2) backend idle and waiting for a nudge.
+                # Use sparse nudges to avoid spamming while still allowing progression.
+                if no_card_streak % 3 != 0:
+                    print("iter", i, f"no card (streak={no_card_streak}) -> poll wait 4s", flush=True)
+                    await asyncio.sleep(4)
+                    continue
+
+                print("iter", i, f"no card (streak={no_card_streak}) -> chat continue", flush=True)
                 t = time.time()
                 resp = await c.chat(sid, "继续", attachments=[], max_loops=12)
                 print("  chat", round(time.time() - t, 2), "s", flush=True)
                 if _is_session_busy_response(resp):
-                    print("  chat busy, wait 2s", flush=True)
-                    await asyncio.sleep(2)
+                    print("  chat busy, wait 6s", flush=True)
+                    await asyncio.sleep(6)
 
         print("matter_id", matter_id, flush=True)
 

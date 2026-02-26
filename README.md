@@ -120,6 +120,22 @@ pytest tests/ --html=report.html --self-contained-html
 python scripts/smoke_test.py
 ```
 
+### 合同审查真实链路（WS + 真实 LLM）
+
+```bash
+python scripts/run_contract_review_real_flow.py --base-url http://<host>/api/v1
+```
+
+详情见：`scripts/README_CONTRACT_REVIEW_REAL_FLOW.md`
+
+### 智能模板文书起草真实链路（WS + 真实 LLM）
+
+```bash
+python scripts/run_template_draft_real_flow.py --base-url http://<host>/api/v1 --template-id <TEMPLATE_ID>
+```
+
+详情见：`scripts/README_TEMPLATE_DRAFT_REAL_FLOW.md`
+
 ## CI/CD 集成
 
 ```yaml

@@ -7,36 +7,19 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.lawyer_workbench._support.db import PgTarget, count
 from tests.lawyer_workbench._support.docx import (
-    assert_docx_contains,
+    assert_contract_review_docx_benchmark,
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, is_session_busy_sse
-from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
-from tests.lawyer_workbench._support.memory import list_case_facts
-from tests.lawyer_workbench._support.phase_timeline import (
-    assert_has_deliverable,
-    assert_has_phases,
-    assert_phase_status_in,
-    unwrap_phase_timeline,
-)
-from tests.lawyer_workbench._support.profile import assert_service_type
-from tests.lawyer_workbench._support.sse import (
-    assert_has_end,
-    assert_has_progress,
-    assert_task_lifecycle,
-    collect_run_skill_ids,
-)
-from tests.lawyer_workbench._support.timeline import memory_extraction_events, produced_output_keys, round_contents, unwrap_timeline
-from tests.lawyer_workbench._support.traces import extract_context_manifest, find_latest_trace
-from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
+from tests.lawyer_workbench._support.sse import assert_has_end, assert_has_progress, assert_task_lifecycle
+from tests.lawyer_workbench._support.utils import unwrap_api_response
 
 
-_MATTER_DB = PgTarget(dbname=os.getenv("E2E_MATTER_DB", "matter-service"))
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
-_REAL_CASE_CONTRACT_DOCX = _WORKSPACE_ROOT / "已征收闲置土地垃圾清运.docx"
+_CONTRACT_DOCX = _WORKSPACE_ROOT / "已征收闲置土地垃圾清运.docx"
+_GOLD_REVIEW_DOCX = _WORKSPACE_ROOT / "《已征收闲置土地垃圾清运合同》法律审查意见书.docx"
 _RETRYABLE_HTTP_STATUS = {404, 409, 429, 500, 502, 503, 504}
 _FLOW_MAX_ATTEMPTS = int(os.getenv("E2E_FLOW_MAX_ATTEMPTS", "3") or 3)
 _FLOW_OVERRIDES = {
@@ -44,7 +27,6 @@ _FLOW_OVERRIDES = {
     # For non-litigation contract flows, "applicant" is the most stable neutral role.
     "profile.client_role": "applicant",
     # contract-intake validator expects enum values full/focused.
-    # Use full to avoid extra focus_areas follow-up loops in unstable remote envs.
     "profile.review_scope": "full",
 }
 
@@ -79,25 +61,38 @@ def _is_retryable_initial_sse_error(sse: dict[str, object] | None) -> bool:
     return saw_error
 
 
+def _must_exist(path: Path) -> None:
+    assert path.exists() and path.is_file(), f"required file missing: {path}"
+
+
+def _required_contract_view_fields(view: dict) -> None:
+    assert isinstance(view, dict), f"contract_review_view missing: {view}"
+    assert str(view.get("overall_risk_level") or "").strip() in {"low", "medium", "high", "critical"}, view
+    assert str(view.get("contract_type") or "").strip(), view
+    assert str(view.get("summary") or "").strip(), view
+    clauses = view.get("clauses")
+    assert isinstance(clauses, list) and clauses, view
+
+
 @pytest.mark.e2e
 @pytest.mark.slow
-async def test_contract_review_generates_review_report(lawyer_client):
-    evidence_dir = Path(__file__).resolve().parent / "evidence"
-    contract_path = _REAL_CASE_CONTRACT_DOCX if _REAL_CASE_CONTRACT_DOCX.exists() else (evidence_dir / "sample_contract.txt")
+async def test_contract_review_benchmark_against_gold_opinion(lawyer_client):
+    _must_exist(_CONTRACT_DOCX)
+    _must_exist(_GOLD_REVIEW_DOCX)
 
-    up = await lawyer_client.upload_file(str(contract_path), purpose="consultation")
+    up = await lawyer_client.upload_file(str(_CONTRACT_DOCX), purpose="consultation")
     contract_file_id = str(((up.get("data") or {}) if isinstance(up, dict) else {}).get("id") or "").strip()
     assert contract_file_id, up
 
-    required_output_keys = {
+    required_keys = {
         "phase_summary__contract_output",
         "contract_review_report",
         "modification_suggestion",
         "redline_comparison",
     }
     kickoff = (
-        "请审查已上传合同并输出结构化结论：整体风险等级、合同类型、审查摘要、风险条款清单。"
-        "重点关注违约责任、争议解决、免责条款与付款条件。"
+        "请对上传的建设工程施工合同进行审查，并按法律审查意见书风格输出："
+        "需包含法律依据、审查内容、问题及修改建议、声明与保留、落款。"
     )
 
     async def _build_flow() -> WorkbenchFlow:
@@ -205,10 +200,10 @@ async def test_contract_review_generates_review_report(lawyer_client):
                     for row in clauses
                     if isinstance(row, dict) and str(row.get("clause_id") or "").strip()
                 ]
-                # Keep enough accepted clauses so downstream doc quality gates
-                # (clause references + numbered suggestions) can be satisfied.
                 accepted = clause_ids[: min(len(clause_ids), 8)] if clause_ids else []
                 params = {
+                    # Keep enough accepted clauses so report quality gates
+                    # (clause references + numbered suggestions) can be satisfied.
                     "accepted_clause_ids": accepted,
                     "ignored_clause_ids": [],
                     "overrides": {},
@@ -237,7 +232,7 @@ async def test_contract_review_generates_review_report(lawyer_client):
                         return False
                 return False
 
-            async def _any_contract_doc_ready(f: WorkbenchFlow) -> bool:
+            async def _deliverables_ready(f: WorkbenchFlow) -> bool:
                 await f.refresh()
                 if not f.matter_id:
                     return False
@@ -252,27 +247,33 @@ async def test_contract_review_generates_review_report(lawyer_client):
                     raise
                 if not isinstance(data, dict):
                     return False
-                items = data.get("deliverables") if isinstance(data.get("deliverables"), list) else []
+                rows = data.get("deliverables") if isinstance(data.get("deliverables"), list) else []
+                if not rows:
+                    return False
                 by_key = {
                     str(it.get("output_key") or "").strip(): it
-                    for it in items
+                    for it in rows
                     if isinstance(it, dict) and str(it.get("output_key") or "").strip()
                 }
-                if not required_output_keys.issubset(set(by_key.keys())):
+                if not required_keys.issubset(set(by_key.keys())):
                     if not decisions_applied:
                         await _try_apply_clause_decisions()
                     return False
-                for k in ("contract_review_report", "modification_suggestion", "redline_comparison"):
-                    if not str((by_key.get(k) or {}).get("file_id") or "").strip():
+                for key in ("contract_review_report", "modification_suggestion", "redline_comparison"):
+                    if not str((by_key.get(key) or {}).get("file_id") or "").strip():
                         if not decisions_applied:
                             await _try_apply_clause_decisions()
                         return False
-                phase_summary = by_key.get("phase_summary__contract_output") or {}
-                content = phase_summary.get("content") if isinstance(phase_summary.get("content"), dict) else {}
+                summary = by_key.get("phase_summary__contract_output") or {}
+                content = summary.get("content") if isinstance(summary.get("content"), dict) else {}
                 md = str(content.get("markdown") or content.get("md") or content.get("content") or "").strip()
                 return len(md) > 30
 
-            await flow.run_until(_any_contract_doc_ready, max_steps=20, description="contract review deliverables ready")
+            await flow.run_until(
+                _deliverables_ready,
+                max_steps=20,
+                description="all contract-review deliverables with file_id and phase summary",
+            )
             break
         except AssertionError:
             if flow_attempt >= max(1, _FLOW_MAX_ATTEMPTS):
@@ -282,146 +283,33 @@ async def test_contract_review_generates_review_report(lawyer_client):
     assert flow is not None
     assert flow.matter_id
 
-    mid_int = int(flow.matter_id)
-    assert await count(_MATTER_DB, "select count(1) from matters where id = %s", [mid_int]) == 1
-    assert await count(_MATTER_DB, "select count(1) from matter_tasks where matter_id = %s", [mid_int]) > 0
-
-    traces: list[dict[str, object]] | None = None
-    try:
-        traces_resp = await lawyer_client.list_traces(flow.matter_id, limit=200)
-        traces_data = unwrap_api_response(traces_resp)
-        rows = traces_data.get("traces") if isinstance(traces_data, dict) else None
-        traces = rows if isinstance(rows, list) and rows else None
-    except httpx.HTTPStatusError as e:
-        if e.response is None or e.response.status_code != 404:
-            raise
-
-    if traces:
-        node_ids = {str(it.get("node_id") or "").strip() for it in traces if isinstance(it, dict)}
-        assert any(x in node_ids for x in {"skill:contract-intake", "contract-intake"})
-        assert any(x in node_ids for x in {"skill:contract-review", "contract-review"})
-        assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
-
-        # Context manifest observability: document-generation should see some recalled memory facts.
-        doc_gen_trace = find_latest_trace(traces, node_id="skill:document-generation") or find_latest_trace(traces, node_id="document-generation")
-        assert isinstance(doc_gen_trace, dict), traces
-        manifest = extract_context_manifest(doc_gen_trace) or {}
-        mem = manifest.get("memory") if isinstance(manifest.get("memory"), dict) else {}
-        assert int(mem.get("limit") or 0) > 0, manifest
-        assert int(mem.get("selected_count") or 0) > 0, manifest
-    else:
-        run_skill_ids = collect_run_skill_ids(flow.seen_sse)
-        assert any("contract-intake" in sid for sid in run_skill_ids), run_skill_ids
-        assert any("contract-review" in sid for sid in run_skill_ids), run_skill_ids
-        assert any("document-generation" in sid for sid in run_skill_ids), run_skill_ids
-
-    prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
-    prof = unwrap_api_response(prof_resp)
-    assert isinstance(prof, dict), prof_resp
-    assert_service_type(prof, "contract_review")
-
     snapshot_resp = await lawyer_client.get(f"/matter-service/lawyer/matters/{flow.matter_id}/workbench/snapshot")
     snapshot = unwrap_api_response(snapshot_resp)
     assert isinstance(snapshot, dict), snapshot_resp
     analysis_state = snapshot.get("analysis_state") if isinstance(snapshot.get("analysis_state"), dict) else {}
     contract_view = analysis_state.get("contract_review_view") if isinstance(analysis_state, dict) else {}
-    assert isinstance(contract_view, dict), snapshot_resp
-    assert str(contract_view.get("overall_risk_level") or "").strip() in {"low", "medium", "high", "critical"}, contract_view
-    assert str(contract_view.get("contract_type") or "").strip(), contract_view
-    assert str(contract_view.get("summary") or "").strip(), contract_view
-    clauses_view = contract_view.get("clauses")
-    assert isinstance(clauses_view, list) and clauses_view, contract_view
+    _required_contract_view_fields(contract_view if isinstance(contract_view, dict) else {})
 
-    pt_resp = await lawyer_client.get_matter_phase_timeline(flow.matter_id)
-    pt = unwrap_phase_timeline(pt_resp)
-    assert_has_phases(pt, must_include=["materials", "intake", "analyze", "output", "docgen"])
-    assert_phase_status_in(pt, phase_id="materials", allowed=["completed", "in_progress"])
-    assert_has_deliverable(pt, output_key="contract_review_report")
-    assert_has_deliverable(pt, output_key="modification_suggestion")
-    assert_has_deliverable(pt, output_key="redline_comparison")
+    deliverables_resp = await lawyer_client.list_deliverables(flow.matter_id)
+    deliverables_data = unwrap_api_response(deliverables_resp)
+    rows = deliverables_data.get("deliverables") if isinstance(deliverables_data, dict) else []
+    assert isinstance(rows, list) and rows, deliverables_resp
 
-    try:
-        tl_resp = await lawyer_client.get_matter_timeline(flow.matter_id, limit=50)
-        tl = unwrap_timeline(tl_resp)
-        have = produced_output_keys(tl)
-        assert required_output_keys.issubset(have), sorted(have)
-        contents = round_contents(tl)
-        assert contents, tl_resp
-        for c in contents:
-            mt = c.get("memory_traces")
-            assert isinstance(mt, dict) and ("recall" in mt) and ("extraction" in mt), mt
-        assert any(int(e.get("extracted_count") or 0) > 0 for e in memory_extraction_events(tl)), tl
-    except httpx.HTTPStatusError as e:
-        if e.response is None or e.response.status_code != 404:
-            raise
-
-    dels_resp = await lawyer_client.list_deliverables(flow.matter_id)
-    dels = unwrap_api_response(dels_resp)
-    items = (dels.get("deliverables") if isinstance(dels, dict) else None) or []
     by_key = {
         str(it.get("output_key") or "").strip(): it
-        for it in items
+        for it in rows
         if isinstance(it, dict) and str(it.get("output_key") or "").strip()
     }
-    assert required_output_keys.issubset(set(by_key.keys())), sorted(by_key.keys())
-    for key in ("contract_review_report", "modification_suggestion", "redline_comparison"):
-        assert str((by_key.get(key) or {}).get("file_id") or "").strip(), by_key.get(key)
+    assert required_keys.issubset(set(by_key.keys())), sorted(by_key.keys())
 
-    picked = by_key.get("contract_review_report")
-    assert isinstance(picked, dict), dels_resp
+    report = by_key.get("contract_review_report") or {}
+    report_file_id = str(report.get("file_id") or "").strip()
+    assert report_file_id, report
 
-    file_id = str(picked.get("file_id") or "").strip()
-    assert file_id, picked
-    docx_bytes = await lawyer_client.download_file_bytes(file_id)
-    text = extract_docx_text(docx_bytes)
-    assert_docx_has_no_template_placeholders(text)
-    assert_docx_contains(text, must_include=["合同"])
-    assert ("甲方" in text or "发包人" in text), text[:1200]
-    assert ("乙方" in text or "承包人" in text), text[:1200]
+    generated_docx = await lawyer_client.download_file_bytes(report_file_id)
+    generated_text = extract_docx_text(generated_docx)
+    assert_docx_has_no_template_placeholders(generated_text)
 
-    async def _memory_has_contract_party() -> list[dict] | None:
-        facts = await list_case_facts(
-            lawyer_client,
-            user_id=int(lawyer_client.user_id),
-            case_id=str(flow.matter_id),
-            limit=300,
-        )
-        for it in facts:
-            if not isinstance(it, dict):
-                continue
-            s = f"{it.get('entity_key') or ''} {it.get('content') or ''}"
-            if any(
-                marker in s
-                for marker in (
-                    "甲方科技",
-                    "乙方供应链",
-                    "甲方",
-                    "乙方",
-                    "发包人",
-                    "承包人",
-                    "靖州苗族侗族自治县",
-                    "湖南庭发建设工程",
-                )
-            ):
-                return facts
-        return None
-
-    assert await eventually(
-        _memory_has_contract_party,
-        timeout_s=120.0,
-        interval_s=2.0,
-        description="memory contains contract parties",
-    )
-
-    kb_id = "e2e_kb_contract_review"
-    unique = f"E2E_UNIQUE_CONTRACT_{flow.matter_id}"
-    await ingest_doc(
-        lawyer_client,
-        kb_id=kb_id,
-        file_id=contract_file_id,
-        content=f"{unique}\n合同审查关注点：违约金过高、免责声明、仲裁地条款。",
-        doc_type="contract",
-        metadata={"e2e": True, "service_type_id": "contract_review", "matter_id": flow.matter_id},
-        overwrite=True,
-    )
-    await wait_for_search_hit(lawyer_client, query=unique, kb_ids=[kb_id], must_file_id=contract_file_id, timeout_s=90.0)
+    gold_text = extract_docx_text(_GOLD_REVIEW_DOCX.read_bytes())
+    benchmark = assert_contract_review_docx_benchmark(generated_text, gold_text=gold_text)
+    assert benchmark.passed

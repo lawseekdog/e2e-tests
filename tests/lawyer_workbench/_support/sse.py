@@ -77,6 +77,20 @@ def task_ends(sse: dict[str, Any]) -> list[dict[str, Any]]:
     return events_of_type(sse, "task_end")
 
 
+def collect_run_skill_ids(streams: Iterable[dict[str, Any]]) -> set[str]:
+    ids: set[str] = set()
+    for sse in streams:
+        starts = task_starts(sse if isinstance(sse, dict) else {})
+        for row in starts:
+            node = str((row or {}).get("node") or "").strip()
+            if node != "run_skill":
+                continue
+            sid = str((row or {}).get("skill_id") or "").strip()
+            if sid:
+                ids.add(sid)
+    return ids
+
+
 def validate_task_events(sse: dict[str, Any]) -> None:
     """Validate task_start/task_end structure when present."""
     starts = task_starts(sse)

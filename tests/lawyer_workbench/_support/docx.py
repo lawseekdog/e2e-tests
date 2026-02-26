@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from io import BytesIO
+import re
 import zipfile
 from typing import Iterable
 
@@ -107,3 +109,150 @@ def assert_docx_has_no_template_placeholders(text: str) -> None:
     if bad:
         sample = t[:2000]
         raise AssertionError(f"DOCX contains unresolved template placeholders: {bad}. Extracted sample:\n{sample}")
+
+
+_LAW_CITE_RE = re.compile(r"《[^》]{2,40}》第[一二三四五六七八九十百千万0-9]{1,8}条")
+_CLAUSE_REF_RE = re.compile(
+    r"第\s*[一二三四五六七八九十百千万0-9]{1,6}(?:\.[0-9]{1,3})?\s*(?:条|款)|[0-9]{1,3}\.[0-9]{1,3}\s*款"
+)
+_NUMBERED_ITEM_RE = re.compile(
+    r"(?m)^\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3}|[（(]?[一二三四五六七八九十0-9]{1,3}[)）]?)\s*[、.．]"
+)
+
+_SECTION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "title": (
+        re.compile(r"合同审查意见书"),
+        re.compile(r"合同审查报告"),
+    ),
+    "legal_basis": (
+        re.compile(r"法律依据"),
+        re.compile(r"主要法律依据"),
+    ),
+    "review_content": (
+        re.compile(r"合同审查的主要内容"),
+        re.compile(r"审查内容"),
+        # Template variants: some use "审查范围与前提/事实基础" instead of the literal "审查内容".
+        re.compile(r"审查范围"),
+        re.compile(r"事实基础"),
+    ),
+    "issues_and_suggestions": (
+        re.compile(r"主要问题及修改建议"),
+        re.compile(r"问题及建议"),
+        re.compile(r"修改建议"),
+    ),
+    "declaration": (
+        re.compile(r"声明与保留"),
+        re.compile(r"声明"),
+    ),
+    "signature": (
+        re.compile(r"律师事务所"),
+        re.compile(r"(?:19|20)\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日"),
+    ),
+}
+
+_PLACEHOLDER_TOKENS = ("{{", "TODO", "PLACEHOLDER")
+
+
+@dataclass(frozen=True)
+class ContractReviewDocxBenchmarkResult:
+    score: int
+    section_hits: dict[str, bool]
+    legal_citation_count: int
+    clause_reference_count: int
+    numbered_suggestion_count: int
+    has_placeholder: bool
+    text_length: int
+    gold_text_length: int
+    length_ratio: float
+    hard_gate_failures: list[str]
+
+    @property
+    def passed(self) -> bool:
+        return (not self.hard_gate_failures) and self.score >= 85
+
+
+def _section_hit(text: str, patterns: tuple[re.Pattern[str], ...], *, require_all: bool = False) -> bool:
+    if not text:
+        return False
+    if require_all:
+        return all(p.search(text) for p in patterns)
+    return any(p.search(text) for p in patterns)
+
+
+def _score_ratio(actual: int, expected: int) -> tuple[float, float]:
+    if expected <= 0:
+        return 1.0, 8.0
+    ratio = float(actual) / float(expected)
+    if 0.7 <= ratio <= 1.5:
+        return ratio, 8.0
+    penalty = min(8.0, abs(ratio - 1.0) * 10.0)
+    return ratio, max(0.0, 8.0 - penalty)
+
+
+def score_contract_review_docx_benchmark(text: str, *, gold_text: str) -> ContractReviewDocxBenchmarkResult:
+    content = str(text or "")
+    gold = str(gold_text or "")
+
+    section_hits: dict[str, bool] = {}
+    for name, pats in _SECTION_PATTERNS.items():
+        section_hits[name] = _section_hit(content, pats, require_all=(name == "signature"))
+    section_score = sum(8.0 for ok in section_hits.values() if ok)  # 6 * 8 = 48
+
+    legal_cite_count = len(_LAW_CITE_RE.findall(content))
+    legal_cite_score = min(12.0, (legal_cite_count / 3.0) * 12.0)
+
+    clause_ref_count = len(_CLAUSE_REF_RE.findall(content))
+    clause_ref_score = min(12.0, (clause_ref_count / 5.0) * 12.0)
+
+    numbered_item_count = len(_NUMBERED_ITEM_RE.findall(content))
+    numbered_item_score = min(12.0, (numbered_item_count / 8.0) * 12.0)
+
+    has_placeholder = any(tok in content for tok in _PLACEHOLDER_TOKENS)
+    placeholder_score = 0.0 if has_placeholder else 8.0
+
+    ratio, ratio_score = _score_ratio(len(content), len(gold))
+
+    raw_score = section_score + legal_cite_score + clause_ref_score + numbered_item_score + placeholder_score + ratio_score
+    total_score = int(round(raw_score))
+
+    hard_gate_failures: list[str] = []
+    if not all(section_hits.values()):
+        missing = [k for k, ok in section_hits.items() if not ok]
+        hard_gate_failures.append(f"章节命中不足：缺少 {', '.join(missing)}")
+    if legal_cite_count < 3:
+        hard_gate_failures.append(f"法条引用不足：{legal_cite_count}（要求 >= 3）")
+    if clause_ref_count < 5:
+        hard_gate_failures.append(f"条款定位引用不足：{clause_ref_count}（要求 >= 5）")
+    if numbered_item_count < 8:
+        hard_gate_failures.append(f"编号建议条目不足：{numbered_item_count}（要求 >= 8）")
+    if has_placeholder:
+        hard_gate_failures.append("存在模板占位符（{{ / TODO / PLACEHOLDER）")
+    if not (0.7 <= ratio <= 1.5):
+        hard_gate_failures.append(f"文本长度比不达标：{ratio:.3f}（要求 0.7~1.5）")
+    if total_score < 85:
+        hard_gate_failures.append(f"总分不足：{total_score}（要求 >= 85）")
+
+    return ContractReviewDocxBenchmarkResult(
+        score=total_score,
+        section_hits=section_hits,
+        legal_citation_count=legal_cite_count,
+        clause_reference_count=clause_ref_count,
+        numbered_suggestion_count=numbered_item_count,
+        has_placeholder=has_placeholder,
+        text_length=len(content),
+        gold_text_length=len(gold),
+        length_ratio=ratio,
+        hard_gate_failures=hard_gate_failures,
+    )
+
+
+def assert_contract_review_docx_benchmark(text: str, *, gold_text: str) -> ContractReviewDocxBenchmarkResult:
+    result = score_contract_review_docx_benchmark(text, gold_text=gold_text)
+    if result.hard_gate_failures:
+        details = (
+            f"score={result.score}, ratio={result.length_ratio:.3f}, "
+            f"law_cites={result.legal_citation_count}, clause_refs={result.clause_reference_count}, "
+            f"numbered={result.numbered_suggestion_count}"
+        )
+        raise AssertionError("合同审查文书质量基线未达标: " + "; ".join(result.hard_gate_failures) + f". details: {details}")
+    return result

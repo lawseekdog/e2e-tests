@@ -144,6 +144,28 @@ def _is_session_busy_response(resp: dict) -> bool:
     return False
 
 
+def _extract_error_payload(resp: dict) -> dict:
+    err = next((e for e in (resp.get("events") or []) if isinstance(e, dict) and e.get("event") == "error"), None)
+    if not err:
+        return {}
+    data = err.get("data")
+    if isinstance(data, dict):
+        return data
+    return {"error": data}
+
+
+def _is_partial_or_busy_error(err_data: dict) -> bool:
+    if not isinstance(err_data, dict):
+        return False
+    if err_data.get("partial") is True:
+        return True
+    msg = _safe_str(err_data.get("message") or err_data.get("error"))
+    reason = _safe_str(err_data.get("reason")).lower()
+    if "当前会话正在处理中" in msg:
+        return True
+    return reason in {"session_busy", "stream_timeout"}
+
+
 def _auto_answer_card(card: dict, uploaded_file_id: Optional[str]) -> dict:
     """Auto-construct resume.user_response from card.questions.
 
@@ -217,8 +239,20 @@ async def main():
         sid = str((sess.get("data") or {}).get("id") or "").strip()
         print("session", sid, flush=True)
 
-        # Session creation already triggers a server-side kickoff in consultations-service.
-        # Poll pending_card briefly so we don't accidentally double-trigger "开始办理".
+        # Kick off the workflow with the exact user statement; create_session alone may stay idle.
+        t_start = time.time()
+        first_chat = await c.chat(
+            sid,
+            RAW_USER_STATEMENT,
+            attachments=[uploaded_file_id] if uploaded_file_id else [],
+            max_loops=12,
+        )
+        print("first chat done", round(time.time() - t_start, 2), "s", flush=True)
+        first_chat_error = _extract_error_payload(first_chat)
+        if first_chat_error:
+            print("first chat error", first_chat_error, flush=True)
+
+        # Poll pending_card briefly to enter card-driven loop.
         t0 = time.time()
         for _ in range(30):
             pending0 = await c.get_pending_card(sid)
@@ -228,7 +262,7 @@ async def main():
         print("kickoff wait done", round(time.time() - t0, 2), "s", flush=True)
 
         matter_id = None
-        for i in range(60):
+        for i in range(180):
             sess2 = await c.get_session(sid)
             matter_id = (sess2.get("data") or {}).get("matter_id")
             if matter_id:
@@ -261,28 +295,20 @@ async def main():
                 if _is_session_busy_response(resp):
                     print("  resume busy, wait 2s", flush=True)
                     await asyncio.sleep(2)
-                err = next((e for e in (resp.get("events") or []) if isinstance(e, dict) and e.get("event") == "error"), None)
-                if err:
-                    data = err.get("data") if isinstance(err.get("data"), dict) else {"error": err.get("data")}
-                    print("  resume error", data, flush=True)
-                    # Partial stream teardown (proxy/connection) is non-fatal; continue by polling state.
-                    if data.get("partial") is not True:
-                        # Stop early: non-partial errors are usually deterministic (validation/config).
-                        break
+                err_data = _extract_error_payload(resp)
+                if err_data:
+                    print("  resume error", err_data, flush=True)
+                    # Partial stream teardown / session busy is non-fatal; just keep polling.
+                    if _is_partial_or_busy_error(err_data):
+                        await asyncio.sleep(2)
+                        continue
+                    # Stop early: non-partial errors are usually deterministic (validation/config).
+                    break
             else:
-                print("iter", i, "no card -> continue", flush=True)
-                t = time.time()
-                resp = await c.chat(sid, "继续", attachments=[], max_loops=12)
-                print("  chat", round(time.time() - t, 2), "s", flush=True)
-                if _is_session_busy_response(resp):
-                    print("  chat busy, wait 2s", flush=True)
-                    await asyncio.sleep(2)
-                err = next((e for e in (resp.get("events") or []) if isinstance(e, dict) and e.get("event") == "error"), None)
-                if err:
-                    data = err.get("data") if isinstance(err.get("data"), dict) else {"error": err.get("data")}
-                    print("  chat error", data, flush=True)
-                    if data.get("partial") is not True:
-                        break
+                # Do not spam chat("继续") while backend is still running.
+                # Repeated nudges frequently trigger session_busy and destabilize debug runs.
+                print("iter", i, "no card -> polling", flush=True)
+                await asyncio.sleep(2)
 
         print("matter_id", matter_id, flush=True)
 

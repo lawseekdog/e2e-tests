@@ -45,7 +45,40 @@ DEFAULT_KICKOFF = (
 FLOW_OVERRIDES = {
     "profile.client_role": "applicant",
     "profile.review_scope": "full",
+    "review_scope": "full",
 }
+
+
+def _read_timeout_env(name: str, default: float, *, min_value: float = 1.0) -> float:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(default)
+    if value < min_value:
+        return float(default)
+    return value
+
+
+def _read_int_env(name: str, default: int, *, min_value: int = 1) -> int:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        value = int(raw)
+    except ValueError:
+        return int(default)
+    if value < min_value:
+        return int(default)
+    return value
+
+
+_WORKFLOW_ACTION_TIMEOUT_S = _read_timeout_env("E2E_WORKFLOW_ACTION_TIMEOUT_S", 1800.0)
+_RESUME_STEP_TIMEOUT_S = _read_timeout_env("E2E_RESUME_STEP_TIMEOUT_S", 1800.0)
+_CONTINUE_STEP_TIMEOUT_S = _read_timeout_env("E2E_CONTINUE_STEP_TIMEOUT_S", 180.0)
+_CLAUSE_RESUME_MAX_LOOPS = _read_int_env("E2E_CONTRACT_REVIEW_CLAUSE_RESUME_MAX_LOOPS", 24)
 
 
 def _safe_str(value: Any) -> str:
@@ -146,29 +179,29 @@ async def _try_apply_clause_decisions(
     client: ApiClient,
     flow: WorkbenchFlow,
     matter_id: str,
+    clause_ids: list[str] | None = None,
 ) -> bool:
-    snapshot = await _fetch_snapshot(client, matter_id)
-    view = _extract_contract_view(snapshot)
-    clauses = view.get("clauses") if isinstance(view.get("clauses"), list) else []
-    clause_ids = [
-        _safe_str(row.get("clause_id"))
-        for row in clauses
-        if isinstance(row, dict) and _safe_str(row.get("clause_id"))
-    ]
+    if clause_ids is None:
+        snapshot = await _fetch_snapshot(client, matter_id)
+        view = _extract_contract_view(snapshot)
+        clause_ids = _extract_clause_ids(view)
     accepted = clause_ids[: min(len(clause_ids), 8)]
     if not accepted:
         return False
 
-    sse = await client.workflow_action(
-        flow.session_id,
-        workflow_action="contract_review_apply_decisions",
-        workflow_action_params={
-            "accepted_clause_ids": accepted,
-            "ignored_clause_ids": [],
-            "overrides": {},
-            "regenerate_documents": True,
-        },
-        max_loops=36,
+    sse = await asyncio.wait_for(
+        client.workflow_action(
+            flow.session_id,
+            workflow_action="contract_review_apply_decisions",
+            workflow_action_params={
+                "accepted_clause_ids": accepted,
+                "ignored_clause_ids": [],
+                "overrides": {},
+                "regenerate_documents": True,
+            },
+            max_loops=36,
+        ),
+        timeout=_WORKFLOW_ACTION_TIMEOUT_S,
     )
     if isinstance(sse, dict):
         flow.last_sse = sse
@@ -176,6 +209,62 @@ async def _try_apply_clause_decisions(
     if is_session_busy_sse(sse if isinstance(sse, dict) else {}):
         return False
     return True
+
+
+def _extract_clause_ids(contract_view: dict[str, Any] | None) -> list[str]:
+    view = contract_view if isinstance(contract_view, dict) else {}
+    clauses = view.get("clauses") if isinstance(view.get("clauses"), list) else []
+    return [
+        _safe_str(row.get("clause_id"))
+        for row in clauses
+        if isinstance(row, dict) and _safe_str(row.get("clause_id"))
+    ]
+
+
+async def _wait_for_clause_ids(
+    *,
+    client: ApiClient,
+    flow: WorkbenchFlow,
+    matter_id: str,
+    max_polls: int = 360,
+    poll_interval_s: float = 2.0,
+    drive_every: int = 6,
+    resume_max_loops: int = _CLAUSE_RESUME_MAX_LOOPS,
+) -> list[str]:
+    attempts = max(1, int(max_polls))
+    interval = max(0.2, float(poll_interval_s))
+    drive_interval = max(1, int(drive_every))
+    for idx in range(attempts):
+        snapshot = await _fetch_snapshot(client, matter_id)
+        clause_ids = _extract_clause_ids(_extract_contract_view(snapshot))
+        if clause_ids:
+            return clause_ids
+
+        # Prefer explicit card resume over blind nudges.
+        card = await flow.get_pending_card()
+        if isinstance(card, dict) and card:
+            skill_id = _safe_str(card.get("skill_id"))
+            task_key = _safe_str(card.get("task_key"))
+            print(
+                f"[clause_wait] resume_card skill={skill_id or '-'} task={task_key or '-'} "
+                f"max_loops={max(1, int(resume_max_loops))}"
+            )
+            await asyncio.wait_for(
+                flow.resume_card(card, max_loops=max(1, int(resume_max_loops))),
+                timeout=_RESUME_STEP_TIMEOUT_S,
+            )
+        elif ((idx + 1) % drive_interval) == 0:
+            # Some remote runs end the first stream with partial progress only.
+            # Trigger a short "continue" round to move the workflow cursor.
+            sse = await asyncio.wait_for(
+                client.chat(flow.session_id, "继续", attachments=flow.uploaded_file_ids, max_loops=2),
+                timeout=_CONTINUE_STEP_TIMEOUT_S,
+            )
+            if isinstance(sse, dict):
+                flow.last_sse = sse
+                flow.seen_sse.append(sse)
+        await asyncio.sleep(interval)
+    raise AssertionError(f"Failed to extract contract clauses after {attempts} polls (matter_id={matter_id})")
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -247,19 +336,71 @@ async def run(args: argparse.Namespace) -> int:
                     return False
             return True
 
+        async def _wait_deliverables_ready_passive(*, max_polls: int, poll_interval_s: float = 2.0) -> None:
+            polls = max(1, int(max_polls))
+            interval = max(0.2, float(poll_interval_s))
+            for _ in range(polls):
+                if await _deliverables_ready(flow):
+                    return
+                await asyncio.sleep(interval)
+            raise AssertionError(
+                "Failed to reach contract review deliverables ready "
+                f"after {polls} passive polls (session_id={flow.session_id}, matter_id={flow.matter_id})"
+            )
+
         if args.apply_decisions:
             await flow.refresh()
             mid = _safe_str(flow.matter_id)
-            if mid:
-                applied = await _try_apply_clause_decisions(client=client, flow=flow, matter_id=mid)
-                print(f"[workflow_action] contract_review_apply_decisions applied={applied}")
+            if not mid:
+                raise RuntimeError("matter_id missing before contract_review_apply_decisions")
+            clause_ids = await _wait_for_clause_ids(
+                client=client,
+                flow=flow,
+                matter_id=mid,
+                max_polls=max(60, int(args.max_steps) * 3),
+                poll_interval_s=2.0,
+            )
+            applied = False
+            for attempt in range(1, 7):
+                applied = await _try_apply_clause_decisions(
+                    client=client,
+                    flow=flow,
+                    matter_id=mid,
+                    clause_ids=clause_ids,
+                )
+                print(f"[workflow_action] contract_review_apply_decisions attempt={attempt} applied={applied}")
+                if applied:
+                    break
+                await asyncio.sleep(min(8.0, 1.5 * attempt))
+            if not applied:
+                post_action_snapshot = await _fetch_snapshot(client, mid) or {}
+                post_action_analysis = (
+                    post_action_snapshot.get("analysis_state")
+                    if isinstance(post_action_snapshot, dict)
+                    and isinstance(post_action_snapshot.get("analysis_state"), dict)
+                    else {}
+                )
+                current_node = _safe_str(post_action_analysis.get("current_node")).lower()
+                if current_node in {"contract_output", "doc_draft", "document_generation", "documents_finalize"}:
+                    print(
+                        "[workflow_action] contract_review_apply_decisions skipped "
+                        f"(already running downstream node={current_node})"
+                    )
+                else:
+                    raise RuntimeError("contract_review_apply_decisions failed after clauses became available")
 
         try:
-            await flow.run_until(
-                _deliverables_ready,
-                max_steps=max(1, int(args.max_steps)),
-                description="contract review deliverables ready",
-            )
+            if args.apply_decisions:
+                await _wait_deliverables_ready_passive(
+                    max_polls=max(1, int(args.max_steps) * 3),
+                    poll_interval_s=2.0,
+                )
+            else:
+                await flow.run_until(
+                    _deliverables_ready,
+                    max_steps=max(1, int(args.max_steps)),
+                    description="contract review deliverables ready",
+                )
         except Exception as e:
             await flow.refresh()
             fail_matter_id = _safe_str(flow.matter_id) or matter_id

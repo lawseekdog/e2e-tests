@@ -1,4 +1,10 @@
-from tests.lawyer_workbench._support.flow_runner import auto_answer_card, is_session_busy_sse
+import pytest
+
+from tests.lawyer_workbench._support.flow_runner import (
+    WorkbenchFlow,
+    auto_answer_card,
+    is_session_busy_sse,
+)
 
 
 def test_auto_answer_card_ignores_inferred_fields_not_in_questions():
@@ -51,6 +57,24 @@ def test_auto_answer_card_keeps_evidence_gap_stop_ask_false_by_default():
     user_response = auto_answer_card(card, overrides={}, uploaded_file_ids=[])
     answers = user_response.get("answers") or []
     assert answers and answers[0]["field_key"] == "data.evidence.evidence_gap_stop_ask"
+    assert answers[0]["value"] is False
+
+
+def test_auto_answer_card_keeps_regenerate_documents_false_by_default():
+    card = {
+        "skill_id": "documents-stale",
+        "questions": [
+            {
+                "field_key": "data.work_product.regenerate_documents",
+                "input_type": "boolean",
+                "required": True,
+            }
+        ],
+    }
+
+    user_response = auto_answer_card(card, overrides={}, uploaded_file_ids=[])
+    answers = user_response.get("answers") or []
+    assert answers and answers[0]["field_key"] == "data.work_product.regenerate_documents"
     assert answers[0]["value"] is False
 
 
@@ -209,6 +233,31 @@ def test_is_session_busy_sse_detects_busy_error_message():
     assert is_session_busy_sse(sse) is True
 
 
+def test_is_session_busy_sse_detects_background_processing_hint():
+    sse = {
+        "events": [
+            {
+                "event": "error",
+                "data": {"message": "后台继续处理中，请刷新查看待办。", "partial": True},
+            }
+        ],
+        "output": "后台继续处理中，请刷新查看待办。",
+    }
+    assert is_session_busy_sse(sse) is True
+
+
+def test_is_session_busy_sse_detects_partial_stream_timeout():
+    sse = {
+        "events": [
+            {
+                "event": "error",
+                "data": {"error": "stream_timeout", "partial": True, "timeout_s": 180},
+            }
+        ]
+    }
+    assert is_session_busy_sse(sse) is True
+
+
 def test_auto_answer_card_select_prefers_positive_confirmation_option():
     card = {
         "skill_id": "contract-review",
@@ -229,3 +278,149 @@ def test_auto_answer_card_select_prefers_positive_confirmation_option():
     answers = user_response.get("answers") or []
     by_key = {row["field_key"]: row["value"] for row in answers}
     assert by_key.get("data.workbench.contract_review_confirm") == "continue"
+
+
+def test_auto_answer_card_falls_back_to_supported_document_type():
+    card = {
+        "skill_id": "document-drafting-intake",
+        "questions": [
+            {
+                "field_key": "profile.document_type",
+                "input_type": "text",
+                "required": True,
+            }
+        ],
+    }
+    user_response = auto_answer_card(card, overrides={}, uploaded_file_ids=[])
+    answers = user_response.get("answers") or []
+    by_key = {row["field_key"]: row["value"] for row in answers}
+    assert by_key.get("profile.document_type") == "民事起诉状"
+
+
+def test_auto_answer_card_prefers_court_name_for_court_question_even_when_field_key_reused():
+    card = {
+        "skill_id": "document-drafting-intake",
+        "questions": [
+            {
+                "field_key": "profile.background",
+                "question": "您希望这份起诉状用于哪个法院？请提供具体法院名称。",
+                "input_type": "textarea",
+                "required": True,
+            }
+        ],
+    }
+    user_response = auto_answer_card(
+        card,
+        overrides={"profile.background": "这是一段很长的案情背景，不能直接当作法院名称。"},
+        uploaded_file_ids=[],
+    )
+    answers = user_response.get("answers") or []
+    by_key = {row["field_key"]: row["value"] for row in answers}
+    assert by_key.get("profile.background") == "北京市海淀区人民法院"
+
+
+def test_auto_answer_card_completion_question_maps_to_positive_select_option():
+    card = {
+        "skill_id": "materials-intake",
+        "questions": [
+            {
+                "field_key": "data.materials.upload_completed",
+                "question": "是否已完成所有材料上传？如已完成请勾选。",
+                "input_type": "select",
+                "required": True,
+                "options": [
+                    {"value": "pending", "label": "否，继续上传"},
+                    {"value": "done", "label": "是，已完成上传"},
+                ],
+            }
+        ],
+    }
+    user_response = auto_answer_card(card, overrides={}, uploaded_file_ids=["f1"])
+    answers = user_response.get("answers") or []
+    by_key = {row["field_key"]: row["value"] for row in answers}
+    assert by_key.get("data.materials.upload_completed") == "done"
+
+
+def test_auto_answer_card_optional_file_ids_never_uses_text_value():
+    card = {
+        "skill_id": "file-insight",
+        "questions": [
+            {
+                "field_key": "attachment_file_ids",
+                "question": "请上传补充材料或说明无法解析的材料内容（如关键截图/文字说明等）",
+                "input_type": "file_ids",
+                "required": False,
+            },
+            {
+                "field_key": "data.files.preprocess_stop_ask",
+                "question": "是否已完成所有材料上传？如已完成，请勾选此项，我们将基于现有材料继续分析",
+                "input_type": "boolean",
+                "required": True,
+            },
+        ],
+    }
+
+    user_response = auto_answer_card(card, overrides={}, uploaded_file_ids=["f1", "f2"])
+    answers = user_response.get("answers") or []
+    by_key = {row["field_key"]: row["value"] for row in answers}
+
+    attachment_value = by_key.get("attachment_file_ids")
+    assert attachment_value is None or isinstance(attachment_value, list)
+    assert by_key.get("data.files.preprocess_stop_ask") is True
+
+
+@pytest.mark.asyncio
+async def test_resume_card_allows_busy_partial_stream_without_user_message():
+    class _FakeClient:
+        async def resume(self, session_id, user_response, pending_card, max_loops):  # noqa: ANN001
+            _ = (session_id, user_response, pending_card, max_loops)
+            return {
+                "events": [
+                    {
+                        "event": "error",
+                        "data": {"error": "stream_timeout", "partial": True, "timeout_s": 30},
+                    }
+                ],
+                "output": "",
+            }
+
+    flow = WorkbenchFlow(client=_FakeClient(), session_id="s-test")
+    card = {
+        "skill_id": "documents-stale",
+        "questions": [
+            {
+                "field_key": "data.work_product.regenerate_documents",
+                "input_type": "boolean",
+                "required": True,
+            }
+        ],
+    }
+
+    sse = await flow.resume_card(card)
+    assert is_session_busy_sse(sse) is True
+
+
+@pytest.mark.asyncio
+async def test_resume_card_honors_explicit_max_loops_override():
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        async def resume(self, session_id, user_response, pending_card, max_loops):  # noqa: ANN001
+            _ = (session_id, user_response, pending_card)
+            captured["max_loops"] = max_loops
+            return {"events": [{"event": "user_message", "data": {"role": "user", "content": "ok"}}], "output": ""}
+
+    flow = WorkbenchFlow(client=_FakeClient(), session_id="s-test")
+    card = {
+        "skill_id": "documents-stale",
+        "questions": [
+            {
+                "field_key": "data.work_product.regenerate_documents",
+                "input_type": "boolean",
+                "required": True,
+            }
+        ],
+    }
+
+    await flow.resume_card(card, max_loops=12)
+    assert captured.get("max_loops") == 12

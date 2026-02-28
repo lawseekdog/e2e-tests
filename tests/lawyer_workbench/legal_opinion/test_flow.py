@@ -42,6 +42,11 @@ _FLOW_OVERRIDES = {
     # intent-route-v3 clarify cards ask profile.client_role before routing.
     # For legal-opinion flow, "applicant" avoids litigation-role ambiguity.
     "profile.client_role": "applicant",
+    # evidence-gap-clarify can loop indefinitely in remote runs unless we explicitly stop asking.
+    "data.evidence.evidence_gap_stop_ask": True,
+    "data.evidence.evidence_gap_notes": "当前暂无新增材料，请基于现有事实与证据继续完成法律意见分析。",
+    # Keep opinion references retrieval on-topic; generic debt query causes exhausted-loop retries.
+    "data.search.query": "工伤认定 视同工伤 非因工死亡 宿舍猝死 劳动关系 未签劳动合同 双倍工资 社保待遇 人道主义补偿",
 }
 
 

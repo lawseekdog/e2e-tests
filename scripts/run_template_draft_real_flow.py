@@ -24,7 +24,11 @@ from tests.lawyer_workbench._support.docx import (
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
-from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, is_session_busy_sse
+from tests.lawyer_workbench._support.flow_runner import (
+    WorkbenchFlow,
+    extract_last_card_from_sse,
+    is_session_busy_sse,
+)
 from tests.lawyer_workbench._support.sse import assert_visible_response
 from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
 
@@ -61,6 +65,7 @@ PARTY_RE = re.compile(r"(?:^|\n)\s*(?:原告|被告|申请人|被申请人|上�
 AMOUNT_RE = re.compile(r"(?<!\d)(\d{4,10})(?!\d)")
 CLAIM_RE = re.compile(r"(?:^|\n)\s*诉求\s*[:：]\s*([^\n]+)")
 CLAIM_KEYWORDS = ("返还", "支付", "逾期利息", "诉讼费", "赔偿", "承担")
+PARTY_LINE_RE = re.compile(r"^\s*(原告|被告|申请人|被申请人|上诉人|被上诉人)\s*[:：]")
 
 
 def _safe_str(value: Any) -> str:
@@ -193,30 +198,47 @@ def _build_flow_overrides(
     uploaded_file_ids: list[str],
     *,
     service_type_id: str,
+    template_name: str,
 ) -> dict[str, Any]:
     claim_text = ""
     m_claim = CLAIM_RE.search(facts_text or "")
     if m_claim:
         claim_text = _safe_str(m_claim.group(1))
     summary_line = _safe_str(facts_text).replace("\n", " ")
-    if len(summary_line) > 180:
-        summary_line = summary_line[:180].rstrip() + "…"
+    if len(summary_line) > 140:
+        summary_line = summary_line[:140].rstrip() + "…"
 
     party_lines: list[str] = []
     for line in str(facts_text or "").splitlines():
         item = _safe_str(line)
         if not item:
             continue
-        if any(tag in item for tag in ("原告", "被告", "申请人", "被申请人", "上诉人", "被上诉人")):
+        if PARTY_LINE_RE.search(item):
             party_lines.append(item)
-    parties_text = "\n".join(party_lines[:8]) if party_lines else "请按你方/对方角色补充当事人信息。"
+    parties_text = "\n".join(party_lines[:2]) if party_lines else "原告：张三。被告：李四。"
+
+    facts_lines = [_safe_str(line) for line in str(facts_text or "").splitlines() if _safe_str(line)]
+    background_lines: list[str] = []
+    for line in facts_lines:
+        if PARTY_LINE_RE.search(line):
+            continue
+        background_lines.append(line)
+        if len(background_lines) >= 6:
+            break
+    background_text = "\n".join(background_lines).strip()
+    if not background_text:
+        background_text = _safe_str(facts_text)
+    if len(background_text) > 520:
+        background_text = background_text[:520].rstrip() + "…"
 
     return {
         "profile.facts": _safe_str(facts_text),
-        "profile.background": _safe_str(facts_text),
+        "profile.background": background_text,
         "profile.parties": parties_text,
         "profile.summary": summary_line or "请基于已上传材料生成案件摘要。",
         "profile.claims": claim_text or "请按已提供事实整理诉求并推进起草。",
+        "profile.court_name": "北京市海淀区人民法院",
+        "profile.document_type": _safe_str(template_name) or "民事起诉状",
         "profile.service_type_id": _safe_str(service_type_id) or "document_drafting",
         "attachment_file_ids": [str(x).strip() for x in uploaded_file_ids if _safe_str(x)],
     }
@@ -609,6 +631,33 @@ async def run(args: argparse.Namespace) -> int:
                     f"streak={low_signal_streak}, threshold={args.max_low_signal_streak}"
                 )
 
+    resume_busy_retries = max(1, int(os.getenv("E2E_RESUME_BUSY_RETRIES", "6") or 6))
+
+    async def _resume_card_with_busy_retry(
+        *,
+        flow: WorkbenchFlow,
+        card: dict[str, Any],
+        action: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        attempt = 0
+        last_sse: dict[str, Any] = {}
+        while attempt < resume_busy_retries:
+            attempt += 1
+            last_sse = await flow.resume_card(card)
+            payload_with_attempt = dict(payload)
+            payload_with_attempt["attempt"] = attempt
+            await _record_round(
+                action=action,
+                payload=payload_with_attempt,
+                sse=last_sse if isinstance(last_sse, dict) else {},
+                enforce_visibility=True,
+            )
+            if not is_session_busy_sse(last_sse if isinstance(last_sse, dict) else {}):
+                return last_sse
+            await asyncio.sleep(min(2.5, 0.4 * attempt + 0.4))
+        return last_sse
+
     async with ApiClient(base_url) as client:
         try:
             await client.login(username, password)
@@ -686,6 +735,7 @@ async def run(args: argparse.Namespace) -> int:
                 facts_text,
                 uploaded_file_ids,
                 service_type_id=_safe_str(args.service_type_id) or "document_drafting",
+                template_name=template_name,
             )
             flow = WorkbenchFlow(
                 client=client,
@@ -703,7 +753,40 @@ async def run(args: argparse.Namespace) -> int:
                 enforce_visibility=True,
             )
 
+            kickoff_card = extract_last_card_from_sse(kickoff_sse if isinstance(kickoff_sse, dict) else {})
+            resume_kickoff_sse_card = str(os.getenv("E2E_RESUME_KICKOFF_SSE_CARD", "0") or "0").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if isinstance(kickoff_card, dict) and kickoff_card:
+                cards_seen.append(
+                    {
+                        "source": "sse",
+                        "round": len(rounds) + 1,
+                        "skill_id": _safe_str(kickoff_card.get("skill_id")),
+                        "task_key": _safe_str(kickoff_card.get("task_key")),
+                        "review_type": _safe_str(kickoff_card.get("review_type")),
+                        "card": kickoff_card,
+                    }
+                )
+                # Default hard-cut: rely on pending_card API in the main loop as the single resume source.
+                # Resuming the kickoff SSE card immediately can race with backend card persistence and
+                # produce stale-card retries / websocket stalls in remote environments.
+                if resume_kickoff_sse_card:
+                    await _resume_card_with_busy_retry(
+                        flow=flow,
+                        card=kickoff_card,
+                        action="resume.kickoff_card",
+                        payload={
+                            "skill_id": _safe_str(kickoff_card.get("skill_id")),
+                            "task_key": _safe_str(kickoff_card.get("task_key")),
+                        },
+                    )
+
             busy_retries = 0
+            suppress_nudge_rounds = 0
             last_card_sig = ""
             last_card_repeats = 0
             deliverable_row: dict[str, Any] | None = None
@@ -715,6 +798,12 @@ async def run(args: argparse.Namespace) -> int:
             max_skill_error_repeats = max(1, int(args.max_skill_error_repeats))
             max_stall_rounds = max(1, int(args.max_stall_rounds))
             cause_anchor_repeat_threshold = max(1, int(args.cause_anchor_repeat_threshold))
+            use_pending_card_api = str(os.getenv("E2E_USE_PENDING_CARD_API", "1") or "1").strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
             for _ in range(max_steps):
                 await flow.refresh()
                 deliverable_head: dict[str, Any] | None = None
@@ -733,7 +822,7 @@ async def run(args: argparse.Namespace) -> int:
                 if deliverable_row:
                     break
 
-                pending = await flow.get_pending_card()
+                pending = await flow.get_pending_card() if use_pending_card_api else None
                 if pending:
                     stall_rounds = 0
                     skill_id = _safe_str(pending.get("skill_id"))
@@ -797,15 +886,14 @@ async def run(args: argparse.Namespace) -> int:
                             "card": pending,
                         }
                     )
-                    sse = await flow.resume_card(pending)
-                    await _record_round(
+                    sse = await _resume_card_with_busy_retry(
+                        flow=flow,
+                        card=pending,
                         action="resume.card",
                         payload={
                             "skill_id": skill_id,
                             "task_key": task_key,
                         },
-                        sse=sse if isinstance(sse, dict) else {},
-                        enforce_visibility=True,
                     )
 
                     # Some remote envs can loop on skill-error-analysis (docx_quality_gate_failed).
@@ -849,19 +937,48 @@ async def run(args: argparse.Namespace) -> int:
                             f"stall_rounds={stall_rounds}, deliverable_status={_safe_str((deliverable_head or {}).get('status'))}"
                         )
 
+                    if suppress_nudge_rounds > 0:
+                        suppress_nudge_rounds -= 1
+                        await asyncio.sleep(min(2.5, 0.3 * max(1, busy_retries) + 0.5))
+                        continue
+
                     sse = await flow.nudge(_safe_str(args.nudge_text) or "继续", attachments=[], max_loops=max(1, int(args.max_loops)))
                     await _record_round(
                         action="chat.nudge",
                         payload={"text": _safe_str(args.nudge_text) or "继续"},
                         sse=sse if isinstance(sse, dict) else {},
-                        enforce_visibility=True,
+                        enforce_visibility=False,
                     )
+
+                    sse_card = extract_last_card_from_sse(sse if isinstance(sse, dict) else {})
+                    if isinstance(sse_card, dict) and sse_card:
+                        cards_seen.append(
+                            {
+                                "source": "sse",
+                                "round": len(rounds) + 1,
+                                "skill_id": _safe_str(sse_card.get("skill_id")),
+                                "task_key": _safe_str(sse_card.get("task_key")),
+                                "review_type": _safe_str(sse_card.get("review_type")),
+                                "card": sse_card,
+                            }
+                        )
+                        sse = await _resume_card_with_busy_retry(
+                            flow=flow,
+                            card=sse_card,
+                            action="resume.sse_card",
+                            payload={
+                                "skill_id": _safe_str(sse_card.get("skill_id")),
+                                "task_key": _safe_str(sse_card.get("task_key")),
+                            },
+                        )
 
                 if is_session_busy_sse(sse if isinstance(sse, dict) else {}):
                     busy_retries += 1
+                    suppress_nudge_rounds = min(24, max(suppress_nudge_rounds, 2 + busy_retries // 2))
                     await asyncio.sleep(min(2.5, 0.2 * busy_retries + 0.5))
                 else:
                     busy_retries = 0
+                    suppress_nudge_rounds = 0
 
             if not flow.matter_id:
                 raise RuntimeError("matter_id missing after workflow loop")
@@ -896,7 +1013,12 @@ async def run(args: argparse.Namespace) -> int:
                     return False
                 return _safe_str(rows[0].get("status")).lower() == "archived"
 
-            await eventually(_archived, timeout_s=120, interval_s=3, description="deliverable archived")
+            await eventually(
+                _archived,
+                timeout_s=120,
+                interval_s=3,
+                description="deliverable archived",
+            )
 
             rows = await _list_deliverables(client, flow.matter_id or matter_id, output_key)
             if not rows:

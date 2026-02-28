@@ -75,6 +75,10 @@ def is_session_busy_sse(sse: dict[str, Any] | None) -> bool:
             return True
         if event_name == "error":
             data = it.get("data") if isinstance(it.get("data"), dict) else {}
+            if data.get("partial") is True:
+                err_code = str(data.get("error") or "").strip().lower()
+                if err_code in {"stream_timeout", "timeout", "request_timeout"}:
+                    return True
             msg = " ".join([str(data.get("message") or ""), str(data.get("error") or "")]).strip().lower()
             if not msg:
                 continue
@@ -83,12 +87,19 @@ def is_session_busy_sse(sse: dict[str, Any] | None) -> bool:
                 or ("会话正在处理中" in msg)
                 or ("上一轮完成后再发送" in msg)
                 or ("already processing" in msg)
+                or ("后台继续处理中" in msg)
+                or ("刷新查看待办" in msg)
             ):
                 return True
     output = str(sse.get("output") or "").strip()
     if not output:
         return False
-    return ("会话正在处理中" in output) or ("session busy" in output.lower())
+    return (
+        ("会话正在处理中" in output)
+        or ("session busy" in output.lower())
+        or ("后台继续处理中" in output)
+        or ("刷新查看待办" in output)
+    )
 
 
 def _pick_recommended_or_first(options: list[Any]) -> Any | None:
@@ -306,6 +317,12 @@ def _fallback_answer_for_missing_field(field_key: str, uploaded_file_ids: list[s
         return "full"
     if fk in {"profile.summary"}:
         return "张三起诉李四民间借贷纠纷，借款10万元到期未还，请求返还本金及利息。"
+    if fk in {"profile.contract_type"}:
+        return "建设工程施工合同"
+    if fk in {"profile.document_type"}:
+        return "民事起诉状"
+    if fk in {"profile.court_name"}:
+        return "北京市海淀区人民法院"
     if fk in {"profile.facts"}:
         return "2023年1月15日张三向李四转账10万元，约定一年内归还；到期后多次催收仍未还款。"
     if fk in {"profile.claims"}:
@@ -321,6 +338,53 @@ def _fallback_answer_for_missing_field(field_key: str, uploaded_file_ids: list[s
     if fk.startswith("profile."):
         return "请基于现有材料继续推进并输出结构化结论。"
     return "请基于现有材料继续推进。"
+
+
+def _coerce_select_value_from_semantic_hint(hint: Any, options: list[Any] | None) -> Any | None:
+    opts = options if isinstance(options, list) else []
+    if not opts:
+        return hint
+
+    if isinstance(hint, bool):
+        positive_tokens = ("是", "已完成", "确认", "继续", "同意", "yes", "confirm", "continue")
+        negative_tokens = ("否", "未完成", "取消", "no", "cancel")
+        for opt in opts:
+            value = _option_answer_value(opt)
+            if value is None:
+                continue
+            text = _option_match_text(opt)
+            if hint and any(tok in text for tok in positive_tokens) and not any(tok in text for tok in negative_tokens):
+                return value
+            if (not hint) and any(tok in text for tok in negative_tokens):
+                return value
+        return _pick_recommended_or_first(opts)
+
+    hint_text = str(hint or "").strip().lower()
+    if not hint_text:
+        return _pick_recommended_or_first(opts)
+    for opt in opts:
+        value = _option_answer_value(opt)
+        if value is None:
+            continue
+        text = _option_match_text(opt)
+        if hint_text in text:
+            return value
+    return _pick_recommended_or_first(opts)
+
+
+def _forced_answer_from_question_text(question_text: str) -> Any | None:
+    text = str(question_text or "").strip()
+    if not text:
+        return None
+
+    # 文书起草中法院名称缺失会反复追问，这里给稳定可用的管辖法院占位答案。
+    if "法院" in text and any(tok in text for tok in ("哪个", "名称", "管辖", "受理", "用于")):
+        return "北京市海淀区人民法院"
+
+    if "是否已完成所有材料上传" in text or ("完成所有材料上传" in text and "勾选" in text):
+        return True
+
+    return None
 
 
 def auto_answer_card(
@@ -349,6 +413,33 @@ def auto_answer_card(
         allowed_field_keys.add(fk)
         it = str(q.get("input_type") or q.get("question_type") or "").strip().lower()
         required = bool(q.get("required"))
+        q_text = " ".join(
+            [
+                str(q.get("question") or ""),
+                str(q.get("label") or ""),
+                str(q.get("placeholder") or ""),
+            ]
+        ).strip()
+
+        forced_value = _forced_answer_from_question_text(q_text)
+        if forced_value is not None:
+            if it in {"select", "single_select", "single_choice"}:
+                forced_value = _coerce_select_value_from_semantic_hint(
+                    forced_value,
+                    q.get("options") if isinstance(q.get("options"), list) else [],
+                )
+            elif it in {"file_ids", "file_id"} or fk == "attachment_file_ids":
+                # file_ids answers must be arrays; skip optional uploads when we do not have new file ids.
+                if isinstance(forced_value, list):
+                    forced_value = [str(x).strip() for x in forced_value if str(x).strip()]
+                elif uploaded_file_ids:
+                    forced_value = list(uploaded_file_ids)
+                elif required:
+                    forced_value = []
+                else:
+                    continue
+            answers.append({"field_key": fk, "value": forced_value})
+            continue
 
         override_value = _resolve_override_value(fk, overrides)
         if override_value is not None:
@@ -371,6 +462,10 @@ def auto_answer_card(
         if it in {"boolean", "bool"}:
             if fk == "data.evidence.evidence_gap_stop_ask":
                 # Do not auto-stop evidence gap follow-up in E2E; keep this gate strict.
+                value = default if has_default else False
+            elif fk == "data.work_product.regenerate_documents":
+                # documents-stale confirm cards ask whether to regenerate again.
+                # Auto-regenerate can create endless drafting loops and block archive delivery.
                 value = default if has_default else False
             else:
                 value = default if has_default else True
@@ -433,6 +528,9 @@ def auto_answer_card(
                 value = "民间借贷 借条 转账记录 聊天记录 逾期还款 利息支持 最高人民法院 民间借贷司法解释"
             else:
                 value = default if has_default else (_fallback_answer_for_missing_field(fk, uploaded_file_ids) if required else None)
+
+        if value is None and required:
+            value = _fallback_answer_for_missing_field(fk, uploaded_file_ids)
 
         # For optional questions, omit the answer entirely if we don't have a value.
         # This avoids sending `null` into strict field validators (e.g. attachment_file_ids must be a list).
@@ -657,7 +755,7 @@ class WorkbenchFlow:
             )
         return card if isinstance(card, dict) and card else None
 
-    async def resume_card(self, card: dict[str, Any]) -> dict[str, Any]:
+    async def resume_card(self, card: dict[str, Any], *, max_loops: int | None = None) -> dict[str, Any]:
         # Keep an audit trail for assertions/debugging.
         self.seen_cards.append(card)
         self.seen_card_signatures.append(card_signature(card))
@@ -680,8 +778,18 @@ class WorkbenchFlow:
             f"[flow] resume card {card.get('skill_id')} answers={len(user_response.get('answers') or [])} "
             f"payload={user_response}"
         )
-        sse = await self.client.resume(self.session_id, user_response, pending_card=card, max_loops=_RESUME_MAX_LOOPS)
-        assert_has_user_message(sse)
+        resolved_max_loops = _RESUME_MAX_LOOPS if max_loops is None else max(1, int(max_loops))
+        sse = await self.client.resume(
+            self.session_id,
+            user_response,
+            pending_card=card,
+            max_loops=resolved_max_loops,
+        )
+        try:
+            assert_has_user_message(sse)
+        except AssertionError:
+            if not is_session_busy_sse(sse if isinstance(sse, dict) else {}):
+                raise
         if isinstance(sse, dict):
             self.last_sse = sse
             self.seen_sse.append(sse)

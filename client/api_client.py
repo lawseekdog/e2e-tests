@@ -23,12 +23,8 @@ MATTERS = "/matter-service"
 KNOWLEDGE = "/knowledge-service"
 
 _WS_DEBUG = str(os.getenv("E2E_WS_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
-# Resume calls should include a compact pending_card payload by default.
-# Some remote deployments need the card id/context to apply answers instead of
-# treating them as plain chat text.
-# New resume contract is strict: top-level card_id + user_response; pending_card payload is optional legacy fallback.
-_SEND_PENDING_CARD = str(os.getenv("E2E_SEND_PENDING_CARD", "0") or "").strip().lower() in {"1", "true", "yes"}
-_PENDING_CARD_MAX_OPTIONS = int(os.getenv("E2E_PENDING_CARD_MAX_OPTIONS", "20") or 20)
+# Hard-cut resume contract: websocket `resume` payload only allows
+# {type, card_id, user_response, max_loops, silent}. Do not send pending_card.
 
 
 def _resolve_ws_proxy() -> str | bool | None:
@@ -50,95 +46,23 @@ def _resolve_ws_proxy() -> str | bool | None:
     return raw
 
 
-def _clip_text(value: Any, limit: int = 320) -> str:
-    s = str(value or "").strip()
-    if not s:
-        return ""
-    if len(s) <= limit:
-        return s
-    return s[: limit - 1].rstrip() + "…"
+def _resolve_ws_protocol_ping_interval() -> float | None:
+    """Resolve websocket protocol ping interval from env.
 
-
-def _compact_question(question: dict[str, Any]) -> dict[str, Any]:
-    q = question if isinstance(question, dict) else {}
-    out: dict[str, Any] = {}
-    for key in ("field_key", "input_type", "question_type"):
-        v = str(q.get(key) or "").strip()
-        if v:
-            out[key] = v
-
-    for key in ("required", "recommended"):
-        if isinstance(q.get(key), bool):
-            out[key] = bool(q.get(key))
-
-    for key in ("question", "label", "placeholder", "default"):
-        v = q.get(key)
-        if v is None:
-            continue
-        if isinstance(v, (str, int, float, bool)):
-            s = _clip_text(v, 320)
-            if s:
-                out[key] = s
-        else:
-            out[key] = v
-
-    raw_options = q.get("options") if isinstance(q.get("options"), list) else []
-    if raw_options:
-        options: list[dict[str, Any]] = []
-        for row in raw_options[: max(1, _PENDING_CARD_MAX_OPTIONS)]:
-            if not isinstance(row, dict):
-                continue
-            item: dict[str, Any] = {}
-            value = row.get("value")
-            if isinstance(value, (str, int, float, bool)):
-                item["value"] = value
-            option_id = row.get("id")
-            if isinstance(option_id, (str, int, float, bool)):
-                item["id"] = option_id
-                # Many cards only provide {id,label} options. Keep value aligned so
-                # server-side card validators can still resolve selected answers.
-                if "value" not in item:
-                    item["value"] = option_id
-            label = _clip_text(row.get("label"), 200)
-            if label:
-                item["label"] = label
-            if isinstance(row.get("recommended"), bool):
-                item["recommended"] = bool(row.get("recommended"))
-            if item:
-                options.append(item)
-        if options:
-            out["options"] = options
-
-    return out
-
-
-def _compact_pending_card(card: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(card, dict):
-        return {}
-
-    out: dict[str, Any] = {}
-    card_id = str(card.get("card_id") or card.get("id") or "").strip()
-    if card_id:
-        out["card_id"] = card_id
-
-    for key in ("skill_id", "task_key", "review_type"):
-        v = str(card.get(key) or "").strip()
-        if v:
-            out[key] = v
-
-    for key in ("title", "message"):
-        v = _clip_text(card.get(key), 500)
-        if v:
-            out[key] = v
-
-    questions = card.get("questions") if isinstance(card.get("questions"), list) else []
-    if questions:
-        compacted = [_compact_question(q) for q in questions if isinstance(q, dict)]
-        compacted = [q for q in compacted if q]
-        if compacted:
-            out["questions"] = compacted
-
-    return out
+    Default keeps a light client->server heartbeat to survive gateway idle timeouts.
+    Set E2E_WS_PROTOCOL_PING_INTERVAL_S=off to disable.
+    """
+    raw = str(os.getenv("E2E_WS_PROTOCOL_PING_INTERVAL_S", "20") or "").strip()
+    if not raw:
+        return 20.0
+    token = raw.lower()
+    if token in {"off", "none", "false", "0", "no"}:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return 20.0
+    return value if value > 0 else None
 
 
 def _extract_pending_card_id(card: dict[str, Any] | None) -> str:
@@ -216,7 +140,15 @@ class ApiClient:
         # can ride out transient 502/503/504 from the gateway.
         # In local docker, Spring services may restart (Flyway, JIT warmup) and nginx returns 502/503/504
         # for several minutes. Keep this tolerant by default; override via E2E_HTTP_GET_RETRIES in CI.
-        get_retries = int(os.getenv("E2E_HTTP_GET_RETRIES", "180") or 180)
+        get_retries_override = kwargs.pop("get_retries", None)
+        if get_retries_override is None:
+            get_retries = int(os.getenv("E2E_HTTP_GET_RETRIES", "180") or 180)
+        else:
+            try:
+                get_retries = int(get_retries_override)
+            except Exception:
+                get_retries = int(os.getenv("E2E_HTTP_GET_RETRIES", "180") or 180)
+            get_retries = max(1, get_retries)
         max_attempts = get_retries if method.upper() == "GET" else 1
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
@@ -281,10 +213,10 @@ class ApiClient:
                     open_timeout=open_timeout_s,
                     # Consultations-service can emit large JSON card payloads; disable client frame-size cap.
                     max_size=None,
-                    # Consultations-service speaks "ping"/"pong" as app-level JSON events; some
-                    # proxies don't reliably forward WebSocket protocol pings in local dev.
-                    # Disable protocol-level keepalive to avoid spurious 1011 ping timeouts.
-                    ping_interval=None,
+                    # Keep protocol-level pings enabled by default so long-running rounds
+                    # survive gateway/client idle timeouts. Disable via env if needed.
+                    ping_interval=_resolve_ws_protocol_ping_interval(),
+                    ping_timeout=None,
                 ) as ws:
                     # Send auth message first
                     auth_msg = {
@@ -306,9 +238,11 @@ class ApiClient:
 
                     # Collect events until 'end'
                     stream_started = asyncio.get_running_loop().time()
-                    max_stream_s = float(os.getenv("E2E_WS_STREAM_MAX_S", "180") or 180)
+                    # 文书起草链路在真实大模型下可持续数分钟，默认 180s 会提前切断会话并触发假性 busy。
+                    max_stream_s = float(os.getenv("E2E_WS_STREAM_MAX_S", "1800") or 1800)
                     while True:
-                        if max_stream_s > 0 and (asyncio.get_running_loop().time() - stream_started) > max_stream_s:
+                        now = asyncio.get_running_loop().time()
+                        if max_stream_s > 0 and (now - stream_started) > max_stream_s:
                             events.append(
                                 {
                                     "event": "error",
@@ -329,8 +263,12 @@ class ApiClient:
 
                             # Handle ping
                             if evt == "ping":
-                                # consultations-service heartbeats are one-way app-level events.
-                                # Do not reply with an unsupported websocket message type.
+                                # Send a protocol-level pong frame so intermediaries see
+                                # bi-directional traffic during long-running silent rounds.
+                                try:
+                                    await ws.pong()
+                                except Exception:
+                                    pass
                                 continue
 
                             if _WS_DEBUG and evt and evt not in {"delta", "token"}:
@@ -595,10 +533,15 @@ class ApiClient:
         return await self._post_ws(ws_path, "chat", data, open_timeout_s=open_timeout_s)
 
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
-        timeout_s = float(os.getenv("E2E_PENDING_CARD_TIMEOUT_S", "8") or 8)
-        return await self.get(
+        # pending_card is a high-frequency poll endpoint; keep it short so transient
+        # upstream stalls do not freeze flow progression.
+        timeout_s = float(os.getenv("E2E_PENDING_CARD_TIMEOUT_S", "3") or 3)
+        get_retries = int(os.getenv("E2E_PENDING_CARD_GET_RETRIES", "1") or 1)
+        return await self._request(
+            "GET",
             f"{CONSULTATIONS}/consultations/sessions/{session_id}/pending_card",
             timeout=timeout_s,
+            get_retries=max(1, get_retries),
         )
 
     async def upload_session_attachment(
@@ -697,12 +640,7 @@ class ApiClient:
             "user_response": user_response,
             "card_id": resolved_card_id,
         }
-        # Some environments close WebSocket frames with 1009 when resume payloads are too large.
-        # Keep pending_card opt-in and compact to the minimum fallback fields.
-        if pending_card and _SEND_PENDING_CARD:
-            compact_pending = _compact_pending_card(pending_card)
-            if compact_pending:
-                data["pending_card"] = compact_pending
+        _ = pending_card
         if max_loops is not None:
             data["max_loops"] = int(max_loops)
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"

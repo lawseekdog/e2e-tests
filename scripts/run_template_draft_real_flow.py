@@ -66,6 +66,18 @@ AMOUNT_RE = re.compile(r"(?<!\d)(\d{4,10})(?!\d)")
 CLAIM_RE = re.compile(r"(?:^|\n)\s*诉求\s*[:：]\s*([^\n]+)")
 CLAIM_KEYWORDS = ("返还", "支付", "逾期利息", "诉讼费", "赔偿", "承担")
 PARTY_LINE_RE = re.compile(r"^\s*(原告|被告|申请人|被申请人|上诉人|被上诉人)\s*[:：]")
+UNRESOLVED_QUALITY_TOKENS = (
+    "待核实",
+    "待确认",
+    "输出格式",
+    "法院名称待核实",
+    "具体法院名称待核实",
+)
+GENERIC_LEGAL_PHRASES = (
+    "相关法律规定",
+    "依据有关法律规定",
+)
+BARE_ARTICLE_RULE_RE = re.compile(r"(?<!》)第[一二三四五六七八九十百千万零〇0-9]{1,8}条规定")
 
 
 def _safe_str(value: Any) -> str:
@@ -74,7 +86,8 @@ def _safe_str(value: Any) -> str:
 
 def _event_counts(sse: dict[str, Any]) -> dict[str, int]:
     out: dict[str, int] = {}
-    events = sse.get("events") if isinstance(sse.get("events"), list) else []
+    events_obj = sse.get("events")
+    events: list[Any] = events_obj if isinstance(events_obj, list) else []
     for row in events:
         if not isinstance(row, dict):
             continue
@@ -83,18 +96,36 @@ def _event_counts(sse: dict[str, Any]) -> dict[str, int]:
     return out
 
 
+def _sse_has_user_message_event(sse: dict[str, Any]) -> bool:
+    events_obj = sse.get("events")
+    events: list[Any] = events_obj if isinstance(events_obj, list) else []
+    for row in events:
+        if not isinstance(row, dict):
+            continue
+        if _safe_str(row.get("event")) == "user_message":
+            return True
+    return False
+
+
 def _extract_templates(payload: dict[str, Any]) -> list[dict[str, Any]]:
     data = unwrap_api_response(payload)
-    if isinstance(data, dict) and isinstance(data.get("templates"), list):
-        return [t for t in data.get("templates") if isinstance(t, dict)]
-    if isinstance(payload, dict) and isinstance(payload.get("templates"), list):
-        return [t for t in payload.get("templates") if isinstance(t, dict)]
+    if isinstance(data, dict):
+        templates_obj = data.get("templates")
+        templates: list[Any] = templates_obj if isinstance(templates_obj, list) else []
+        if templates:
+            return [t for t in templates if isinstance(t, dict)]
+    if isinstance(payload, dict):
+        payload_templates_obj = payload.get("templates")
+        payload_templates: list[Any] = payload_templates_obj if isinstance(payload_templates_obj, list) else []
+        if payload_templates:
+            return [t for t in payload_templates if isinstance(t, dict)]
     return []
 
 
 def _extract_last_cards(sse: dict[str, Any]) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
-    events = sse.get("events") if isinstance(sse.get("events"), list) else []
+    events_obj = sse.get("events")
+    events: list[Any] = events_obj if isinstance(events_obj, list) else []
     for row in events:
         if not isinstance(row, dict):
             continue
@@ -279,7 +310,8 @@ async def _list_deliverables(client: ApiClient, matter_id: str, output_key: str)
     except Exception:
         return []
     data = unwrap_api_response(resp)
-    rows = data.get("deliverables") if isinstance(data, dict) and isinstance(data.get("deliverables"), list) else []
+    rows_obj = data.get("deliverables") if isinstance(data, dict) else None
+    rows: list[Any] = rows_obj if isinstance(rows_obj, list) else []
     return [row for row in rows if isinstance(row, dict)]
 
 
@@ -423,6 +455,17 @@ def _evaluate_document_quality(
     except AssertionError as e:
         placeholder_leak = True
         failures.append(str(e))
+
+    unresolved_hits = [token for token in UNRESOLVED_QUALITY_TOKENS if token in (text or "")]
+    if unresolved_hits:
+        failures.append(f"文书包含未完成占位/待核实表述: {', '.join(unresolved_hits)}")
+
+    generic_legal_hits = [token for token in GENERIC_LEGAL_PHRASES if token in (text or "")]
+    if generic_legal_hits:
+        failures.append(f"文书包含泛化法律表述: {', '.join(generic_legal_hits)}")
+
+    if BARE_ARTICLE_RULE_RE.search(text or ""):
+        failures.append("文书存在未指明法名的条文表述（如“第X条规定”）")
 
     parties = [p for p in targets.get("parties") or [] if _safe_str(p)]
     amounts = [a for a in targets.get("amounts") or [] if _safe_str(a)]
@@ -608,7 +651,8 @@ async def run(args: argparse.Namespace) -> int:
                 }
             )
 
-        events = sse.get("events") if isinstance(sse.get("events"), list) else []
+        events_obj = sse.get("events")
+        events: list[Any] = events_obj if isinstance(events_obj, list) else []
         for idx, evt in enumerate(events):
             if not isinstance(evt, dict):
                 continue
@@ -644,7 +688,7 @@ async def run(args: argparse.Namespace) -> int:
         last_sse: dict[str, Any] = {}
         while attempt < resume_busy_retries:
             attempt += 1
-            last_sse = await flow.resume_card(card)
+            last_sse = await flow.resume_card(card, max_loops=max(1, int(args.max_loops)))
             payload_with_attempt = dict(payload)
             payload_with_attempt["attempt"] = attempt
             await _record_round(
@@ -653,6 +697,8 @@ async def run(args: argparse.Namespace) -> int:
                 sse=last_sse if isinstance(last_sse, dict) else {},
                 enforce_visibility=True,
             )
+            if _sse_has_user_message_event(last_sse if isinstance(last_sse, dict) else {}):
+                return last_sse
             if not is_session_busy_sse(last_sse if isinstance(last_sse, dict) else {}):
                 return last_sse
             await asyncio.sleep(min(2.5, 0.4 * attempt + 0.4))
@@ -786,6 +832,8 @@ async def run(args: argparse.Namespace) -> int:
                     )
 
             busy_retries = 0
+            busy_hold_until = 0.0
+            busy_nudge_hold_s = max(0.0, float(os.getenv("E2E_BUSY_NUDGE_HOLD_S", "240") or 240))
             suppress_nudge_rounds = 0
             last_card_sig = ""
             last_card_repeats = 0
@@ -829,6 +877,10 @@ async def run(args: argparse.Namespace) -> int:
                     task_key = _safe_str(pending.get("task_key"))
                     prompt_preview = _safe_str(pending.get("prompt"))[:220]
                     card_sig = f"{skill_id}|{task_key}"
+                    now = asyncio.get_running_loop().time()
+                    if card_sig and card_sig == last_card_sig and busy_hold_until > now:
+                        await asyncio.sleep(min(2.5, max(0.3, busy_hold_until - now)))
+                        continue
                     if card_sig and card_sig == last_card_sig:
                         last_card_repeats += 1
                     else:
@@ -898,7 +950,8 @@ async def run(args: argparse.Namespace) -> int:
 
                     # Some remote envs can loop on skill-error-analysis (docx_quality_gate_failed).
                     # Only nudge when card policy allows free chat; otherwise nudges only produce card+error loops.
-                    chat_policy = pending.get("chat_policy") if isinstance(pending.get("chat_policy"), dict) else {}
+                    chat_policy_obj = pending.get("chat_policy")
+                    chat_policy: dict[str, Any] = chat_policy_obj if isinstance(chat_policy_obj, dict) else {}
                     allows_chat = bool(chat_policy.get("allows_chat"))
                     if skill_id == "skill-error-analysis" and allows_chat and last_card_repeats >= 2:
                         remediation_text = (
@@ -921,6 +974,7 @@ async def run(args: argparse.Namespace) -> int:
                 else:
                     last_card_sig = ""
                     last_card_repeats = 0
+                    now = asyncio.get_running_loop().time()
                     if deliverable_head:
                         current_sig = _deliverable_signature(deliverable_head)
                         if (not current_sig) or current_sig == last_deliverable_sig:
@@ -931,7 +985,7 @@ async def run(args: argparse.Namespace) -> int:
                     else:
                         stall_rounds += 1
 
-                    if stall_rounds >= max_stall_rounds:
+                    if stall_rounds >= max_stall_rounds and busy_hold_until <= now:
                         raise AssertionError(
                             "workflow stalled with no pending card and no deliverable progress: "
                             f"stall_rounds={stall_rounds}, deliverable_status={_safe_str((deliverable_head or {}).get('status'))}"
@@ -940,6 +994,11 @@ async def run(args: argparse.Namespace) -> int:
                     if suppress_nudge_rounds > 0:
                         suppress_nudge_rounds -= 1
                         await asyncio.sleep(min(2.5, 0.3 * max(1, busy_retries) + 0.5))
+                        continue
+
+                    if busy_hold_until > now:
+                        stall_rounds = 0
+                        await asyncio.sleep(min(2.5, max(0.3, busy_hold_until - now)))
                         continue
 
                     sse = await flow.nudge(_safe_str(args.nudge_text) or "继续", attachments=[], max_loops=max(1, int(args.max_loops)))
@@ -974,10 +1033,13 @@ async def run(args: argparse.Namespace) -> int:
 
                 if is_session_busy_sse(sse if isinstance(sse, dict) else {}):
                     busy_retries += 1
+                    if busy_nudge_hold_s > 0:
+                        busy_hold_until = max(busy_hold_until, asyncio.get_running_loop().time() + busy_nudge_hold_s)
                     suppress_nudge_rounds = min(24, max(suppress_nudge_rounds, 2 + busy_retries // 2))
                     await asyncio.sleep(min(2.5, 0.2 * busy_retries + 0.5))
                 else:
                     busy_retries = 0
+                    busy_hold_until = 0.0
                     suppress_nudge_rounds = 0
 
             if not flow.matter_id:

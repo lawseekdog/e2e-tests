@@ -224,7 +224,7 @@ class ApiClient:
                         "user_id": int(self.user_id) if self.user_id else None,
                         "organization_id": self.organization_id,
                     }
-                    await ws.send(json.dumps(auth_msg))
+                    await ws.send(json.dumps(auth_msg, ensure_ascii=False, separators=(",", ":")))
 
                     # Wait for auth_success
                     auth_response = await asyncio.wait_for(ws.recv(), timeout=30)
@@ -234,7 +234,7 @@ class ApiClient:
 
                     # Send the actual message
                     msg = {"type": msg_type, **data}
-                    await ws.send(json.dumps(msg))
+                    await ws.send(json.dumps(msg, ensure_ascii=False, separators=(",", ":")))
 
                     # Collect events until 'end'
                     stream_started = asyncio.get_running_loop().time()

@@ -319,6 +319,86 @@ def test_auto_answer_card_prefers_court_name_for_court_question_even_when_field_
     assert by_key.get("profile.background") == "北京市海淀区人民法院"
 
 
+def test_auto_answer_card_doc_draft_recovery_skips_generic_doc_generation_card():
+    card = {
+        "skill_id": "skill-error-analysis",
+        "task_key": "workflow_confirm_doc_generation_skill-error-analysis",
+        "prompt": "文书生成失败，请确认后重试。",
+        "questions": [
+            {
+                "field_key": "data.workbench.skill_error_acknowledged",
+                "input_type": "boolean",
+                "required": True,
+            }
+        ],
+    }
+
+    user_response = auto_answer_card(card, overrides={}, uploaded_file_ids=[])
+    answers = user_response.get("answers") or []
+    by_key = {row["field_key"]: row["value"] for row in answers}
+
+    assert by_key.get("data.workbench.skill_error_acknowledged") is True
+    assert "data.work_product.document_drafts" not in by_key
+    assert "data.work_product.drafts_ready" not in by_key
+    assert "data.work_product.document_blueprint" not in by_key
+
+
+def test_auto_answer_card_doc_draft_recovery_skips_generic_doc_draft_card_without_targets():
+    card = {
+        "skill_id": "skill-error-analysis",
+        "task_key": "workflow_confirm_doc_draft_skill-error-analysis",
+        "prompt": "文书草稿生成失败，请确认后重试。",
+        "questions": [
+            {
+                "field_key": "data.workbench.skill_error_acknowledged",
+                "input_type": "boolean",
+                "required": True,
+            }
+        ],
+    }
+
+    user_response = auto_answer_card(card, overrides={}, uploaded_file_ids=[])
+    answers = user_response.get("answers") or []
+    by_key = {row["field_key"]: row["value"] for row in answers}
+
+    assert by_key.get("data.workbench.skill_error_acknowledged") is True
+    assert "data.work_product.document_drafts" not in by_key
+    assert "data.work_product.drafts_ready" not in by_key
+    assert "data.work_product.document_blueprint" not in by_key
+
+
+def test_auto_answer_card_doc_draft_recovery_keeps_contract_targets_when_prompt_has_template_ids():
+    card = {
+        "skill_id": "skill-error-analysis",
+        "task_key": "workflow_confirm_doc_generation_skill-error-analysis",
+        "prompt": (
+            "请修复并继续：document_drafts="
+            "contract_review_report(215), modification_suggestion(270), redline_comparison(277)"
+        ),
+        "questions": [
+            {
+                "field_key": "data.workbench.skill_error_acknowledged",
+                "input_type": "boolean",
+                "required": True,
+            }
+        ],
+    }
+
+    user_response = auto_answer_card(card, overrides={}, uploaded_file_ids=[])
+    answers = user_response.get("answers") or []
+    by_key = {row["field_key"]: row["value"] for row in answers}
+
+    drafts = by_key.get("data.work_product.document_drafts")
+    assert isinstance(drafts, list)
+    assert len(drafts) == 3
+    assert {str(item.get("output_key") or "") for item in drafts if isinstance(item, dict)} == {
+        "contract_review_report",
+        "modification_suggestion",
+        "redline_comparison",
+    }
+    assert by_key.get("data.work_product.drafts_ready") is True
+
+
 def test_auto_answer_card_completion_question_maps_to_positive_select_option():
     card = {
         "skill_id": "materials-intake",

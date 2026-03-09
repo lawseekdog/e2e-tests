@@ -46,6 +46,8 @@ FLOW_OVERRIDES = {
     "profile.client_role": "applicant",
     "profile.review_scope": "full",
     "review_scope": "full",
+    "profile.contract_type": "建设工程施工合同",
+    "profile.summary": "已征收闲置土地垃圾清运工程施工合同审查，重点关注付款条件、违约责任、争议解决与免责条款。",
 }
 
 
@@ -79,6 +81,11 @@ _WORKFLOW_ACTION_TIMEOUT_S = _read_timeout_env("E2E_WORKFLOW_ACTION_TIMEOUT_S", 
 _RESUME_STEP_TIMEOUT_S = _read_timeout_env("E2E_RESUME_STEP_TIMEOUT_S", 1800.0)
 _CONTINUE_STEP_TIMEOUT_S = _read_timeout_env("E2E_CONTINUE_STEP_TIMEOUT_S", 180.0)
 _CLAUSE_RESUME_MAX_LOOPS = _read_int_env("E2E_CONTRACT_REVIEW_CLAUSE_RESUME_MAX_LOOPS", 24)
+_INTAKE_GATE_RESUME_MAX_LOOPS = _read_int_env("E2E_CONTRACT_REVIEW_INTAKE_GATE_RESUME_MAX_LOOPS", 4)
+_CLAUSE_REPEAT_CARD_ABORT_COUNT = _read_int_env(
+    "E2E_CONTRACT_REVIEW_REPEAT_CARD_ABORT_COUNT",
+    6,
+)
 
 
 def _safe_str(value: Any) -> str:
@@ -221,6 +228,10 @@ def _extract_clause_ids(contract_view: dict[str, Any] | None) -> list[str]:
     ]
 
 
+def _is_resume_user_message_transient(exc: AssertionError) -> bool:
+    return "SSE missing user_message" in _safe_str(exc)
+
+
 async def _wait_for_clause_ids(
     *,
     client: ApiClient,
@@ -234,6 +245,10 @@ async def _wait_for_clause_ids(
     attempts = max(1, int(max_polls))
     interval = max(0.2, float(poll_interval_s))
     drive_interval = max(1, int(drive_every))
+    last_card_signature = ""
+    same_card_streak = 0
+    intake_gate_rounds = 0
+    last_card_skill = ""
     for idx in range(attempts):
         snapshot = await _fetch_snapshot(client, matter_id)
         clause_ids = _extract_clause_ids(_extract_contract_view(snapshot))
@@ -245,24 +260,73 @@ async def _wait_for_clause_ids(
         if isinstance(card, dict) and card:
             skill_id = _safe_str(card.get("skill_id"))
             task_key = _safe_str(card.get("task_key"))
+            last_card_skill = skill_id
+            card_signature = f"{skill_id}:{task_key}"
+            if card_signature and card_signature == last_card_signature:
+                same_card_streak += 1
+            else:
+                last_card_signature = card_signature
+                same_card_streak = 1
+
+            resolved_resume_loops = max(1, int(resume_max_loops))
+            if skill_id == "intake-gate-blocked":
+                intake_gate_rounds += 1
+                resolved_resume_loops = max(1, int(_INTAKE_GATE_RESUME_MAX_LOOPS))
             print(
                 f"[clause_wait] resume_card skill={skill_id or '-'} task={task_key or '-'} "
-                f"max_loops={max(1, int(resume_max_loops))}"
+                f"max_loops={resolved_resume_loops} repeat={same_card_streak} intake_round={intake_gate_rounds}"
             )
-            await asyncio.wait_for(
-                flow.resume_card(card, max_loops=max(1, int(resume_max_loops))),
-                timeout=_RESUME_STEP_TIMEOUT_S,
-            )
+
+            if (
+                skill_id == "intake-gate-blocked"
+                and intake_gate_rounds >= max(1, int(_CLAUSE_REPEAT_CARD_ABORT_COUNT))
+            ):
+                analysis = snapshot.get("analysis_state") if isinstance(snapshot, dict) else {}
+                phase = _safe_str(analysis.get("current_phase")) if isinstance(analysis, dict) else ""
+                node = _safe_str(analysis.get("current_node")) if isinstance(analysis, dict) else ""
+                raise AssertionError(
+                    "Clause extraction stuck on repeated intake gate card "
+                    f"(intake_round={intake_gate_rounds}, skill={skill_id}, task={task_key}, "
+                    f"phase={phase or '-'}, node={node or '-'})."
+                )
+
+            try:
+                await asyncio.wait_for(
+                    flow.resume_card(card, max_loops=resolved_resume_loops),
+                    timeout=_RESUME_STEP_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"[clause_wait] resume_card timeout after {_RESUME_STEP_TIMEOUT_S:.1f}s; "
+                    "continue polling"
+                )
+            except AssertionError as exc:
+                if not _is_resume_user_message_transient(exc):
+                    raise
+                print(
+                    "[clause_wait] resume_card missing user_message; "
+                    "treat as in-flight and continue polling"
+                )
         elif ((idx + 1) % drive_interval) == 0:
             # Some remote runs end the first stream with partial progress only.
             # Trigger a short "continue" round to move the workflow cursor.
-            sse = await asyncio.wait_for(
-                client.chat(flow.session_id, "继续", attachments=flow.uploaded_file_ids, max_loops=2),
-                timeout=_CONTINUE_STEP_TIMEOUT_S,
-            )
-            if isinstance(sse, dict):
-                flow.last_sse = sse
-                flow.seen_sse.append(sse)
+            nudge_text = "继续"
+            if last_card_skill == "intake-gate-blocked":
+                nudge_text = _safe_str(FLOW_OVERRIDES.get("profile.summary")) or "请使用既有案件概述继续推进 intake。"
+            try:
+                sse = await asyncio.wait_for(
+                    client.chat(flow.session_id, nudge_text, attachments=flow.uploaded_file_ids, max_loops=2),
+                    timeout=_CONTINUE_STEP_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"[clause_wait] continue timeout after {_CONTINUE_STEP_TIMEOUT_S:.1f}s; "
+                    "treat as in-flight and keep polling"
+                )
+            else:
+                if isinstance(sse, dict):
+                    flow.last_sse = sse
+                    flow.seen_sse.append(sse)
         await asyncio.sleep(interval)
     raise AssertionError(f"Failed to extract contract clauses after {attempts} polls (matter_id={matter_id})")
 
@@ -336,12 +400,65 @@ async def run(args: argparse.Namespace) -> int:
                     return False
             return True
 
-        async def _wait_deliverables_ready_passive(*, max_polls: int, poll_interval_s: float = 2.0) -> None:
+        async def _wait_deliverables_ready_passive(
+            *,
+            max_polls: int,
+            poll_interval_s: float = 2.0,
+            drive_every: int = 5,
+            resume_max_loops: int = _CLAUSE_RESUME_MAX_LOOPS,
+        ) -> None:
             polls = max(1, int(max_polls))
             interval = max(0.2, float(poll_interval_s))
-            for _ in range(polls):
+            drive_interval = max(1, int(drive_every))
+            for idx in range(polls):
                 if await _deliverables_ready(flow):
                     return
+
+                card = await flow.get_pending_card()
+                if isinstance(card, dict) and card:
+                    skill_id = _safe_str(card.get("skill_id"))
+                    task_key = _safe_str(card.get("task_key"))
+                    resolved_resume_loops = max(1, int(resume_max_loops))
+                    if skill_id == "skill-error-analysis" and "doc_draft" in task_key:
+                        resolved_resume_loops = 1
+                    if skill_id == "intake-gate-blocked":
+                        resolved_resume_loops = max(1, int(_INTAKE_GATE_RESUME_MAX_LOOPS))
+                    print(
+                        f"[deliverables_wait] resume_card skill={skill_id or '-'} task={task_key or '-'} "
+                        f"max_loops={resolved_resume_loops}"
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            flow.resume_card(card, max_loops=resolved_resume_loops),
+                            timeout=_RESUME_STEP_TIMEOUT_S,
+                        )
+                    except asyncio.TimeoutError:
+                        print(
+                            f"[deliverables_wait] resume_card timeout after {_RESUME_STEP_TIMEOUT_S:.1f}s; "
+                            "treat as in-flight and keep polling"
+                        )
+                    except AssertionError as exc:
+                        if not _is_resume_user_message_transient(exc):
+                            raise
+                        print(
+                            "[deliverables_wait] resume_card missing user_message; "
+                            "treat as in-flight and keep polling"
+                        )
+                elif ((idx + 1) % drive_interval) == 0:
+                    try:
+                        sse = await asyncio.wait_for(
+                            client.chat(flow.session_id, "继续", attachments=flow.uploaded_file_ids, max_loops=2),
+                            timeout=_CONTINUE_STEP_TIMEOUT_S,
+                        )
+                    except asyncio.TimeoutError:
+                        print(
+                            f"[deliverables_wait] continue timeout after {_CONTINUE_STEP_TIMEOUT_S:.1f}s; "
+                            "treat as in-flight and keep polling"
+                        )
+                    else:
+                        if isinstance(sse, dict):
+                            flow.last_sse = sse
+                            flow.seen_sse.append(sse)
                 await asyncio.sleep(interval)
             raise AssertionError(
                 "Failed to reach contract review deliverables ready "

@@ -32,23 +32,23 @@ from tests.lawyer_workbench._support.flow_runner import (
 from tests.lawyer_workbench._support.sse import assert_visible_response
 from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
 
-
-DEFAULT_FACTS = (
-    "原告：张三E2E_TPL。\n"
-    "被告：李四E2E_TPL。\n"
-    "案由：民间借贷纠纷。\n"
-    "事实：2023-03-01，被告向原告借款人民币80000元，约定2023-10-01前归还；"
-    "原告已通过银行转账交付。\n"
-    "到期后被告未还，原告多次催收无果。\n"
-    "证据：借条、转账记录、聊天记录。\n"
-    "诉求：返还本金80000元，并按年利率6%支付逾期利息，承担诉讼费。"
+from scripts.template_draft_real_flow_support import (
+    DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE,
+    DEFAULT_LEGAL_OPINION_FACTS,
+    DOCGEN_STOP_NODES,
+    _build_node_timeline_row,
+    _detect_docgen_node,
+    _extract_docgen_snapshot,
+    _is_stop_node_reached,
+    _normalize_stop_node,
 )
 
-DEFAULT_EVIDENCE_RELATIVE = (
-    "tests/lawyer_workbench/civil_prosecution/evidence/sample_iou.pdf",
-    "tests/lawyer_workbench/civil_prosecution/evidence/sample_transfer_record.txt",
-    "tests/lawyer_workbench/civil_prosecution/evidence/sample_chat_record.txt",
-)
+
+DEFAULT_FACTS = DEFAULT_LEGAL_OPINION_FACTS
+
+DEFAULT_EVIDENCE_RELATIVE = DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE
+
+DEFAULT_SERVICE_TYPE_ID = "document_drafting"
 
 REASONABLE_CARD_KINDS = {"clarify", "select", "confirm"}
 LOW_SIGNAL_HINTS = (
@@ -61,11 +61,11 @@ LOW_SIGNAL_HINTS = (
     "会话正在处理中",
 )
 CITATION_RE = re.compile(r"《[^》]{2,40}》第[一二三四五六七八九十百千万0-9]{1,8}条")
-PARTY_RE = re.compile(r"(?:^|\n)\s*(?:原告|被告|申请人|被申请人|上诉人|被上诉人)\s*[:：]\s*([^\n，,。；;]{1,32})")
+PARTY_RE = re.compile(r"(?:^|\n)\s*(?:原告|被告|申请人|被申请人|上诉人|被上诉人|委托人|相对方|甲方|乙方|买方|卖方)\s*[:：]\s*([^\n，,。；;]{1,48})")
 AMOUNT_RE = re.compile(r"(?<!\d)(\d{4,10})(?!\d)")
-CLAIM_RE = re.compile(r"(?:^|\n)\s*诉求\s*[:：]\s*([^\n]+)")
-CLAIM_KEYWORDS = ("返还", "支付", "逾期利息", "诉讼费", "赔偿", "承担")
-PARTY_LINE_RE = re.compile(r"^\s*(原告|被告|申请人|被申请人|上诉人|被上诉人)\s*[:：]")
+CLAIM_RE = re.compile(r"(?:^|\n)\s*(?:诉求|目标|需求)\s*[:：]\s*([^\n]+)")
+CLAIM_KEYWORDS = ("返还", "支付", "逾期利息", "诉讼费", "赔偿", "承担", "评估", "建议", "风险", "保全", "谈判", "解除", "索赔")
+PARTY_LINE_RE = re.compile(r"^\s*(原告|被告|申请人|被申请人|上诉人|被上诉人|委托人|相对方|甲方|乙方|买方|卖方)\s*[:：]")
 UNRESOLVED_QUALITY_TOKENS = (
     "待核实",
     "待确认",
@@ -105,6 +105,20 @@ def _sse_has_user_message_event(sse: dict[str, Any]) -> bool:
         if _safe_str(row.get("event")) == "user_message":
             return True
     return False
+
+
+def _sse_error_events(sse: dict[str, Any]) -> list[dict[str, Any]]:
+    events_obj = sse.get("events")
+    events: list[Any] = events_obj if isinstance(events_obj, list) else []
+    out: list[dict[str, Any]] = []
+    for row in events:
+        if not isinstance(row, dict):
+            continue
+        if _safe_str(row.get("event")) != "error":
+            continue
+        data = row.get("data")
+        out.append(data if isinstance(data, dict) else {"raw": data})
+    return out
 
 
 def _extract_templates(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -155,6 +169,13 @@ def _is_low_signal_output(text: str) -> bool:
     if all(tok in short for tok in ("会话", "处理中")):
         return True
     return False
+
+
+def _is_terminal_failure_output(text: str) -> bool:
+    raw = _safe_str(text)
+    if not raw:
+        return False
+    return ("技能执行失败（" in raw and "已停止自动循环" in raw) or ("请处理阻塞后继续" in raw)
 
 
 def _normalize_text_for_number_match(text: str) -> str:
@@ -270,7 +291,7 @@ def _build_flow_overrides(
         "profile.claims": claim_text or "请按已提供事实整理诉求并推进起草。",
         "profile.court_name": "北京市海淀区人民法院",
         "profile.document_type": _safe_str(template_name) or "民事起诉状",
-        "profile.service_type_id": _safe_str(service_type_id) or "document_drafting",
+        "profile.service_type_id": _safe_str(service_type_id) or DEFAULT_SERVICE_TYPE_ID,
         "attachment_file_ids": [str(x).strip() for x in uploaded_file_ids if _safe_str(x)],
     }
 
@@ -354,8 +375,9 @@ async def _create_matter_with_retry(
 ) -> dict[str, Any]:
     last_error: Exception | None = None
     for attempt in range(1, max(1, max_attempts) + 1):
+        attempt_title = title if attempt == 1 else f"{title}-retry{attempt}"
         try:
-            return await client.create_matter(service_type_id=service_type_id, title=title, file_ids=file_ids)
+            return await client.create_matter(service_type_id=service_type_id, title=attempt_title, file_ids=file_ids)
         except httpx.HTTPStatusError as e:
             code = e.response.status_code if e.response is not None else None
             if code in {409, 429, 500, 502, 503, 504} and attempt < max_attempts:
@@ -530,6 +552,34 @@ def _write_events_ndjson(path: Path, rows: list[dict[str, Any]]) -> None:
             f.write("\n")
 
 
+def _http_error_details(exc: Exception) -> dict[str, Any]:
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return {"error": str(exc)}
+    resp = exc.response
+    body = ""
+    try:
+        body = resp.text if resp is not None else ""
+    except Exception:
+        body = ""
+    return {
+        "error": str(exc),
+        "status_code": resp.status_code if resp is not None else None,
+        "url": str(resp.request.url) if (resp is not None and resp.request is not None) else "",
+        "response_text": body[:4000],
+    }
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+class StopAfterNodeReached(RuntimeError):
+    def __init__(self, snapshot: dict[str, Any], target_node: str):
+        self.snapshot = snapshot
+        self.target_node = target_node
+        super().__init__(f"stop_after_node reached: {target_node}")
+
+
 async def run(args: argparse.Namespace) -> int:
     load_dotenv(REPO_ROOT / ".env", override=False)
     load_dotenv(E2E_ROOT / ".env", override=False)
@@ -544,8 +594,19 @@ async def run(args: argparse.Namespace) -> int:
     facts_text = _load_facts_text(args)
     doc_targets = _build_doc_targets(facts_text)
     output_key = _safe_str(args.output_key) or f"template:{template_id}"
+    effective_service_type = _safe_str(args.service_type_id) or DEFAULT_SERVICE_TYPE_ID
+    if effective_service_type != DEFAULT_SERVICE_TYPE_ID:
+        raise ValueError(
+            f"template_draft_start only allowed for {DEFAULT_SERVICE_TYPE_ID} matters; got={effective_service_type}"
+        )
+    raw_stop_after_node = _safe_str(args.stop_after_node)
+    stop_after_node = _normalize_stop_node(raw_stop_after_node)
+    if raw_stop_after_node and not stop_after_node:
+        raise ValueError(f"unsupported stop-after-node: {raw_stop_after_node}; choices={sorted(DOCGEN_STOP_NODES)}")
+    poll_interval_s = max(0.3, float(args.poll_interval_s))
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_token = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     out_dir = (
         Path(args.output_dir).expanduser()
         if _safe_str(args.output_dir)
@@ -561,7 +622,7 @@ async def run(args: argparse.Namespace) -> int:
 
     print(f"[config] base_url={base_url}")
     print(f"[config] user={username}")
-    print(f"[config] service_type_id={_safe_str(args.service_type_id) or 'document_drafting'}")
+    print(f"[config] service_type_id={effective_service_type}")
     print(f"[config] template_id={template_id}")
     print(f"[config] output_key={output_key}")
     print(f"[config] output_dir={out_dir}")
@@ -575,7 +636,7 @@ async def run(args: argparse.Namespace) -> int:
     summary: dict[str, Any] = {
         "base_url": base_url,
         "username": username,
-        "service_type_id": _safe_str(args.service_type_id) or "document_drafting",
+        "service_type_id": effective_service_type,
         "template_id": template_id,
         "template_name": "",
         "output_key": output_key,
@@ -589,6 +650,18 @@ async def run(args: argparse.Namespace) -> int:
         "status": "running",
         "started_at": datetime.now().isoformat(),
     }
+    summary["stop_after_node"] = stop_after_node or None
+    summary["debug_json"] = bool(args.debug_json)
+    summary["node_timeline_path"] = str(out_dir / "node_timeline.json")
+    summary["state_snapshots_dir"] = str(out_dir / "state_snapshots")
+
+    state_snapshots_dir = out_dir / "state_snapshots"
+    state_snapshots_dir.mkdir(parents=True, exist_ok=True)
+    node_timeline: list[dict[str, Any]] = []
+    docgen_node_sequence: list[str] = []
+    last_docgen_snapshot: dict[str, Any] = {}
+    flow: WorkbenchFlow | None = None
+    observer: Any = None
 
     async def _record_round(
         *,
@@ -675,6 +748,9 @@ async def run(args: argparse.Namespace) -> int:
                     f"streak={low_signal_streak}, threshold={args.max_low_signal_streak}"
                 )
 
+        if observer is not None:
+            await observer(trigger=action)
+
     resume_busy_retries = max(1, int(os.getenv("E2E_RESUME_BUSY_RETRIES", "6") or 6))
 
     async def _resume_card_with_busy_retry(
@@ -709,6 +785,179 @@ async def run(args: argparse.Namespace) -> int:
             await client.login(username, password)
             print(f"[login] ok user_id={client.user_id} org_id={client.organization_id}")
 
+            async def _observe_runtime_state(
+                *,
+                trigger: str,
+                pending_card: dict[str, Any] | None = None,
+                deliverable_rows: list[dict[str, Any]] | None = None,
+            ) -> dict[str, Any]:
+                nonlocal last_docgen_snapshot
+                matter_ref = _safe_str((flow.matter_id if flow is not None else "") or summary.get("matter_id"))
+                session_ref = _safe_str(summary.get("session_id"))
+                errors: dict[str, str] = {}
+
+                session_data: dict[str, Any] = {}
+                workbench_snapshot: dict[str, Any] = {}
+                workflow_snapshot: dict[str, Any] = {}
+                phase_timeline: dict[str, Any] = {}
+                matter_timeline: dict[str, Any] = {}
+                trace_rows: list[dict[str, Any]] = []
+                pending_effective = pending_card if isinstance(pending_card, dict) else None
+                deliverable_rows_effective = [row for row in (deliverable_rows or []) if isinstance(row, dict)]
+
+                if session_ref:
+                    try:
+                        session_resp = await client.get_session(session_ref)
+                        unwrapped = unwrap_api_response(session_resp)
+                        session_data = unwrapped if isinstance(unwrapped, dict) else {}
+                    except Exception as exc:  # noqa: BLE001
+                        errors["session"] = str(exc)
+
+                    if pending_effective is None:
+                        try:
+                            pending_resp = await client.get_pending_card(session_ref)
+                            pending_unwrapped = unwrap_api_response(pending_resp)
+                            pending_effective = pending_unwrapped if isinstance(pending_unwrapped, dict) and pending_unwrapped else None
+                        except Exception as exc:  # noqa: BLE001
+                            errors["pending_card"] = str(exc)
+
+                    try:
+                        traces_resp = await client.list_session_traces(session_ref, limit=40)
+                        traces_data = unwrap_api_response(traces_resp)
+                        rows = traces_data.get("traces") if isinstance(traces_data, dict) else None
+                        trace_rows = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+                    except Exception as exc:  # noqa: BLE001
+                        errors["session_traces"] = str(exc)
+
+                if matter_ref:
+                    try:
+                        wb_resp = await client.get(f"/matter-service/lawyer/matters/{matter_ref}/workbench/snapshot")
+                        wb_data = unwrap_api_response(wb_resp)
+                        workbench_snapshot = wb_data if isinstance(wb_data, dict) else {}
+                    except Exception as exc:  # noqa: BLE001
+                        errors["workbench_snapshot"] = str(exc)
+
+                    try:
+                        wf_resp = await client.get_workflow_snapshot(matter_ref)
+                        wf_data = unwrap_api_response(wf_resp)
+                        workflow_snapshot = wf_data if isinstance(wf_data, dict) else {}
+                    except Exception as exc:  # noqa: BLE001
+                        errors["workflow_snapshot"] = str(exc)
+
+                    try:
+                        pt_resp = await client.get_matter_phase_timeline(matter_ref)
+                        pt_data = unwrap_api_response(pt_resp)
+                        phase_timeline = pt_data if isinstance(pt_data, dict) else {}
+                    except Exception as exc:  # noqa: BLE001
+                        errors["phase_timeline"] = str(exc)
+
+                    if not deliverable_rows_effective:
+                        try:
+                            deliverable_rows_effective = await _list_deliverables(client, matter_ref, output_key)
+                        except Exception as exc:  # noqa: BLE001
+                            errors["deliverables"] = str(exc)
+
+                    if bool(args.debug_json):
+                        try:
+                            tl_resp = await client.get_matter_timeline(matter_ref, limit=40)
+                            tl_data = unwrap_api_response(tl_resp)
+                            matter_timeline = tl_data if isinstance(tl_data, dict) else {}
+                        except Exception as exc:  # noqa: BLE001
+                            errors["matter_timeline"] = str(exc)
+
+                snapshot = _extract_docgen_snapshot(
+                    matter_id=matter_ref,
+                    session_id=session_ref,
+                    workbench_snapshot=workbench_snapshot,
+                    workflow_snapshot=workflow_snapshot,
+                    phase_timeline=phase_timeline,
+                    session=session_data,
+                    pending_card=pending_effective,
+                    deliverables=deliverable_rows_effective,
+                    traces=trace_rows,
+                )
+                trace_obj = snapshot.get("trace") if isinstance(snapshot.get("trace"), dict) else {}
+                current_node = _detect_docgen_node(
+                    current_task_id=_safe_str(snapshot.get("current_task_id")),
+                    current_phase=_safe_str(snapshot.get("current_phase")),
+                    pending_card=snapshot.get("pending_card") if isinstance(snapshot.get("pending_card"), dict) else {},
+                    deliverable=snapshot.get("deliverable") if isinstance(snapshot.get("deliverable"), dict) else {},
+                    docgen=snapshot.get("docgen") if isinstance(snapshot.get("docgen"), dict) else {},
+                    trace_node_ids=trace_obj.get("trace_node_ids") if isinstance(trace_obj.get("trace_node_ids"), list) else [],
+                    template_quality_contracts_json_exists=bool(snapshot.get("template_quality_contracts_json_exists")),
+                    docgen_repair_plan_exists=bool(snapshot.get("docgen_repair_plan_exists")),
+                    quality_review_decision=_safe_str(snapshot.get("quality_review_decision")),
+                )
+                if current_node and (not docgen_node_sequence or current_node != docgen_node_sequence[-1]):
+                    docgen_node_sequence.append(current_node)
+
+                observed_at = datetime.now().isoformat()
+                step_no = len(node_timeline) + 1
+                snapshot["docgen_node"] = current_node
+                snapshot["docgen_node_sequence"] = list(docgen_node_sequence)
+                snapshot["observed_at"] = observed_at
+                snapshot["trigger"] = trigger
+                if errors:
+                    snapshot["collection_errors"] = errors
+                if bool(args.debug_json):
+                    snapshot["raw"] = {
+                        "session": session_data,
+                        "workbench_snapshot": workbench_snapshot,
+                        "workflow_snapshot": workflow_snapshot,
+                        "phase_timeline": phase_timeline,
+                        "matter_timeline": matter_timeline,
+                        "pending_card": pending_effective or {},
+                        "deliverables": deliverable_rows_effective,
+                        "traces": trace_rows,
+                    }
+
+                node_timeline.append(
+                    _build_node_timeline_row(
+                        step=step_no,
+                        trigger=trigger,
+                        observed_at=observed_at,
+                        docgen_snapshot=snapshot,
+                        docgen_node_sequence=docgen_node_sequence,
+                    )
+                )
+                _write_json(state_snapshots_dir / f"step_{step_no:03d}.json", snapshot)
+                _write_json(out_dir / "node_timeline.json", node_timeline)
+
+                deliverable_obj = snapshot.get("deliverable") if isinstance(snapshot.get("deliverable"), dict) else {}
+                summary.update(
+                    {
+                        "docgen_node_sequence": list(docgen_node_sequence),
+                        "latest_docgen_node": current_node,
+                        "deliverable_status": _safe_str(deliverable_obj.get("status")),
+                        "template_quality_contracts_json_exists": bool(snapshot.get("template_quality_contracts_json_exists")),
+                        "docgen_repair_plan_exists": bool(snapshot.get("docgen_repair_plan_exists")),
+                        "docgen_repair_contracts_json_exists": bool(snapshot.get("docgen_repair_contracts_json_exists")),
+                        "quality_review_decision": _safe_str(snapshot.get("quality_review_decision")),
+                        "soft_reason_codes": snapshot.get("soft_reason_codes") if isinstance(snapshot.get("soft_reason_codes"), list) else [],
+                    }
+                )
+                last_docgen_snapshot = snapshot
+
+                if stop_after_node and _is_stop_node_reached(
+                    target_node=stop_after_node,
+                    current_node=current_node,
+                    seen_nodes=docgen_node_sequence,
+                ):
+                    summary.update(
+                        {
+                            "status": "stopped_after_node",
+                            "stop_after_node": stop_after_node,
+                            "stop_reached_node": current_node,
+                            "stop_reached_at": observed_at,
+                            "stop_reached_step": step_no,
+                        }
+                    )
+                    raise StopAfterNodeReached(snapshot, stop_after_node)
+
+                return snapshot
+
+            observer = _observe_runtime_state
+
             evidence_paths = _resolve_evidence_paths(args.evidence_file)
             summary["evidence_files"] = [str(p) for p in evidence_paths]
             uploaded_file_ids: list[str] = []
@@ -724,22 +973,17 @@ async def run(args: argparse.Namespace) -> int:
             try:
                 matter = await _create_matter_with_retry(
                     client,
-                    service_type_id=_safe_str(args.service_type_id) or "document_drafting",
-                    title=f"E2E 智能模板起草（service_type={_safe_str(args.service_type_id) or 'document_drafting'}, template_id={template_id})",
+                    service_type_id=effective_service_type,
+                    title=(
+                        f"E2E 智能模板起草（service_type={effective_service_type}, "
+                        f"template_id={template_id}, run={run_token}）"
+                    ),
                     file_ids=uploaded_file_ids,
                     max_attempts=max(3, int(os.getenv("E2E_CREATE_MATTER_ATTEMPTS", "6") or 6)),
                 )
             except Exception as e:
-                # Some remote envs reject create_matter(file_ids=...) even when files are valid.
-                # Fallback to creating the matter first, then rely on chat attachments in the WS flow.
-                print(f"[warn] create_matter with file_ids failed, fallback without file_ids: {e}")
-                matter = await _create_matter_with_retry(
-                    client,
-                    service_type_id=_safe_str(args.service_type_id) or "document_drafting",
-                    title=f"E2E 智能模板起草（service_type={_safe_str(args.service_type_id) or 'document_drafting'}, template_id={template_id})",
-                    file_ids=[],
-                    max_attempts=max(3, int(os.getenv("E2E_CREATE_MATTER_ATTEMPTS", "6") or 6)),
-                )
+                print(json.dumps({"stage": "create_matter", **_http_error_details(e)}, ensure_ascii=False), flush=True)
+                raise
             matter_id = _safe_str(((matter.get("data") or {}) if isinstance(matter, dict) else {}).get("id"))
             if not matter_id:
                 raise RuntimeError(f"create_matter failed: {matter}")
@@ -768,19 +1012,24 @@ async def run(args: argparse.Namespace) -> int:
                     "template_id": template_id,
                     "deliverable_title": template_name,
                     "output_key": output_key,
+                    "template_key": output_key,
                 },
             )
             await _record_round(
                 action="workflow_action.template_draft_start",
-                payload={"template_id": template_id, "output_key": output_key},
+                payload={"template_id": template_id, "output_key": output_key, "template_key": output_key},
                 sse=start_sse if isinstance(start_sse, dict) else {},
                 enforce_visibility=False,
             )
+            start_errors = _sse_error_events(start_sse if isinstance(start_sse, dict) else {})
+            if start_errors:
+                print(json.dumps({"stage": "workflow_action.template_draft_start", "errors": start_errors}, ensure_ascii=False), flush=True)
+                raise RuntimeError(f"template_draft_start returned error events: {start_errors}")
 
             flow_overrides = _build_flow_overrides(
                 facts_text,
                 uploaded_file_ids,
-                service_type_id=_safe_str(args.service_type_id) or "document_drafting",
+                service_type_id=effective_service_type,
                 template_name=template_name,
             )
             flow = WorkbenchFlow(
@@ -798,6 +1047,9 @@ async def run(args: argparse.Namespace) -> int:
                 sse=kickoff_sse if isinstance(kickoff_sse, dict) else {},
                 enforce_visibility=True,
             )
+            kickoff_output = _safe_str((kickoff_sse if isinstance(kickoff_sse, dict) else {}).get("output"))
+            if _is_terminal_failure_output(kickoff_output):
+                raise RuntimeError(f"kickoff returned terminal failure output: {kickoff_output}")
 
             kickoff_card = extract_last_card_from_sse(kickoff_sse if isinstance(kickoff_sse, dict) else {})
             resume_kickoff_sse_card = str(os.getenv("E2E_RESUME_KICKOFF_SSE_CARD", "0") or "0").strip().lower() in {
@@ -852,9 +1104,12 @@ async def run(args: argparse.Namespace) -> int:
                 "no",
                 "off",
             }
-            for _ in range(max_steps):
+            for step_idx in range(max_steps):
+                if step_idx > 0 and poll_interval_s > 0:
+                    await asyncio.sleep(poll_interval_s)
                 await flow.refresh()
                 deliverable_head: dict[str, Any] | None = None
+                deliverable_rows: list[dict[str, Any]] = []
                 if flow.matter_id:
                     deliverable_rows = await _list_deliverables(client, flow.matter_id, output_key)
                     if deliverable_rows:
@@ -862,15 +1117,18 @@ async def run(args: argparse.Namespace) -> int:
                         candidate = _pick_deliverable_with_file(deliverable_rows)
                         if candidate:
                             deliverable_row = candidate
-                            break
                     head_sig = _deliverable_signature(deliverable_head)
                     if head_sig and head_sig != last_deliverable_sig:
                         last_deliverable_sig = head_sig
                         stall_rounds = 0
+                if observer is not None:
+                    await observer(trigger="poll.loop", deliverable_rows=deliverable_rows)
                 if deliverable_row:
                     break
 
                 pending = await flow.get_pending_card() if use_pending_card_api else None
+                if observer is not None and pending:
+                    await observer(trigger="poll.pending_card", pending_card=pending, deliverable_rows=deliverable_rows)
                 if pending:
                     stall_rounds = 0
                     skill_id = _safe_str(pending.get("skill_id"))
@@ -1008,6 +1266,9 @@ async def run(args: argparse.Namespace) -> int:
                         sse=sse if isinstance(sse, dict) else {},
                         enforce_visibility=False,
                     )
+                    nudge_output = _safe_str((sse if isinstance(sse, dict) else {}).get("output"))
+                    if _is_terminal_failure_output(nudge_output):
+                        raise RuntimeError(f"nudge returned terminal failure output: {nudge_output}")
 
                     sse_card = extract_last_card_from_sse(sse if isinstance(sse, dict) else {})
                     if isinstance(sse_card, dict) and sse_card:
@@ -1083,6 +1344,8 @@ async def run(args: argparse.Namespace) -> int:
             )
 
             rows = await _list_deliverables(client, flow.matter_id or matter_id, output_key)
+            if observer is not None:
+                await observer(trigger="deliverable.archived", deliverable_rows=rows)
             if not rows:
                 raise AssertionError("no deliverables after archive wait")
             deliverable = rows[0]
@@ -1137,24 +1400,115 @@ async def run(args: argparse.Namespace) -> int:
                     "dialogue_quality_pass": bool(dialogue_quality.get("pass")),
                     "document_quality_pass": bool(document_quality.get("pass")),
                     "round_count": len(rounds),
+                    "docgen_node_sequence": list(docgen_node_sequence),
+                    "latest_docgen_node": _safe_str(last_docgen_snapshot.get("docgen_node")),
+                    "template_quality_contracts_json_exists": bool(last_docgen_snapshot.get("template_quality_contracts_json_exists")),
+                    "docgen_repair_plan_exists": bool(last_docgen_snapshot.get("docgen_repair_plan_exists")),
+                    "docgen_repair_contracts_json_exists": bool(last_docgen_snapshot.get("docgen_repair_contracts_json_exists")),
+                    "quality_review_decision": _safe_str(last_docgen_snapshot.get("quality_review_decision")),
+                    "soft_reason_codes": last_docgen_snapshot.get("soft_reason_codes") if isinstance(last_docgen_snapshot.get("soft_reason_codes"), list) else [],
+                    "deliverable_status": status,
                 }
             )
 
-            (out_dir / "deliverables.json").write_text(
-                json.dumps({"deliverables": rows}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            (out_dir / "cards.json").write_text(
-                json.dumps(cards_seen, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _write_json(out_dir / "deliverables.json", {"deliverables": rows})
+            _write_json(out_dir / "cards.json", cards_seen)
             _write_events_ndjson(out_dir / "events.ndjson", event_rows)
-            (out_dir / "summary.json").write_text(
-                json.dumps(summary, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _write_json(out_dir / "node_timeline.json", node_timeline)
+            _write_json(out_dir / "summary.json", summary)
 
             print("[done] template draft workflow completed")
+            print(f"[artifacts] {out_dir}")
+            return 0
+
+        except StopAfterNodeReached as stop_exc:
+            if dialogue_quality is None:
+                dialogue_quality = _evaluate_dialogue_quality(
+                    rounds=rounds,
+                    cards=cards_seen,
+                    strict_dialogue=bool(args.strict_dialogue),
+                )
+
+            matter_ref = _safe_str(summary.get("matter_id"))
+            stop_rows: list[dict[str, Any]] = []
+            stop_doc_text = ""
+            stop_deliverable_status = _safe_str(((stop_exc.snapshot.get("deliverable") or {}) if isinstance(stop_exc.snapshot.get("deliverable"), dict) else {}).get("status"))
+            if matter_ref:
+                try:
+                    stop_rows = await _list_deliverables(client, matter_ref, output_key)
+                    _write_json(out_dir / "deliverables.json", {"deliverables": stop_rows})
+                except Exception:
+                    stop_rows = []
+            stop_candidate = _pick_deliverable_with_file(stop_rows)
+            if stop_candidate:
+                try:
+                    stop_file_id = _safe_str(stop_candidate.get("file_id"))
+                    if stop_file_id:
+                        docx_bytes = await client.download_file_bytes(stop_file_id)
+                        stop_doc_text = extract_docx_text(docx_bytes)
+                        (out_dir / "document.docx").write_bytes(docx_bytes)
+                        (out_dir / "document.txt").write_text(stop_doc_text, encoding="utf-8")
+                        stop_deliverable_status = _safe_str(stop_candidate.get("status"))
+                except Exception:
+                    pass
+
+            if document_quality is None:
+                if stop_doc_text:
+                    document_quality = _evaluate_document_quality(
+                        text=stop_doc_text,
+                        targets=doc_targets,
+                        min_citations=max(0, int(args.min_citations)),
+                        deliverable_status=stop_deliverable_status,
+                        strict_quality=bool(args.strict_quality),
+                    )
+                else:
+                    document_quality = {
+                        "strict_quality": bool(args.strict_quality),
+                        "pass": False,
+                        "failure_reasons": [f"stop_after_node={stop_exc.target_node} reached before最终文书下载"],
+                        "placeholder_leak": None,
+                        "citation_count": 0,
+                        "citation_threshold": int(max(0, int(args.min_citations))),
+                        "fact_coverage_score": 0.0,
+                        "party_expected": doc_targets.get("parties") or [],
+                        "party_missing": doc_targets.get("parties") or [],
+                        "amount_expected": doc_targets.get("amounts") or [],
+                        "amount_missing": doc_targets.get("amounts") or [],
+                        "claim_keywords_expected": doc_targets.get("claim_keywords") or [],
+                        "claim_keywords_hit": [],
+                        "deliverable_status": stop_deliverable_status,
+                        "document_length": len(stop_doc_text),
+                    }
+
+            summary.update(
+                {
+                    "status": "stopped_after_node",
+                    "ended_at": datetime.now().isoformat(),
+                    "round_count": len(rounds),
+                    "dialogue_quality_pass": bool(dialogue_quality.get("pass")),
+                    "document_quality_pass": bool(document_quality.get("pass")),
+                    "stop_after_node": stop_exc.target_node,
+                    "stop_reached_node": _safe_str(stop_exc.snapshot.get("docgen_node")),
+                    "stop_reached_step": len(node_timeline),
+                    "docgen_node_sequence": list(docgen_node_sequence),
+                    "latest_docgen_node": _safe_str(stop_exc.snapshot.get("docgen_node")),
+                    "template_quality_contracts_json_exists": bool(stop_exc.snapshot.get("template_quality_contracts_json_exists")),
+                    "docgen_repair_plan_exists": bool(stop_exc.snapshot.get("docgen_repair_plan_exists")),
+                    "docgen_repair_contracts_json_exists": bool(stop_exc.snapshot.get("docgen_repair_contracts_json_exists")),
+                    "quality_review_decision": _safe_str(stop_exc.snapshot.get("quality_review_decision")),
+                    "soft_reason_codes": stop_exc.snapshot.get("soft_reason_codes") if isinstance(stop_exc.snapshot.get("soft_reason_codes"), list) else [],
+                    "deliverable_status": stop_deliverable_status,
+                }
+            )
+
+            _write_events_ndjson(out_dir / "events.ndjson", event_rows)
+            _write_json(out_dir / "cards.json", cards_seen)
+            _write_json(out_dir / "dialogue_quality.json", dialogue_quality)
+            _write_json(out_dir / "document_quality.json", document_quality)
+            _write_json(out_dir / "node_timeline.json", node_timeline)
+            _write_json(out_dir / "summary.json", summary)
+
+            print(f"[stopped] stop_after_node={stop_exc.target_node} reached")
             print(f"[artifacts] {out_dir}")
             return 0
 
@@ -1192,6 +1546,8 @@ async def run(args: argparse.Namespace) -> int:
                     "round_count": len(rounds),
                     "dialogue_quality_pass": bool(dialogue_quality.get("pass")),
                     "document_quality_pass": bool(document_quality.get("pass")),
+                    "docgen_node_sequence": list(docgen_node_sequence),
+                    "latest_docgen_node": _safe_str(last_docgen_snapshot.get("docgen_node")),
                 }
             )
 
@@ -1203,6 +1559,8 @@ async def run(args: argparse.Namespace) -> int:
                 "summary": summary,
                 "rounds_tail": rounds[-10:],
                 "cards_tail": cards_seen[-10:],
+                "node_timeline_tail": node_timeline[-12:],
+                "last_docgen_snapshot": last_docgen_snapshot,
             }
 
             if matter_id:
@@ -1224,23 +1582,12 @@ async def run(args: argparse.Namespace) -> int:
                     pass
 
             _write_events_ndjson(out_dir / "events.ndjson", event_rows)
-            (out_dir / "cards.json").write_text(json.dumps(cards_seen, ensure_ascii=False, indent=2), encoding="utf-8")
-            (out_dir / "dialogue_quality.json").write_text(
-                json.dumps(dialogue_quality, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            (out_dir / "document_quality.json").write_text(
-                json.dumps(document_quality, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            (out_dir / "failure_diagnostics.json").write_text(
-                json.dumps(failure_diag, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            (out_dir / "summary.json").write_text(
-                json.dumps(summary, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _write_json(out_dir / "cards.json", cards_seen)
+            _write_json(out_dir / "dialogue_quality.json", dialogue_quality)
+            _write_json(out_dir / "document_quality.json", document_quality)
+            _write_json(out_dir / "node_timeline.json", node_timeline)
+            _write_json(out_dir / "failure_diagnostics.json", failure_diag)
+            _write_json(out_dir / "summary.json", summary)
             print(f"[failed] {e}")
             print(f"[artifacts] {out_dir}")
             return 1
@@ -1251,7 +1598,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default="", help="Gateway base URL, e.g. http://host/api/v1")
     parser.add_argument("--username", default="", help="Lawyer username")
     parser.add_argument("--password", default="", help="Lawyer password")
-    parser.add_argument("--service-type-id", default="document_drafting", help="Matter service_type_id")
+    parser.add_argument("--service-type-id", default=DEFAULT_SERVICE_TYPE_ID, help="Matter service_type_id")
     parser.add_argument("--template-id", required=True, help="Template ID used by template_draft_start")
     parser.add_argument("--template-name", default="", help="Optional override for deliverable title")
     parser.add_argument("--output-key", default="", help="Deliverable output_key; default template:<template_id>")
@@ -1264,6 +1611,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-steps", type=int, default=160, help="Workflow driving max steps")
     parser.add_argument("--max-loops", type=int, default=12, help="WS max_loops per call")
+    parser.add_argument("--poll-interval-s", type=float, default=2.0, help="Polling interval between state snapshots")
+    parser.add_argument("--stop-after-node", default="", help=f"Stop successfully after node reached: {', '.join(DOCGEN_STOP_NODES)}")
+    parser.add_argument("--debug-json", action="store_true", help="Include raw API payloads in state snapshots")
     parser.add_argument("--nudge-text", default="继续", help="Nudge text when no pending card")
     parser.add_argument("--max-low-signal-streak", type=int, default=4, help="Dialogue low-signal streak threshold")
     parser.add_argument(

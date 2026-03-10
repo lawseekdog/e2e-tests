@@ -217,7 +217,7 @@ async def lawyer_client():
                     {"organization_id": int(org_id)},
                 )
             except httpx.HTTPStatusError as e:
-                if e.response is not None and e.response.status_code in {401, 403}:
+                if e.response is not None and e.response.status_code in {401, 403, 404, 409, 499}:
                     pass
                 else:
                     raise

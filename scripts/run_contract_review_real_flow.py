@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -117,6 +118,41 @@ def _event_counts(sse: dict[str, Any]) -> dict[str, int]:
             continue
         name = _safe_str(row.get("event")) or "unknown"
         out[name] = int(out.get(name) or 0) + 1
+    return out
+
+
+def _capture_runtime_images() -> dict[str, str]:
+    kubeconfig = _safe_str(os.getenv("KUBECONFIG")) or _safe_str(os.getenv("HOME")) + "/.kube/config-lawseekdog"
+    if not kubeconfig or not Path(kubeconfig).exists():
+        return {}
+    cmd = [
+        "kubectl",
+        "get",
+        "deploy",
+        "-n",
+        "lawseekdog",
+        "ai-engine",
+        "consultations-service",
+        "matter-service",
+        "templates-service",
+        "-o",
+        "jsonpath={range .items[*]}{.metadata.name}{\"=\"}{.spec.template.spec.containers[0].image}{\"\\n\"}{end}",
+    ]
+    env = dict(os.environ)
+    env["KUBECONFIG"] = kubeconfig
+    try:
+        raw = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env, timeout=10)
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for line in raw.splitlines():
+        if "=" not in line:
+            continue
+        name, image = line.split("=", 1)
+        name = _safe_str(name)
+        image = _safe_str(image)
+        if name and image:
+            out[name] = image
     return out
 
 
@@ -349,6 +385,10 @@ async def run(args: argparse.Namespace) -> int:
     print(f"[config] user={username}")
     print(f"[config] contract_file={contract_file}")
     print(f"[config] output_dir={out_dir}")
+    start_images = _capture_runtime_images()
+    if start_images:
+        (out_dir / "runtime_images.start.json").write_text(json.dumps(start_images, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[runtime] start_images={start_images}")
 
     async with ApiClient(base_url) as client:
         await client.login(username, password)
@@ -578,6 +618,10 @@ async def run(args: argparse.Namespace) -> int:
             if args.assert_docx:
                 assert_docx_has_no_template_placeholders(report_text)
 
+        end_images = _capture_runtime_images()
+        if end_images:
+            (out_dir / "runtime_images.end.json").write_text(json.dumps(end_images, ensure_ascii=False, indent=2), encoding="utf-8")
+
         summary = {
             "base_url": base_url,
             "session_id": session_id,
@@ -598,7 +642,13 @@ async def run(args: argparse.Namespace) -> int:
             },
             "seen_cards": len(flow.seen_cards),
             "seen_sse_rounds": len(flow.seen_sse),
+            "runtime_images_start": start_images,
+            "runtime_images_end": end_images,
+            "runtime_images_stable": (start_images == end_images) if start_images and end_images else None,
         }
+
+        if start_images and end_images and start_images != end_images and str(os.getenv("E2E_ALLOW_DEPLOYMENT_DRIFT", "") or "").strip() not in {"1", "true", "yes"}:
+            raise RuntimeError(f"deployment_image_drift_detected: start={start_images} end={end_images}")
 
         (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         (out_dir / "deliverables.json").write_text(json.dumps(deliverables, ensure_ascii=False, indent=2), encoding="utf-8")

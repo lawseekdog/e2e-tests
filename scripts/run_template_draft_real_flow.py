@@ -195,6 +195,20 @@ def _resume_ack_only_response(*, action: str, sse: dict[str, Any], visible_error
     return False
 
 
+def _workflow_action_ack_only_response(*, action: str, sse: dict[str, Any]) -> bool:
+    if action != "workflow_action.template_draft_start":
+        return False
+    errors = _sse_error_events(sse)
+    if not errors:
+        return False
+    for row in errors:
+        message = _safe_str((row or {}).get("message"))
+        partial = bool((row or {}).get("partial"))
+        if (not partial) or ("后台继续处理中" not in message):
+            return False
+    return True
+
+
 def _normalize_text_for_number_match(text: str) -> str:
     return re.sub(r"[\s,，]", "", text or "")
 
@@ -430,6 +444,62 @@ async def _create_session_with_retry(client: ApiClient, matter_id: str, max_atte
                 continue
             raise
     raise last_error if last_error else RuntimeError("create_session failed")
+
+
+async def _wait_template_draft_start_settled(
+    client: ApiClient,
+    *,
+    session_id: str,
+    matter_id: str,
+    timeout_s: float = 20.0,
+    poll_interval_s: float = 1.5,
+) -> dict[str, Any]:
+    deadline = asyncio.get_running_loop().time() + max(1.0, timeout_s)
+    last_pending: dict[str, Any] = {}
+    last_snapshot: dict[str, Any] = {}
+
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            pending_resp = await client.get_pending_card(session_id)
+            pending_data = unwrap_api_response(pending_resp)
+            if isinstance(pending_data, dict):
+                last_pending = pending_data
+                if pending_data:
+                    return {
+                        "settled": True,
+                        "reason": "pending_card",
+                        "pending_card": pending_data,
+                        "snapshot": last_snapshot,
+                    }
+        except Exception:
+            pass
+
+        try:
+            snapshot_resp = await client.get(f"/matter-service/lawyer/matters/{matter_id}/workbench/snapshot")
+            snapshot_data = unwrap_api_response(snapshot_resp)
+            if isinstance(snapshot_data, dict):
+                last_snapshot = snapshot_data
+                analysis_state = snapshot_data.get("analysis_state") if isinstance(snapshot_data.get("analysis_state"), dict) else {}
+                current_subgraph = _safe_str(analysis_state.get("current_subgraph"))
+                current_task_id = _safe_str(analysis_state.get("current_task_id"))
+                if current_subgraph == "document_generation" or current_task_id.startswith("docgen"):
+                    return {
+                        "settled": True,
+                        "reason": "docgen_runtime",
+                        "pending_card": last_pending,
+                        "snapshot": snapshot_data,
+                    }
+        except Exception:
+            pass
+
+        await asyncio.sleep(max(0.5, poll_interval_s))
+
+    return {
+        "settled": False,
+        "reason": "timeout",
+        "pending_card": last_pending,
+        "snapshot": last_snapshot,
+    }
 
 
 def _evaluate_dialogue_quality(
@@ -1043,8 +1113,25 @@ async def run(args: argparse.Namespace) -> int:
             )
             start_errors = _sse_error_events(start_sse if isinstance(start_sse, dict) else {})
             if start_errors:
-                print(json.dumps({"stage": "workflow_action.template_draft_start", "errors": start_errors}, ensure_ascii=False), flush=True)
-                raise RuntimeError(f"template_draft_start returned error events: {start_errors}")
+                if _workflow_action_ack_only_response(
+                    action="workflow_action.template_draft_start",
+                    sse=start_sse if isinstance(start_sse, dict) else {},
+                ):
+                    print(
+                        json.dumps(
+                            {
+                                "stage": "workflow_action.template_draft_start",
+                                "errors": start_errors,
+                                "ack_only": True,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                    await asyncio.sleep(2.0)
+                else:
+                    print(json.dumps({"stage": "workflow_action.template_draft_start", "errors": start_errors}, ensure_ascii=False), flush=True)
+                    raise RuntimeError(f"template_draft_start returned error events: {start_errors}")
 
             flow_overrides = _build_flow_overrides(
                 facts_text,
@@ -1059,17 +1146,41 @@ async def run(args: argparse.Namespace) -> int:
                 overrides=flow_overrides,
                 matter_id=matter_id,
             )
-
-            kickoff_sse = await flow.nudge(facts_text, attachments=uploaded_file_ids, max_loops=max(1, int(args.max_loops)))
-            await _record_round(
-                action="chat.kickoff",
-                payload={"attachments": len(uploaded_file_ids)},
-                sse=kickoff_sse if isinstance(kickoff_sse, dict) else {},
-                enforce_visibility=True,
+            start_settle = await _wait_template_draft_start_settled(
+                client,
+                session_id=session_id,
+                matter_id=matter_id,
+                timeout_s=max(8.0, min(30.0, poll_interval_s * 6)),
+                poll_interval_s=poll_interval_s,
             )
-            kickoff_output = _safe_str((kickoff_sse if isinstance(kickoff_sse, dict) else {}).get("output"))
-            if _is_terminal_failure_output(kickoff_output):
-                raise RuntimeError(f"kickoff returned terminal failure output: {kickoff_output}")
+            start_pending_card = start_settle.get("pending_card") if isinstance(start_settle.get("pending_card"), dict) else {}
+
+            kickoff_sse: dict[str, Any] = {}
+            if start_pending_card:
+                await _record_round(
+                    action="chat.kickoff.skipped_existing_card",
+                    payload={
+                        "attachments": len(uploaded_file_ids),
+                        "settle_reason": _safe_str(start_settle.get("reason")),
+                    },
+                    sse={},
+                    enforce_visibility=False,
+                )
+            else:
+                kickoff_sse = await flow.nudge(
+                    facts_text,
+                    attachments=uploaded_file_ids,
+                    max_loops=max(1, int(args.max_loops)),
+                )
+                await _record_round(
+                    action="chat.kickoff",
+                    payload={"attachments": len(uploaded_file_ids), "settle_reason": _safe_str(start_settle.get("reason"))},
+                    sse=kickoff_sse if isinstance(kickoff_sse, dict) else {},
+                    enforce_visibility=True,
+                )
+                kickoff_output = _safe_str((kickoff_sse if isinstance(kickoff_sse, dict) else {}).get("output"))
+                if _is_terminal_failure_output(kickoff_output):
+                    raise RuntimeError(f"kickoff returned terminal failure output: {kickoff_output}")
 
             kickoff_card = extract_last_card_from_sse(kickoff_sse if isinstance(kickoff_sse, dict) else {})
             resume_kickoff_sse_card = str(os.getenv("E2E_RESUME_KICKOFF_SSE_CARD", "0") or "0").strip().lower() in {

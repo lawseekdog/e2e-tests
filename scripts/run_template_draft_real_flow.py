@@ -38,6 +38,7 @@ from scripts.template_draft_real_flow_support import (
     DOCGEN_STOP_NODES,
     _build_node_timeline_row,
     _detect_docgen_node,
+    _extend_docgen_node_sequence,
     _extract_docgen_snapshot,
     _is_stop_node_reached,
     _normalize_stop_node,
@@ -905,7 +906,7 @@ async def run(args: argparse.Namespace) -> int:
                 pending_card: dict[str, Any] | None = None,
                 deliverable_rows: list[dict[str, Any]] | None = None,
             ) -> dict[str, Any]:
-                nonlocal last_docgen_snapshot
+                nonlocal last_docgen_snapshot, docgen_node_sequence
                 matter_ref = _safe_str((flow.matter_id if flow is not None else "") or summary.get("matter_id"))
                 session_ref = _safe_str(summary.get("session_id"))
                 errors: dict[str, str] = {}
@@ -1002,8 +1003,11 @@ async def run(args: argparse.Namespace) -> int:
                     docgen_repair_plan_exists=bool(snapshot.get("docgen_repair_plan_exists")),
                     quality_review_decision=_safe_str(snapshot.get("quality_review_decision")),
                 )
-                if current_node and (not docgen_node_sequence or current_node != docgen_node_sequence[-1]):
-                    docgen_node_sequence.append(current_node)
+                docgen_node_sequence = _extend_docgen_node_sequence(
+                    existing=docgen_node_sequence,
+                    snapshot=snapshot,
+                    current_node=current_node,
+                )
 
                 observed_at = datetime.now().isoformat()
                 step_no = len(node_timeline) + 1

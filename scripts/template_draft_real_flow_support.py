@@ -393,6 +393,68 @@ def _detect_docgen_node(
     return ""
 
 
+def _extend_docgen_node_sequence(
+    *,
+    existing: list[str] | None,
+    snapshot: dict[str, Any] | None,
+    current_node: str,
+) -> list[str]:
+    seen: list[str] = [_normalize_stop_node(item) for item in (existing or []) if _normalize_stop_node(item)]
+    snapshot_obj = snapshot if isinstance(snapshot, dict) else {}
+    doc = snapshot_obj.get("docgen") if isinstance(snapshot_obj.get("docgen"), dict) else {}
+    deliverable = snapshot_obj.get("deliverable") if isinstance(snapshot_obj.get("deliverable"), dict) else {}
+    deliverable_done = bool(_safe_str(deliverable.get("file_id"))) and _safe_str(deliverable.get("status")).lower() in {"completed", "archived", "done"}
+
+    inferred: list[str] = []
+    if bool(doc.get("blueprint_ready")):
+        inferred.append("blueprint")
+    if any(
+        [
+            bool(doc.get("hard_validated")),
+            bool(doc.get("soft_validated")),
+            bool(doc.get("rendered")),
+            bool(doc.get("synced")),
+            deliverable_done,
+        ]
+    ):
+        inferred.append("compose")
+    if any(
+        [
+            bool(doc.get("hard_validated")),
+            bool(doc.get("soft_validated")),
+            bool(doc.get("rendered")),
+            bool(doc.get("synced")),
+            deliverable_done,
+        ]
+    ):
+        inferred.append("hard_validate")
+    if any(
+        [
+            bool(doc.get("soft_validated")),
+            bool(doc.get("rendered")),
+            bool(doc.get("synced")),
+            deliverable_done,
+            bool(snapshot_obj.get("quality_review_decision")),
+            bool(snapshot_obj.get("soft_reason_codes")),
+        ]
+    ):
+        inferred.append("soft_validate")
+    if bool(doc.get("repair_required")) or bool(snapshot_obj.get("docgen_repair_plan_exists")):
+        inferred.append("repair")
+    if any([bool(doc.get("rendered")), bool(doc.get("synced")), deliverable_done]):
+        inferred.append("render")
+    if any([bool(doc.get("synced")), deliverable_done]):
+        inferred.append("sync")
+
+    for node in inferred:
+        if node and node not in seen:
+            seen.append(node)
+    normalized_current = _normalize_stop_node(current_node)
+    if normalized_current and normalized_current not in seen:
+        seen.append(normalized_current)
+    return seen
+
+
 def _normalize_stop_node(value: str) -> str:
     token = _safe_str(value).lower()
     return token if token in DOCGEN_STOP_NODES else ""

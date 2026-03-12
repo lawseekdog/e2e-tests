@@ -178,6 +178,23 @@ def _is_terminal_failure_output(text: str) -> bool:
     return ("技能执行失败（" in raw and "已停止自动循环" in raw) or ("请处理阻塞后继续" in raw)
 
 
+def _resume_ack_only_response(*, action: str, sse: dict[str, Any], visible_error: str) -> bool:
+    if not str(action or "").startswith("resume"):
+        return False
+    err = _safe_str(visible_error)
+    if not err:
+        return False
+    event_names = set(_event_counts(sse).keys())
+    allowed = {"user_message", "usage", "error", "end"}
+    if not event_names or not event_names.issubset(allowed):
+        return False
+    if "SSE missing progress events" in err:
+        return True
+    if "SSE returned error events" in err and "closed" in err.lower():
+        return True
+    return False
+
+
 def _normalize_text_for_number_match(text: str) -> str:
     return re.sub(r"[\s,，]", "", text or "")
 
@@ -682,8 +699,11 @@ async def run(args: argparse.Namespace) -> int:
             try:
                 assert_visible_response(sse)
             except Exception as e:  # noqa: BLE001
-                visible_ok = False
                 visible_error = str(e)
+                if _resume_ack_only_response(action=action, sse=sse, visible_error=visible_error):
+                    visible_ok = True
+                else:
+                    visible_ok = False
 
         prev_streak = int(rounds[-1].get("low_signal_streak") or 0) if rounds else 0
         low_signal_streak = 0

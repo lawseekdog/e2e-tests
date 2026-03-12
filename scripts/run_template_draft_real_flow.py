@@ -62,10 +62,11 @@ LOW_SIGNAL_HINTS = (
 )
 CITATION_RE = re.compile(r"《[^》]{2,40}》第[一二三四五六七八九十百千万0-9]{1,8}条")
 PARTY_RE = re.compile(r"(?:^|\n)\s*(?:原告|被告|申请人|被申请人|上诉人|被上诉人|委托人|相对方|甲方|乙方|买方|卖方)\s*[:：]\s*([^\n，,。；;]{1,48})")
-AMOUNT_RE = re.compile(r"(?<!\d)(\d{4,10})(?!\d)")
+AMOUNT_RE = re.compile(r"(?:人民币)?\s*(\d{2,10})(?=\s*(?:万元|元))")
 CLAIM_RE = re.compile(r"(?:^|\n)\s*(?:诉求|目标|需求)\s*[:：]\s*([^\n]+)")
 CLAIM_KEYWORDS = ("返还", "支付", "逾期利息", "诉讼费", "赔偿", "承担", "评估", "建议", "风险", "保全", "谈判", "解除", "索赔")
 PARTY_LINE_RE = re.compile(r"^\s*(原告|被告|申请人|被申请人|上诉人|被上诉人|委托人|相对方|甲方|乙方|买方|卖方)\s*[:：]")
+FORUM_RE = re.compile(r"([^\n，。；;]{2,40}(?:仲裁委员会|人民法院))")
 UNRESOLVED_QUALITY_TOKENS = (
     "待核实",
     "待确认",
@@ -283,6 +284,13 @@ def _build_flow_overrides(
     service_type_id: str,
     template_name: str,
 ) -> dict[str, Any]:
+    def _extract_forum_name(text: str) -> str:
+        raw = _safe_str(text)
+        if not raw:
+            return ""
+        hit = FORUM_RE.search(raw)
+        return _safe_str(hit.group(1)) if hit else ""
+
     claim_text = ""
     m_claim = CLAIM_RE.search(facts_text or "")
     if m_claim:
@@ -302,17 +310,32 @@ def _build_flow_overrides(
 
     facts_lines = [_safe_str(line) for line in str(facts_text or "").splitlines() if _safe_str(line)]
     background_lines: list[str] = []
+    preferred_lines: list[str] = []
     for line in facts_lines:
         if PARTY_LINE_RE.search(line):
             continue
+        if line.startswith("文书类型："):
+            continue
+        if (
+            line.startswith("事项：")
+            or line.startswith("争点：")
+            or line.startswith("时间线：")
+            or line.startswith("证据线索：")
+            or line.startswith("目标：")
+            or line.startswith("- ")
+            or bool(re.match(r"^\d+[.、]", line))
+        ):
+            preferred_lines.append(line)
         background_lines.append(line)
-        if len(background_lines) >= 6:
-            break
+    if preferred_lines:
+        background_lines = preferred_lines
     background_text = "\n".join(background_lines).strip()
     if not background_text:
         background_text = _safe_str(facts_text)
-    if len(background_text) > 520:
-        background_text = background_text[:520].rstrip() + "…"
+    if len(background_text) > 1200:
+        background_text = background_text[:1200].rstrip() + "…"
+
+    forum_name = _extract_forum_name(facts_text) or "北京市海淀区人民法院"
 
     return {
         "profile.facts": _safe_str(facts_text),
@@ -320,7 +343,7 @@ def _build_flow_overrides(
         "profile.parties": parties_text,
         "profile.summary": summary_line or "请基于已上传材料生成案件摘要。",
         "profile.claims": claim_text or "请按已提供事实整理诉求并推进起草。",
-        "profile.court_name": "北京市海淀区人民法院",
+        "profile.court_name": forum_name,
         "profile.document_type": _safe_str(template_name) or "民事起诉状",
         "profile.service_type_id": _safe_str(service_type_id) or DEFAULT_SERVICE_TYPE_ID,
         "attachment_file_ids": [str(x).strip() for x in uploaded_file_ids if _safe_str(x)],

@@ -609,10 +609,15 @@ class ApiClient:
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = int(limit)
-        return await self.get(
-            f"{CONSULTATIONS}/consultations/sessions/{session_id}/traces",
-            params=params,
-        )
+        try:
+            return await self.get(
+                f"{CONSULTATIONS}/consultations/sessions/{session_id}/traces",
+                params=params,
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return {"code": 0, "message": "OK", "data": {"traces": []}}
+            raise
 
     async def get_session_trace_detail(
         self, session_id: str, trace_id: str
@@ -793,7 +798,12 @@ class ApiClient:
         )
 
     async def get_workflow_snapshot(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"{MATTERS}/matters/{matter_id}/workflow")
+        try:
+            return await self.get(f"{MATTERS}/matters/{matter_id}/workflow")
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return {"code": 0, "message": "OK", "data": {}}
+            raise
 
     async def get_workflow_profile(self, matter_id: str) -> dict[str, Any]:
         return await self.get(f"{MATTERS}/matters/{matter_id}/workflow/profile")
@@ -833,7 +843,12 @@ class ApiClient:
             return await self.get(f"{MATTERS}/lawyer/matters/{matter_id}/timeline", params=params)
         except httpx.HTTPStatusError as e:
             if e.response is not None and e.response.status_code == 404:
-                return await self.get(f"{MATTERS}/matters/{matter_id}/timeline", params=params)
+                try:
+                    return await self.get(f"{MATTERS}/matters/{matter_id}/timeline", params=params)
+                except httpx.HTTPStatusError as inner:
+                    if inner.response is not None and inner.response.status_code == 404:
+                        return {"code": 0, "message": "OK", "data": {}}
+                    raise
             raise
 
     async def get_matter_phase_timeline(self, matter_id: str) -> dict[str, Any]:

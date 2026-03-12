@@ -248,7 +248,10 @@ def _extract_docgen_snapshot(
     deliverable_rows = [row for row in (deliverables or []) if isinstance(row, dict)]
     deliverable_head = _compact_deliverable(deliverable_rows[0]) if deliverable_rows else {}
     trace_info = _extract_trace_state_signals(traces)
-    docgen = trace_info.get("docgen") if isinstance(trace_info.get("docgen"), dict) else {}
+    runtime_docgen = analysis_state.get("docgen_runtime_signals") if isinstance(analysis_state.get("docgen_runtime_signals"), dict) else {}
+    docgen = trace_info.get("docgen") if isinstance(trace_info.get("docgen"), dict) and trace_info.get("docgen") else {}
+    if not docgen and runtime_docgen:
+        docgen = dict(runtime_docgen)
 
     current_task_id = _safe_str(analysis_state.get("current_task_id"))
     if not current_task_id:
@@ -292,9 +295,12 @@ def _extract_docgen_snapshot(
         "pending_card": _compact_pending_card(pending_card),
         "deliverable": deliverable_head,
         "docgen": normalized_docgen,
-        "template_quality_contracts_json_exists": bool(trace_info.get("template_quality_contracts_json_exists")),
-        "docgen_repair_plan_exists": bool(trace_info.get("docgen_repair_plan_exists")),
-        "docgen_repair_contracts_json_exists": bool(trace_info.get("docgen_repair_contracts_json_exists")),
+        "template_quality_contracts_json_exists": bool(trace_info.get("template_quality_contracts_json_exists"))
+        or bool(document_generation_view.get("template_quality_contracts_json_exists")),
+        "docgen_repair_plan_exists": bool(trace_info.get("docgen_repair_plan_exists"))
+        or bool(document_generation_view.get("docgen_repair_plan_exists")),
+        "docgen_repair_contracts_json_exists": bool(trace_info.get("docgen_repair_contracts_json_exists"))
+        or bool(document_generation_view.get("docgen_repair_contracts_json_exists")),
         "quality_review_decision": quality_review_decision,
         "soft_reason_codes": soft_reason_codes,
         "documents_fingerprint": _safe_str(trace_info.get("documents_fingerprint")),

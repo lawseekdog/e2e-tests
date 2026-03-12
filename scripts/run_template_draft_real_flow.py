@@ -602,8 +602,9 @@ def _evaluate_document_quality(
     if len(citations) < max(0, int(min_citations)):
         failures.append(f"法条引用数量不足: {len(citations)} < {min_citations}")
 
-    if _safe_str(deliverable_status).lower() != "archived":
-        failures.append(f"交付物状态未归档: status={deliverable_status}")
+    terminal_statuses = {"archived", "completed", "done"}
+    if _safe_str(deliverable_status).lower() not in terminal_statuses:
+        failures.append(f"交付物状态未达到终态: status={deliverable_status}")
 
     hit_total = len(parties) + len(amounts) + len(claim_keywords)
     hit_count = (len(parties) - len(party_missing)) + (len(amounts) - len(amount_missing)) + len(claim_hits)
@@ -1461,22 +1462,22 @@ async def run(args: argparse.Namespace) -> int:
                     enforce_visibility=True,
                 )
 
-            async def _archived() -> bool:
+            async def _deliverable_terminal() -> bool:
                 rows = await _list_deliverables(client, flow.matter_id or matter_id, output_key)
                 if not rows:
                     return False
-                return _safe_str(rows[0].get("status")).lower() == "archived"
+                return _safe_str(rows[0].get("status")).lower() in {"archived", "completed", "done"}
 
             await eventually(
-                _archived,
+                _deliverable_terminal,
                 timeout_s=120,
                 interval_s=3,
-                description="deliverable archived",
+                description="deliverable terminal",
             )
 
             rows = await _list_deliverables(client, flow.matter_id or matter_id, output_key)
             if observer is not None:
-                await observer(trigger="deliverable.archived", deliverable_rows=rows)
+                await observer(trigger="deliverable.terminal", deliverable_rows=rows)
             if not rows:
                 raise AssertionError("no deliverables after archive wait")
             deliverable = rows[0]

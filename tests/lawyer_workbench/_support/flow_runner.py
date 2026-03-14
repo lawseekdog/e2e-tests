@@ -528,78 +528,6 @@ def _build_redline_comparison_variables() -> dict[str, Any]:
     }
 
 
-def _build_document_blueprint(output_keys: list[str]) -> dict[str, Any]:
-    required_sections_by_output_key: dict[str, list[str]] = {
-        "contract_review_report": [
-            "审查范围与前提",
-            "合同概况",
-            "风险条款清单（按风险等级排序）",
-            "修改建议与替代条款",
-        ],
-        "modification_suggestion": [
-            "总体意见",
-            "逐条修改建议",
-        ],
-        "redline_comparison": [
-            "适用范围",
-            "原文与建议改写对比",
-            "补充说明",
-        ],
-    }
-
-    docs: list[dict[str, Any]] = []
-    for key in output_keys:
-        output_key = str(key or "").strip()
-        if not output_key:
-            continue
-        required_sections = required_sections_by_output_key.get(output_key) or ["main"]
-        docs.append(
-            {
-                "output_key": output_key,
-                "sections": [
-                    {
-                        "section_key": section_key,
-                        "citation_ids": ["cid_main"],
-                        "paragraph_citation_bindings": [
-                            {
-                                "paragraph_index": 0,
-                                "citation_ids": ["cid_main"],
-                            }
-                        ],
-                        "argument_units": [
-                            {
-                                "claim": f"{section_key} claim",
-                                "evidence": f"{section_key} evidence",
-                                "law": f"{section_key} law",
-                                "risk": f"{section_key} risk",
-                            }
-                        ],
-                    }
-                    for section_key in required_sections
-                ],
-            }
-        )
-
-    return {
-        "status": "ready",
-        "documents": docs,
-        "quality_checks": {
-            "docs_cover_recommended": True,
-            "has_section_citations": True,
-            "has_paragraph_citations": True,
-            "has_argument_units": True,
-            "has_counter_argument": True,
-            "has_action_steps": True,
-        },
-        "section_material_pool": {
-            "laws": ["law-1"],
-            "evidence": ["evidence-1"],
-            "risks": ["risk-1"],
-            "claims": ["claim-1"],
-        },
-    }
-
-
 def _build_doc_draft_recovery_answers(card: dict[str, Any], existing_answers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     existing_keys = {
         str(item.get("field_key") or "").strip()
@@ -659,13 +587,6 @@ def _build_doc_draft_recovery_answers(card: dict[str, Any], existing_answers: li
         if "data.work_product.drafts_ready" not in existing_keys and drafts:
             extra_answers.append(
                 {"field_key": "data.work_product.drafts_ready", "value": True}
-            )
-        if "data.work_product.document_blueprint" not in existing_keys and target_output_keys:
-            extra_answers.append(
-                {
-                    "field_key": "data.work_product.document_blueprint",
-                    "value": _build_document_blueprint(target_output_keys),
-                }
             )
         return extra_answers
 

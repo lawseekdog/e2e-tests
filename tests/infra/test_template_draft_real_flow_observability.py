@@ -11,18 +11,18 @@ from scripts.run_template_draft_real_flow import (
 
 def test_detect_docgen_node_prefers_current_task_id() -> None:
     node = _detect_docgen_node(
-        current_task_id="docgen_blueprint",
+        current_task_id="section_contract",
         current_phase="docgen",
         pending_card={},
         deliverable={},
-        docgen={"blueprint_ready": True, "hard_validated": True},
+        docgen={"section_contract_ready": True, "hard_validated": True},
         trace_node_ids=["document-generation"],
         template_quality_contracts_json_exists=True,
         docgen_repair_plan_exists=False,
         quality_review_decision="",
     )
 
-    assert node == "blueprint"
+    assert node == "section_contract"
 
 
 
@@ -33,7 +33,7 @@ def test_detect_docgen_node_falls_back_to_docgen_flags() -> None:
         pending_card={},
         deliverable={},
         docgen={
-            "blueprint_ready": True,
+            "section_contract_ready": True,
             "hard_validated": True,
             "soft_validated": False,
             "repair_required": False,
@@ -67,7 +67,7 @@ def test_stop_after_node_matches_finish() -> None:
         _is_stop_node_reached(
             target_node="finish",
             current_node="finish",
-            seen_nodes=["intake", "blueprint", "compose", "render", "sync", "finish"],
+            seen_nodes=["intake", "section_contract", "compose", "render", "sync", "finish"],
         )
         is True
     )
@@ -99,7 +99,7 @@ def test_timeline_row_contains_repair_plan_flags() -> None:
             "documents_fingerprint": "docs-fp-1",
             "quality_review_fingerprint": "qr-fp-1",
             "docgen": {
-                "blueprint_ready": True,
+                "section_contract_ready": True,
                 "hard_validated": True,
                 "soft_validated": False,
                 "repair_required": True,
@@ -109,7 +109,7 @@ def test_timeline_row_contains_repair_plan_flags() -> None:
             },
             "trace": {"latest_docgen_node_id": "document-repair"},
         },
-        docgen_node_sequence=["intake", "blueprint", "compose", "hard_validate", "soft_validate", "repair"],
+        docgen_node_sequence=["intake", "section_contract", "compose", "hard_validate", "soft_validate", "repair"],
     )
 
     assert row["docgen_node"] == "repair"

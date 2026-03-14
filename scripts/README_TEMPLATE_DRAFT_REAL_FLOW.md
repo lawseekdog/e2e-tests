@@ -1,6 +1,6 @@
 # 智能模板文书起草全链路（真实 LLM）运行说明
 
-目标：在真实环境里跑通 `template_draft_start -> intake -> blueprint -> compose -> validate -> repair -> render -> sync -> finish`，并把每一步状态落盘，便于排查当前 docgen 重构后的真实链路。
+目标：在真实环境里跑通 `template_draft_start -> intake -> section_contract -> compose -> validate -> repair -> render -> sync -> finish`，并把每一步状态落盘，便于排查当前 docgen 重构后的真实链路。
 
 ## 1）推荐：线上 prod 跑法律意见书模板
 
@@ -36,13 +36,13 @@ python3 scripts/run_template_draft_real_flow.py \
   --username "lawyer1" \
   --password "lawyer123456" \
   --template-id "<LEGAL_OPINION_TEMPLATE_ID>" \
-  --stop-after-node blueprint \
+  --stop-after-node section_contract \
   --debug-json
 ```
 
 可用节点：
 - `intake`
-- `blueprint`
+- `section_contract`
 - `compose`
 - `hard_validate`
 - `soft_validate`
@@ -115,7 +115,7 @@ output/template-draft-chain/<timestamp>/
 - `docgen_node`
 - `pending_card`
 - `deliverable`
-- `docgen` 标志位（`blueprint_ready/hard_validated/soft_validated/repair_required/rendered/synced`）
+- `docgen` 标志位（`section_contract_ready/hard_validated/soft_validated/repair_required/rendered/synced`）
 - `template_quality_contracts_json_exists`
 - `docgen_repair_plan_exists`
 - `docgen_repair_contracts_json_exists`
@@ -143,7 +143,7 @@ output/template-draft-chain/<timestamp>/
 
 所以它不只是“看交付有没有出来”，而是尽量判断你当前卡在：
 - intake
-- blueprint
+- section_contract
 - compose
 - hard_validate
 - soft_validate
@@ -154,7 +154,7 @@ output/template-draft-chain/<timestamp>/
 
 ## 7）建议排查方式
 
-- 先用 `--stop-after-node blueprint` 验证 blueprint 能否稳定到达。
+- 先用 `--stop-after-node section_contract` 验证章节契约阶段能否稳定到达。
 - 再用 `--stop-after-node soft_validate` 看软校验是否生成 `soft_reason_codes` / `docgen_repair_plan`。
 - 最后跑到 `finish`，对照：
   - `node_timeline.json`

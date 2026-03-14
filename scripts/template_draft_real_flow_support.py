@@ -30,7 +30,7 @@ DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE = (
 
 DOCGEN_NODE_ORDER: tuple[str, ...] = (
     "intake",
-    "blueprint",
+    "section_contract",
     "compose",
     "hard_validate",
     "soft_validate",
@@ -45,8 +45,7 @@ _TASK_NODE_HINTS: tuple[tuple[str, str], ...] = (
     ("docgen_intake", "intake"),
     ("document-drafting-intake", "intake"),
     ("doc_prepare", "intake"),
-    ("docgen_blueprint", "blueprint"),
-    ("document-blueprint", "blueprint"),
+    ("section_contract", "section_contract"),
     ("docgen_compose", "compose"),
     ("document-generation", "compose"),
     ("hard_validate", "hard_validate"),
@@ -279,7 +278,8 @@ def _extract_docgen_snapshot(
         "soft_validated": bool(docgen.get("soft_validated")),
         "rendered": bool(docgen.get("rendered")),
         "synced": bool(docgen.get("synced")),
-        "blueprint_ready": bool(docgen.get("blueprint_ready")),
+        "section_contract_ready": bool(trace_info.get("template_quality_contracts_json_exists"))
+        or bool(document_generation_view.get("template_quality_contracts_json_exists")),
         "soft_reason_codes": soft_reason_codes,
     }
 
@@ -380,14 +380,13 @@ def _detect_docgen_node(
         return "soft_validate"
     documents_fingerprint = _safe_str(doc.get("documents_fingerprint")) or _safe_str(doc.get("documents_fp"))
     if documents_fingerprint or bool(template_quality_contracts_json_exists):
-        if bool(doc.get("blueprint_ready")):
-            return "compose"
-    if bool(doc.get("blueprint_ready")):
         return "compose"
+    if bool(template_quality_contracts_json_exists):
+        return "section_contract"
 
     phase = _safe_str(current_phase).lower()
     if phase == "docgen":
-        return "blueprint"
+        return "section_contract"
     if pending_skill or pending_task:
         return "intake"
     return ""
@@ -406,8 +405,8 @@ def _extend_docgen_node_sequence(
     deliverable_done = bool(_safe_str(deliverable.get("file_id"))) and _safe_str(deliverable.get("status")).lower() in {"completed", "archived", "done"}
 
     inferred: list[str] = []
-    if bool(doc.get("blueprint_ready")):
-        inferred.append("blueprint")
+    if bool(snapshot_obj.get("template_quality_contracts_json_exists")):
+        inferred.append("section_contract")
     if any(
         [
             bool(doc.get("hard_validated")),
@@ -518,7 +517,7 @@ def _build_node_timeline_row(
         "documents_fingerprint": _safe_str(snapshot.get("documents_fingerprint")),
         "quality_review_fingerprint": _safe_str(snapshot.get("quality_review_fingerprint")),
         "docgen_flags": {
-            "blueprint_ready": bool(docgen.get("blueprint_ready")),
+            "section_contract_ready": bool(docgen.get("section_contract_ready")),
             "hard_validated": bool(docgen.get("hard_validated")),
             "soft_validated": bool(docgen.get("soft_validated")),
             "repair_required": bool(docgen.get("repair_required")),

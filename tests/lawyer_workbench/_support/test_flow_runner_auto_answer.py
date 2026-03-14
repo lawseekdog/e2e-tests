@@ -340,7 +340,6 @@ def test_auto_answer_card_doc_draft_recovery_skips_generic_doc_generation_card()
     assert by_key.get("data.workbench.skill_error_acknowledged") is True
     assert "data.work_product.document_drafts" not in by_key
     assert "data.work_product.drafts_ready" not in by_key
-    assert "data.work_product.document_blueprint" not in by_key
 
 
 def test_auto_answer_card_doc_draft_recovery_skips_generic_doc_draft_card_without_targets():
@@ -364,7 +363,6 @@ def test_auto_answer_card_doc_draft_recovery_skips_generic_doc_draft_card_withou
     assert by_key.get("data.workbench.skill_error_acknowledged") is True
     assert "data.work_product.document_drafts" not in by_key
     assert "data.work_product.drafts_ready" not in by_key
-    assert "data.work_product.document_blueprint" not in by_key
 
 
 def test_auto_answer_card_doc_draft_recovery_keeps_contract_targets_when_prompt_has_template_ids():

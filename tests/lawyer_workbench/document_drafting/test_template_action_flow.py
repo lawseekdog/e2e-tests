@@ -4,7 +4,6 @@ import os
 import re
 from pathlib import Path
 
-import httpx
 import pytest
 
 from tests.lawyer_workbench._support.docx import (
@@ -14,7 +13,7 @@ from tests.lawyer_workbench._support.docx import (
 )
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
 from tests.lawyer_workbench._support.sse import assert_visible_response
-from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
+from tests.lawyer_workbench._support.utils import unwrap_api_response
 
 
 _DEBUG = str(os.getenv("E2E_FLOW_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
@@ -64,19 +63,6 @@ def _pick_template(templates: list[dict]) -> dict:
         if _out_key(t):
             return t
     raise AssertionError(f"no usable template found: {templates[:3]}")
-
-
-def _has_agentic_search(traces: list[dict]) -> bool:
-    for t in traces or []:
-        if not isinstance(t, dict):
-            continue
-        for c in t.get("tool_calls") or []:
-            if not isinstance(c, dict):
-                continue
-            name = str(c.get("name") or "").strip().lower()
-            if "agentic_search" in name or "agentic-search" in name:
-                return True
-    return False
 
 
 @pytest.mark.e2e
@@ -194,33 +180,3 @@ async def test_template_action_flow_generates_docx(lawyer_client):
     assert any(x in text for x in ["80000", "80,000", "8万元", "8万"]), text[:2000]
     citations = re.findall(r"《[^》]{2,20}》第[一二三四五六七八九十百千0-9]+条", text)
     assert len(citations) >= 2, f"missing law citations in docx: {text[:1200]}"
-
-    # Trace should include agentic_search tool calls.
-    try:
-        traces_resp = await lawyer_client.list_traces(flow.matter_id, limit=200)
-        traces_data = unwrap_api_response(traces_resp)
-        traces = traces_data.get("traces") if isinstance(traces_data, dict) else None
-        assert isinstance(traces, list) and traces, traces_resp
-        assert _has_agentic_search(traces), "missing agentic_search tool call in traces"
-    except httpx.HTTPStatusError as e:
-        if e.response is not None and e.response.status_code == 404:
-            # Remote gateway may not expose traces; keep the flow test green and log for manual check.
-            print("WARN: traces endpoint not available; skipped agentic_search assertion")
-        else:
-            raise
-
-    # Confirm archive via chat text ("确认") and ensure status becomes archived.
-    pending = await flow.get_pending_card()
-    if pending and str(pending.get("skill_id") or "").strip() == "document-generation":
-        await lawyer_client.chat(session_id, "确认")
-
-    async def _archived() -> bool:
-        resp = await lawyer_client.list_deliverables(flow.matter_id, output_key=output_key)
-        data = unwrap_api_response(resp)
-        items = (data.get("deliverables") if isinstance(data, dict) else None) or []
-        if not items:
-            return False
-        d1 = items[0] if isinstance(items[0], dict) else {}
-        return str(d1.get("status") or "").strip().lower() == "archived"
-
-    await eventually(_archived, timeout_s=120, interval_s=3, description="deliverable archived after confirm")

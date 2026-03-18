@@ -20,6 +20,8 @@ import httpx
 from .utils import trim, unwrap_api_response
 from .sse import assert_has_user_message
 
+PendingCardStopFn = Callable[[dict[str, Any]], bool]
+
 _NUDGE_TEXT = "继续"
 _DEBUG = str(os.getenv("E2E_FLOW_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
 _AUTO_NUDGE = str(os.getenv("E2E_AUTO_NUDGE", "1") or "").strip().lower() in {"1", "true", "yes"}
@@ -61,6 +63,14 @@ def extract_last_card_from_sse(sse: dict[str, Any]) -> dict[str, Any] | None:
         if isinstance(data, dict) and data:
             return data
     return None
+
+
+def _pending_card_intercept_sse(card: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "events": [{"event": "card", "data": card}],
+        "pending_card": card,
+        "output": "pending card intercepted",
+    }
 
 
 def is_session_busy_sse(sse: dict[str, Any] | None) -> bool:
@@ -1067,7 +1077,13 @@ class WorkbenchFlow:
             self.seen_sse.append(sse)
         return sse
 
-    async def step(self, *, nudge_text: str = _NUDGE_TEXT, allow_nudge: bool = True) -> dict[str, Any] | None:
+    async def step(
+        self,
+        *,
+        nudge_text: str = _NUDGE_TEXT,
+        allow_nudge: bool = True,
+        stop_on_pending_card: PendingCardStopFn | None = None,
+    ) -> dict[str, Any] | None:
         """Process one pending card if exists; optionally send a small nudge chat."""
         await self.refresh()
         if self.session_archived:
@@ -1091,6 +1107,15 @@ class WorkbenchFlow:
                         "workflow stuck on repeated pending card signature: "
                         f"repeat={len(recent)}, card={debug_card}"
                     )
+
+            if stop_on_pending_card is not None and stop_on_pending_card(card):
+                _debug(
+                    f"[flow] stop_on_pending_card skill_id={card.get('skill_id')} "
+                    f"task_key={card.get('task_key')}"
+                )
+                self.seen_cards.append(card)
+                self.seen_card_signatures.append(sig)
+                return _pending_card_intercept_sse(card)
 
             skill_id = str(card.get("skill_id") or "").strip()
             task_key = str(card.get("task_key") or "").strip()
@@ -1164,6 +1189,14 @@ class WorkbenchFlow:
         # so the flow can continue without waiting for pending_card API consistency.
         sse_card = extract_last_card_from_sse(sse if isinstance(sse, dict) else {})
         if isinstance(sse_card, dict) and sse_card:
+            if stop_on_pending_card is not None and stop_on_pending_card(sse_card):
+                _debug(
+                    f"[flow] nudge produced interceptable card skill_id={sse_card.get('skill_id')} "
+                    f"task_key={sse_card.get('task_key')}"
+                )
+                if isinstance(sse, dict):
+                    sse["pending_card"] = sse_card
+                return sse
             _debug(
                 f"[flow] nudge produced card skill_id={sse_card.get('skill_id')} "
                 f"task_key={sse_card.get('task_key')}; resume directly"
@@ -1179,6 +1212,7 @@ class WorkbenchFlow:
         nudge_text: str = _NUDGE_TEXT,
         step_sleep_s: float = 0.0,
         description: str = "target condition",
+        stop_on_pending_card: PendingCardStopFn | None = None,
     ) -> None:
         """Advance the workflow until predicate(flow) is truthy (sync/async)."""
         step_no = 0
@@ -1196,7 +1230,11 @@ class WorkbenchFlow:
             step_no += 1
             _debug(f"[flow] step {step_no}/{max_steps} waiting for {description} (session_id={self.session_id}, matter_id={self.matter_id})")
             allow_nudge = (suppress_nudge_rounds <= 0) and (nudge_cooldown <= 0)
-            sse = await self.step(nudge_text=nudge_text, allow_nudge=allow_nudge)
+            sse = await self.step(
+                nudge_text=nudge_text,
+                allow_nudge=allow_nudge,
+                stop_on_pending_card=stop_on_pending_card,
+            )
             if self._last_step_used_nudge:
                 nudge_cooldown = max(nudge_cooldown, 8)
             else:

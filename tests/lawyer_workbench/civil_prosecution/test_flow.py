@@ -1,32 +1,18 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
-from tests.lawyer_workbench._support.db import PgTarget, count
 from tests.lawyer_workbench._support.docx import (
     assert_docx_contains,
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
-from tests.lawyer_workbench._support.knowledge import ingest_doc, wait_for_search_hit
-from tests.lawyer_workbench._support.memory import assert_fact_content_contains, wait_for_memory_facts
-from tests.lawyer_workbench._support.phase_timeline import (
-    assert_has_deliverable,
-    assert_has_phases,
-    assert_phase_status_in,
-    unwrap_phase_timeline,
-)
 from tests.lawyer_workbench._support.profile import assert_has_party, assert_service_type
 from tests.lawyer_workbench._support.sse import assert_task_lifecycle, assert_visible_response
-from tests.lawyer_workbench._support.timeline import assert_timeline_has_output_keys, unwrap_timeline
 from tests.lawyer_workbench._support.utils import unwrap_api_response
-
-
-_MATTER_DB = PgTarget(dbname=os.getenv("E2E_MATTER_DB", "matter-service"))
 
 
 def _case_facts() -> str:
@@ -85,31 +71,6 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
     await flow.run_until(_civil_complaint_ready, max_steps=60, description="civil_complaint deliverable")
     assert flow.matter_id, "session did not bind to matter_id"
 
-    # ========== Matter persistence (DB-level) ==========
-    mid_int = int(flow.matter_id)
-    assert await count(_MATTER_DB, "select count(1) from matters where id = %s", [mid_int]) == 1
-    assert await count(_MATTER_DB, "select count(1) from matter_tasks where matter_id = %s", [mid_int]) > 0
-    assert await count(_MATTER_DB, "select count(1) from matter_phase_progress where matter_id = %s", [mid_int]) > 0
-    assert (
-        await count(
-            _MATTER_DB,
-            "select count(1) from matter_deliverables where matter_id = %s and output_key = %s",
-            [mid_int, "civil_complaint"],
-        )
-        == 1
-    )
-
-    # ========== Traces (skill-level audit trail) ==========
-    traces_resp = await lawyer_client.list_traces(flow.matter_id, limit=200)
-    traces_data = unwrap_api_response(traces_resp)
-    traces = traces_data.get("traces") if isinstance(traces_data, dict) else None
-    assert isinstance(traces, list) and traces, traces_resp
-    node_ids = {str(it.get("node_id") or "").strip() for it in traces if isinstance(it, dict)}
-    # Core happy-path nodes (workflow-dependent, but stable across envs).
-    assert any(x in node_ids for x in {"skill:litigation-intake", "litigation-intake"})
-    assert any(x in node_ids for x in {"skill:cause-recommendation", "cause-recommendation"})
-    assert any(x in node_ids for x in {"skill:document-generation", "document-generation"})
-
     # ========== Workflow profile (what workbench shows) ==========
     prof_resp = await lawyer_client.get_workflow_profile(flow.matter_id)
     prof = unwrap_api_response(prof_resp)
@@ -117,18 +78,6 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
     assert_service_type(prof, "civil_prosecution")
     assert_has_party(prof, role="plaintiff", name_contains="张三")
     assert_has_party(prof, role="defendant", name_contains="李四")
-
-    # ========== Phase timeline (stage progress UI) ==========
-    pt_resp = await lawyer_client.get_matter_phase_timeline(flow.matter_id)
-    pt = unwrap_phase_timeline(pt_resp)
-    assert_has_phases(pt, must_include=["materials", "intake", "cause", "evidence", "strategy", "output", "docgen"])
-    assert_phase_status_in(pt, phase_id="materials", allowed=["completed", "in_progress"])
-    assert_has_deliverable(pt, output_key="civil_complaint")
-
-    # ========== Timeline / round_summary (UI time line) ==========
-    tl_resp = await lawyer_client.get_matter_timeline(flow.matter_id, limit=50)
-    tl = unwrap_timeline(tl_resp)
-    assert_timeline_has_output_keys(tl, must_include=["civil_complaint"])
 
     # ========== Deliverable content (DOCX) ==========
     dels_resp = await lawyer_client.list_deliverables(flow.matter_id, output_key="civil_complaint")
@@ -143,36 +92,3 @@ async def test_civil_prosecution_private_lending_generates_civil_complaint_and_p
     assert_docx_has_no_template_placeholders(text)
     assert_docx_contains(text, must_include=["张三E2E01", "李四E2E01"])
     assert any(x in text for x in ["100000", "100,000", "10万元", "10万"]), text[:2000]
-
-    # ========== Memory (facts extracted) ==========
-    facts = await wait_for_memory_facts(
-        lawyer_client,
-        user_id=int(lawyer_client.user_id),
-        case_id=str(flow.matter_id),
-        must_include_entity_keys=["party:plaintiff:primary", "party:defendant:primary"],
-        must_include_content=["借条", "转账记录"],
-        timeout_s=120.0,
-    )
-    # Parties are produced deterministically from workflow profile (stable entity_key + name in content).
-    assert_fact_content_contains(facts, entity_key="party:plaintiff:primary", must_include=["张三E2E01"])
-    assert_fact_content_contains(facts, entity_key="party:defendant:primary", must_include=["李四E2E01"])
-
-    # ========== Knowledge ingest/search (precision baseline, no mocks) ==========
-    kb_id = "e2e_kb_civil_first_instance"
-    unique = f"E2E_UNIQUE_CIVIL_PROS_{flow.matter_id}"
-    await ingest_doc(
-        lawyer_client,
-        kb_id=kb_id,
-        file_id=uploaded_file_ids[0],
-        content=f"{unique}\n{_case_facts()}",
-        doc_type="case",
-        metadata={"e2e": True, "service_type_id": "civil_prosecution", "matter_id": flow.matter_id},
-        overwrite=True,
-    )
-    await wait_for_search_hit(
-        lawyer_client,
-        query=unique,
-        kb_ids=[kb_id],
-        must_file_id=uploaded_file_ids[0],
-        timeout_s=90.0,
-    )

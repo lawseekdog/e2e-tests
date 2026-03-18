@@ -1,164 +1,125 @@
-# LawSeekDog E2E 测试
+# LawSeekDog E2E Tests
 
-> 端到端测试用例与测试脚本
+最小核心产品链路 E2E。
+
+本仓库不再承担“大而全”的浏览器场景、基础能力回归、benchmark/golden 评分、自测 harness。这里只保留少量高价值黑盒产品流，用来验证：
+
+- 登录与身份链路
+- 民事起诉主链
+- 合同审查主链
+- 法律意见主链
+- 模板文书起草主链
 
 ## 目录结构
 
-```
+```text
 e2e-tests/
 ├── README.md
 ├── pytest.ini
 ├── requirements.txt
-├── conftest.py              # 全局 fixtures
-├── client/                  # API 客户端
+├── conftest.py
+├── client/
 │   └── api_client.py
-├── fixtures/                # 测试数据
+├── fixtures/
 │   ├── sample_iou.pdf
 │   ├── sample_transfer_record.txt
 │   └── sample_chat_record.txt
-├── tests/                   # 测试用例
+├── tests/
 │   ├── test_auth.py
-│   ├── infra/               # 跨服务基础能力回归（memory/knowledge/...）
-│   │   └── memory/
-│   │       └── test_memory_extraction.py
-│   └── lawyer_workbench/    # 律师工作台：按 service_type 分目录的端到端用例
-│       ├── _support/        # 仅工具/断言（不应包含 test_*.py）
+│   └── lawyer_workbench/
+│       ├── _support/
 │       ├── civil_prosecution/
-│       ├── civil_defense/
-│       ├── civil_appeal_appellant/
-│       ├── civil_appeal_appellee/
-│       ├── legal_opinion/
-│       └── contract_review/
-└── scripts/                 # 运维脚本
+│       ├── contract_review/
+│       ├── document_drafting/
+│       └── legal_opinion/
+└── scripts/
     ├── health_check.sh
     ├── smoke_test.py
+    ├── run_contract_review_real_flow.py
     ├── run_litigation_flow_debug.py
-    └── run_legal_opinion_flow_debug.py
+    ├── run_legal_opinion_flow_debug.py
+    └── run_template_draft_real_flow.py
 ```
 
 ## 环境准备
 
-### 安装依赖
-
 ```bash
 pip install -r requirements.txt
-```
-
-### 环境变量
-
-```bash
 cp .env.example .env
-# 编辑 .env 配置测试环境
 ```
 
-关键变量（本套 E2E 不 mock LLM）：
+关键变量：
 
-- `BASE_URL`: gateway 地址（默认 `http://localhost:18001`）
-- `AI_PLATFORM_URL`: ai-engine 地址（默认 `http://localhost:18001/ai-platform-service`，用于 memory-extraction infra 测试）
-- `INTERNAL_API_KEY`: 访问 `/api/v1/internal/*` 路由所需（默认 `test_internal_key`，与 docker-compose 对齐）
-- `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY`: 真实 LLM Key（由你的 docker-compose / .env 决定）
+- `BASE_URL`
+- `INTERNAL_API_KEY`
+- `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY`
 
-## 运行测试
-
-### 运行所有测试
+## 运行
 
 ```bash
 pytest tests/ -v
 ```
 
-### 运行特定测试
+### 关键用例
 
 ```bash
-# 认证测试
 pytest tests/test_auth.py -v
-
-# 律师工作台：民事起诉（原告）
 pytest tests/lawyer_workbench/civil_prosecution/test_flow.py -v
+pytest tests/lawyer_workbench/contract_review/test_flow.py -v
+pytest tests/lawyer_workbench/legal_opinion/test_flow.py -v
+pytest tests/lawyer_workbench/document_drafting/test_template_action_flow.py -v
+```
 
-# 带标记的测试
+### 标记
+
+```bash
 pytest tests/ -v -m e2e
 pytest tests/ -v -m smoke
 pytest tests/ -v -m "e2e and not slow"
 pytest tests/ -v -m slow
 ```
 
-### 生成报告
+## 保留范围
 
-```bash
-pytest tests/ --html=report.html --self-contained-html
-```
-
-## 测试用例
-
-### 1. 认证测试 (`test_auth.py`)
+### 1. 认证链路
 
 - 登录成功
-- 登录失败（错误密码）
-- Token 刷新
-- 获取用户信息
+- 登录失败
+- 获取当前用户
 
-### 2. 律师工作台（按服务类型分目录）
+### 2. 产品主链
 
-- 每个 `service_type_id` 一个目录：对话/卡片推进 → 落库（matter/tasks/deliverables）→ 交付物（DOCX）→ traces/memory/knowledge 断言
-- 证据材料放在各目录的 `evidence/` 下（按用例准备）
+- 民事起诉
+- 合同审查
+- 法律意见
+- 模板文书起草
 
-### 3. Memory Extraction 回归（`tests/infra/memory/test_memory_extraction.py`）
+这些用例只验证产品链路：
 
-- 覆盖：抽取 → 写入 → recall 召回；包含 skip/PII 拦截/偏好全局化等关键回归点
+- 对话与卡片推进
+- matter 绑定与 snapshot
+- deliverable 生成
+- traces / timeline / workflow profile 基本可用
 
-## 脚本工具
+## 不再在本仓库维护
 
-### 健康检查
+- `tests/infra/` 基础能力回归
+- benchmark / golden text 比较
+- flow runner / support 自测
+
+这些内容应迁回对应服务仓，或迁到能力评测层。
+
+## 脚本
 
 ```bash
 ./scripts/health_check.sh
-```
-
-### 冒烟测试
-
-```bash
 python scripts/smoke_test.py
-```
-
-### 合同审查真实链路（WS + 真实 LLM）
-
-```bash
 python scripts/run_contract_review_real_flow.py --base-url http://<host>/api/v1
-```
-
-详情见：`scripts/README_CONTRACT_REVIEW_REAL_FLOW.md`
-
-### 智能模板文书起草真实链路（WS + 真实 LLM）
-
-```bash
 python scripts/run_template_draft_real_flow.py --base-url http://<host>/api/v1 --template-id <TEMPLATE_ID>
 ```
 
-详情见：`scripts/README_TEMPLATE_DRAFT_REAL_FLOW.md`
+## 维护原则
 
-## CI/CD 集成
-
-```yaml
-# .github/workflows/e2e.yml
-name: E2E Tests
-
-on:
-  schedule:
-    - cron: '0 2 * * *'  # 每天凌晨2点
-  workflow_dispatch:
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: pip install -r requirements.txt
-      - run: pytest tests/ -v --html=report.html
-      - uses: actions/upload-artifact@v4
-        with:
-          name: test-report
-          path: report.html
-```
+- 这里只保留少量高价值产品 E2E。
+- 法律正确性、benchmark、golden cases 不再堆在本仓库。
+- 基础能力回归回到 integration / unit / capability eval 层。

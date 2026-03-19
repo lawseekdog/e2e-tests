@@ -798,15 +798,10 @@ class ApiClient:
         )
 
     async def get_workflow_snapshot(self, matter_id: str) -> dict[str, Any]:
-        try:
-            return await self.get(f"{MATTERS}/matters/{matter_id}/workflow")
-        except httpx.HTTPStatusError as e:
-            if e.response is not None and e.response.status_code == 404:
-                return {"code": 0, "message": "OK", "data": {}}
-            raise
+        return await self.get(f"{MATTERS}/lawyer/matters/{matter_id}/workbench/snapshot")
 
     async def get_workflow_profile(self, matter_id: str) -> dict[str, Any]:
-        return await self.get(f"{MATTERS}/matters/{matter_id}/workflow/profile")
+        return await self.get(f"{MATTERS}/internal/matters/{matter_id}/workflow/profile")
 
     async def list_deliverables(
         self, matter_id: str, output_key: str | None = None, include_content: bool = False

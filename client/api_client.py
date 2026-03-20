@@ -21,6 +21,7 @@ CONSULTATIONS = "/consultations-service"
 FILES = "/files-service"
 MATTERS = "/matter-service"
 KNOWLEDGE = "/knowledge-service"
+TEMPLATES = "/templates-service"
 
 _WS_DEBUG = str(os.getenv("E2E_WS_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
 # Hard-cut resume contract: websocket `resume` payload only allows
@@ -76,10 +77,16 @@ class ApiClient:
 
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
-        # Some environments expose matter-service on a separate gateway path.
-        # When set (e.g. http://localhost:28001/api/v1), all /matter-service/*
-        # requests are routed there with the prefix stripped.
-        self.matter_base_url = str(os.getenv("E2E_MATTER_BASE_URL", "") or "").rstrip("/") or None
+        self.service_base_urls = {
+            AUTH: str(os.getenv("E2E_AUTH_BASE_URL", "") or "").rstrip("/") or None,
+            USER: str(os.getenv("E2E_USER_BASE_URL", "") or "").rstrip("/") or None,
+            ORG: str(os.getenv("E2E_ORG_BASE_URL", "") or "").rstrip("/") or None,
+            CONSULTATIONS: str(os.getenv("E2E_CONSULTATIONS_BASE_URL", "") or "").rstrip("/") or None,
+            FILES: str(os.getenv("E2E_FILES_BASE_URL", "") or "").rstrip("/") or None,
+            MATTERS: str(os.getenv("E2E_MATTER_BASE_URL", "") or "").rstrip("/") or None,
+            KNOWLEDGE: str(os.getenv("E2E_KNOWLEDGE_BASE_URL", "") or "").rstrip("/") or None,
+            TEMPLATES: str(os.getenv("E2E_TEMPLATES_BASE_URL", "") or "").rstrip("/") or None,
+        }
         self.token: str | None = None
         # Java services (behind nginx) use these headers as the primary auth/context.
         self.user_id: str | None = None
@@ -89,6 +96,29 @@ class ApiClient:
         # When running E2E locally, pass it via env (docker-compose/java-stack uses INTERNAL_API_KEY).
         self.internal_api_key: str | None = os.getenv("INTERNAL_API_KEY")
         self._client: httpx.AsyncClient | None = None
+
+    def set_identity(
+        self,
+        *,
+        user_id: str | int,
+        organization_id: str | int,
+        is_superuser: bool = False,
+        token: str | None = None,
+    ) -> None:
+        self.user_id = str(user_id)
+        self.organization_id = str(organization_id)
+        self.is_superuser = bool(is_superuser)
+        if token:
+            self.token = str(token)
+
+    def _resolve_base_for_path(self, route_path: str) -> tuple[str, str]:
+        for prefix, override_base in self.service_base_urls.items():
+            if override_base and route_path.startswith(prefix):
+                stripped = route_path[len(prefix) :]
+                if not stripped.startswith("/"):
+                    stripped = f"/{stripped}"
+                return override_base, stripped
+        return self.base_url, route_path
 
     async def __aenter__(self) -> "ApiClient":
         # Chat endpoints are SSE streams and may take longer than typical JSON APIs.
@@ -117,13 +147,8 @@ class ApiClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         route_path = str(path or "")
-        if self.matter_base_url and route_path.startswith(MATTERS):
-            stripped = route_path[len(MATTERS) :]
-            if not stripped.startswith("/"):
-                stripped = f"/{stripped}"
-            url = f"{self.matter_base_url}{stripped}"
-        else:
-            url = f"{self.base_url}{route_path}"
+        base_url, stripped_path = self._resolve_base_for_path(route_path)
+        url = f"{base_url}{stripped_path}"
         kwargs.setdefault("headers", self.headers)
         # Keep per-request timeout bounded so transient upstream stalls don't freeze E2E loops.
         req_timeout_s = float(os.getenv("E2E_HTTP_REQUEST_TIMEOUT_S", "45") or 45)
@@ -192,12 +217,14 @@ class ApiClient:
         open_timeout_s: float | None = None,
     ) -> dict[str, Any]:
         """Connect to WebSocket, authenticate, send message, and collect events until 'end'."""
-        parsed = urlparse(self.base_url)
+        route_path = str(ws_path or "")
+        base_url, stripped_path = self._resolve_base_for_path(route_path)
+        parsed = urlparse(base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
         # base_url may include a path prefix (e.g. /api/v1 behind APISIX).
         # WebSocket URLs must include the same prefix, otherwise APISIX will 404 the handshake.
         base_path = (parsed.path or "").rstrip("/")
-        ws_url = f"{scheme}://{parsed.netloc}{base_path}{ws_path}"
+        ws_url = f"{scheme}://{parsed.netloc}{base_path}{stripped_path}"
 
         if max_attempts is None:
             max_attempts = int(os.getenv("E2E_HTTP_WS_RETRIES", "180") or 180)
@@ -206,9 +233,10 @@ class ApiClient:
         for attempt in range(1, max_attempts + 1):
             events: list[dict[str, Any]] = []
             try:
+                proxy_value = _resolve_ws_proxy()
                 async with websockets.connect(
                     ws_url,
-                    proxy=_resolve_ws_proxy(),
+                    proxy=proxy_value if isinstance(proxy_value, str) or proxy_value is None or proxy_value is True else None,
                     close_timeout=10,
                     open_timeout=open_timeout_s,
                     # Consultations-service can emit large JSON card payloads; disable client frame-size cap.
@@ -341,9 +369,27 @@ class ApiClient:
     # ========== Auth ==========
 
     async def login(self, username: str, password: str) -> dict[str, Any]:
+        direct_user_id = str(os.getenv("E2E_DIRECT_USER_ID", "") or "").strip()
+        direct_org_id = str(os.getenv("E2E_DIRECT_ORG_ID", "") or "").strip()
+        if direct_user_id and direct_org_id:
+            self.set_identity(
+                user_id=direct_user_id,
+                organization_id=direct_org_id,
+                is_superuser=str(os.getenv("E2E_DIRECT_IS_SUPERUSER", "") or "").strip().lower() in {"1", "true", "yes"},
+            )
+            return {
+                "code": 0,
+                "message": "OK",
+                "data": {
+                    "direct_identity": True,
+                    "user_id": self.user_id,
+                    "organization_id": self.organization_id,
+                },
+            }
         # NOTE: auth-service exposes a form login endpoint; JSON login may be disabled by server config.
         # Use x-www-form-urlencoded to keep E2E stable across gateway/service implementations.
-        url = f"{self.base_url}{AUTH}/auth/login"
+        auth_base = self.service_base_urls.get(AUTH) or self.base_url
+        url = f"{auth_base}/auth/login"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         max_attempts = int(os.getenv("E2E_HTTP_LOGIN_RETRIES", "180") or 180)
         transient = {500, 502, 503, 504}
@@ -419,6 +465,16 @@ class ApiClient:
         raise last_exc if last_exc else RuntimeError("login failed")
 
     async def get_me(self) -> dict[str, Any]:
+        if self.user_id and self.organization_id and not self.token:
+            return {
+                "code": 0,
+                "message": "OK",
+                "data": {
+                    "user_id": self.user_id,
+                    "organization_id": self.organization_id,
+                    "is_superuser": self.is_superuser,
+                },
+            }
         return await self.get(f"{AUTH}/auth/me")
 
     # ========== Consultations ==========
@@ -702,7 +758,9 @@ class ApiClient:
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(file_path)
 
-        url = f"{self.base_url}{FILES}/files/upload"
+        route_path = f"{FILES}/files/upload"
+        base_url, stripped_path = self._resolve_base_for_path(route_path)
+        url = f"{base_url}{stripped_path}"
         headers = dict(self.headers)
         # Let httpx set multipart boundary.
         headers.pop("Content-Type", None)
@@ -745,7 +803,9 @@ class ApiClient:
         fid = str(file_id).strip()
         if not fid:
             raise ValueError("file_id is required")
-        url = f"{self.base_url}{FILES}/files/{fid}/download"
+        route_path = f"{FILES}/files/{fid}/download"
+        base_url, stripped_path = self._resolve_base_for_path(route_path)
+        url = f"{base_url}{stripped_path}"
         headers = dict(self.headers)
         headers.pop("Content-Type", None)
         client = self._client

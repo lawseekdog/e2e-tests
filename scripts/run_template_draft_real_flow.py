@@ -696,7 +696,19 @@ async def run(args: argparse.Namespace) -> int:
     load_dotenv(REPO_ROOT / ".env", override=False)
     load_dotenv(E2E_ROOT / ".env", override=False)
 
-    base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
+    if bool(args.direct_local):
+        os.environ["E2E_CONSULTATIONS_BASE_URL"] = "http://127.0.0.1:18021/api/v1"
+        os.environ["E2E_MATTER_BASE_URL"] = "http://127.0.0.1:18020/api/v1"
+        os.environ["E2E_TEMPLATES_BASE_URL"] = "http://127.0.0.1:18022/api/v1"
+        os.environ["E2E_FILES_BASE_URL"] = "http://127.0.0.1:18011/api/v1"
+        os.environ["E2E_DIRECT_USER_ID"] = _safe_str(args.direct_user_id) or "2"
+        os.environ["E2E_DIRECT_ORG_ID"] = _safe_str(args.direct_org_id) or "1"
+        os.environ["E2E_DIRECT_IS_SUPERUSER"] = "false"
+
+    if bool(args.direct_local):
+        base_url = _safe_str(args.base_url) or "http://127.0.0.1:18021/api/v1"
+    else:
+        base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
     username = _safe_str(args.username) or _safe_str(os.getenv("LAWYER_USERNAME")) or "lawyer1"
     password = _safe_str(args.password) or _safe_str(os.getenv("LAWYER_PASSWORD")) or "lawyer123456"
     template_id = _safe_str(args.template_id)
@@ -738,6 +750,10 @@ async def run(args: argparse.Namespace) -> int:
     print(f"[config] template_id={template_id}")
     print(f"[config] output_key={output_key}")
     print(f"[config] output_dir={out_dir}")
+    if bool(args.direct_local):
+        print("[config] direct_local=true")
+        print(f"[config] direct_user_id={os.getenv('E2E_DIRECT_USER_ID')}")
+        print(f"[config] direct_org_id={os.getenv('E2E_DIRECT_ORG_ID')}")
 
     rounds: list[dict[str, Any]] = []
     cards_seen: list[dict[str, Any]] = []
@@ -1740,6 +1756,9 @@ async def run(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run smart-template drafting workflow via consultations WS (real LLM).")
     parser.add_argument("--base-url", default="", help="Gateway base URL, e.g. http://host/api/v1")
+    parser.add_argument("--direct-local", action="store_true", help="Use local direct service URLs and direct identity injection without auth-service")
+    parser.add_argument("--direct-user-id", default="", help="Direct local mode user id (default: 2)")
+    parser.add_argument("--direct-org-id", default="", help="Direct local mode organization id (default: 1)")
     parser.add_argument("--username", default="", help="Lawyer username")
     parser.add_argument("--password", default="", help="Lawyer password")
     parser.add_argument("--service-type-id", default=DEFAULT_SERVICE_TYPE_ID, help="Matter service_type_id")

@@ -1033,6 +1033,7 @@ class WorkbenchFlow:
     _repeat_card_signature: str | None = None
     _repeat_card_count: int = 0
     _last_step_used_nudge: bool = False
+    _pending_card_poll_unavailable: bool = False
 
     async def _runtime_progress_snapshot(self) -> dict[str, str]:
         snapshot: dict[str, str] = {
@@ -1168,6 +1169,7 @@ class WorkbenchFlow:
 
     async def get_pending_card(self) -> dict[str, Any] | None:
         if self.session_archived:
+            self._pending_card_poll_unavailable = False
             return None
         try:
             resp = await self.client.get_pending_card(self.session_id)
@@ -1179,15 +1181,19 @@ class WorkbenchFlow:
                     self.session_archived = True
                     self.session_status = "archived"
                     _debug("[flow] pending card blocked: session archived")
+                    self._pending_card_poll_unavailable = False
                     return None
             if code in {400, 404, 409, 429, 500, 502, 503, 504}:
                 _debug(f"[flow] pending card unavailable status={code}")
+                self._pending_card_poll_unavailable = True
                 return None
             raise
         except httpx.RequestError:
             _debug("[flow] pending card request error")
+            self._pending_card_poll_unavailable = True
             return None
         card = unwrap_api_response(resp)
+        self._pending_card_poll_unavailable = False
         if isinstance(card, dict) and card:
             _debug(
                 f"[flow] pending card skill_id={card.get('skill_id')} task_key={card.get('task_key')} review_type={card.get('review_type')}"
@@ -1357,6 +1363,12 @@ class WorkbenchFlow:
         # so the flow can continue without waiting for pending_card API consistency.
         sse_card = extract_last_card_from_sse(sse if isinstance(sse, dict) else {})
         if isinstance(sse_card, dict) and sse_card:
+            if not self._pending_card_poll_unavailable:
+                _debug(
+                    f"[flow] ignore sse card after clean pending-card poll skill_id={sse_card.get('skill_id')} "
+                    f"task_key={sse_card.get('task_key')}"
+                )
+                return sse
             if stop_on_pending_card is not None and stop_on_pending_card(sse_card):
                 _debug(
                     f"[flow] nudge produced interceptable card skill_id={sse_card.get('skill_id')} "

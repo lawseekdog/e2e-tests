@@ -53,7 +53,6 @@ DEFAULT_SERVICE_TYPE_ID = "document_drafting"
 
 REASONABLE_CARD_KINDS = {"clarify", "select", "confirm"}
 LOW_SIGNAL_HINTS = (
-    "继续",
     "处理中",
     "正在处理",
     "请稍候",
@@ -503,7 +502,8 @@ async def _wait_template_draft_start_settled(
             snapshot_data = unwrap_api_response(snapshot_resp)
             if isinstance(snapshot_data, dict):
                 last_snapshot = snapshot_data
-                analysis_state = snapshot_data.get("analysis_state") if isinstance(snapshot_data.get("analysis_state"), dict) else {}
+                analysis_state_obj = snapshot_data.get("analysis_state")
+                analysis_state = analysis_state_obj if isinstance(analysis_state_obj, dict) else {}
                 current_subgraph = _safe_str(analysis_state.get("current_subgraph"))
                 current_task_id = _safe_str(analysis_state.get("current_task_id"))
                 if current_subgraph == "document_generation" or current_task_id.startswith("docgen"):
@@ -991,14 +991,17 @@ async def run(args: argparse.Namespace) -> int:
                     deliverables=deliverable_rows_effective,
                     traces=trace_rows,
                 )
-                trace_obj = snapshot.get("trace") if isinstance(snapshot.get("trace"), dict) else {}
+                trace_obj_raw = snapshot.get("trace")
+                trace_obj = trace_obj_raw if isinstance(trace_obj_raw, dict) else {}
+                trace_node_ids_raw = trace_obj.get("trace_node_ids")
+                trace_node_ids = trace_node_ids_raw if isinstance(trace_node_ids_raw, list) else []
                 current_node = _detect_docgen_node(
                     current_task_id=_safe_str(snapshot.get("current_task_id")),
                     current_phase=_safe_str(snapshot.get("current_phase")),
                     pending_card=snapshot.get("pending_card") if isinstance(snapshot.get("pending_card"), dict) else {},
                     deliverable=snapshot.get("deliverable") if isinstance(snapshot.get("deliverable"), dict) else {},
                     docgen=snapshot.get("docgen") if isinstance(snapshot.get("docgen"), dict) else {},
-                    trace_node_ids=trace_obj.get("trace_node_ids") if isinstance(trace_obj.get("trace_node_ids"), list) else [],
+                    trace_node_ids=trace_node_ids,
                     template_quality_contracts_json_exists=bool(snapshot.get("template_quality_contracts_json_exists")),
                     docgen_repair_plan_exists=bool(snapshot.get("docgen_repair_plan_exists")),
                     quality_review_decision=_safe_str(snapshot.get("quality_review_decision")),
@@ -1041,7 +1044,8 @@ async def run(args: argparse.Namespace) -> int:
                 _write_json(state_snapshots_dir / f"step_{step_no:03d}.json", snapshot)
                 _write_json(out_dir / "node_timeline.json", node_timeline)
 
-                deliverable_obj = snapshot.get("deliverable") if isinstance(snapshot.get("deliverable"), dict) else {}
+                deliverable_obj_raw = snapshot.get("deliverable")
+                deliverable_obj = deliverable_obj_raw if isinstance(deliverable_obj_raw, dict) else {}
                 summary.update(
                     {
                         "docgen_node_sequence": list(docgen_node_sequence),
@@ -1418,38 +1422,19 @@ async def run(args: argparse.Namespace) -> int:
                         await asyncio.sleep(min(2.5, max(0.3, busy_hold_until - now)))
                         continue
 
-                    sse = await flow.nudge(_safe_str(args.nudge_text) or "继续", attachments=[], max_loops=max(1, int(args.max_loops)))
                     await _record_round(
-                        action="chat.nudge",
-                        payload={"text": _safe_str(args.nudge_text) or "继续"},
-                        sse=sse if isinstance(sse, dict) else {},
+                        action="state.wait_no_card",
+                        payload={
+                            "stall_rounds": stall_rounds,
+                            "deliverable_status": _safe_str((deliverable_head or {}).get("status")),
+                            "current_phase": _safe_str(workbench_snapshot.get("current_phase")),
+                            "docgen_node": _safe_str(docgen_snapshot.get("docgen_node")),
+                        },
+                        sse={},
                         enforce_visibility=False,
                     )
-                    nudge_output = _safe_str((sse if isinstance(sse, dict) else {}).get("output"))
-                    if _is_terminal_failure_output(nudge_output):
-                        raise RuntimeError(f"nudge returned terminal failure output: {nudge_output}")
-
-                    sse_card = extract_last_card_from_sse(sse if isinstance(sse, dict) else {})
-                    if isinstance(sse_card, dict) and sse_card:
-                        cards_seen.append(
-                            {
-                                "source": "sse",
-                                "round": len(rounds) + 1,
-                                "skill_id": _safe_str(sse_card.get("skill_id")),
-                                "task_key": _safe_str(sse_card.get("task_key")),
-                                "review_type": _safe_str(sse_card.get("review_type")),
-                                "card": sse_card,
-                            }
-                        )
-                        sse = await _resume_card_with_busy_retry(
-                            flow=flow,
-                            card=sse_card,
-                            action="resume.sse_card",
-                            payload={
-                                "skill_id": _safe_str(sse_card.get("skill_id")),
-                                "task_key": _safe_str(sse_card.get("task_key")),
-                            },
-                        )
+                    await asyncio.sleep(max(0.5, float(args.poll_interval_s)))
+                    continue
 
                 if is_session_busy_sse(sse if isinstance(sse, dict) else {}):
                     busy_retries += 1
@@ -1773,7 +1758,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-interval-s", type=float, default=2.0, help="Polling interval between state snapshots")
     parser.add_argument("--stop-after-node", default="", help=f"Stop successfully after node reached: {', '.join(DOCGEN_STOP_NODES)}")
     parser.add_argument("--debug-json", action="store_true", help="Include raw API payloads in state snapshots")
-    parser.add_argument("--nudge-text", default="继续", help="Nudge text when no pending card")
     parser.add_argument("--max-low-signal-streak", type=int, default=4, help="Dialogue low-signal streak threshold")
     parser.add_argument(
         "--max-same-card-repeats",

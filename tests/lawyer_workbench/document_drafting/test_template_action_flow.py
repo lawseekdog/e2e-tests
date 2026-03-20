@@ -3,9 +3,14 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from scripts.template_draft_real_flow_support import (
+    DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE,
+    DEFAULT_LEGAL_OPINION_FACTS,
+)
 from tests.lawyer_workbench._support.docx import (
     assert_docx_contains,
     assert_docx_has_no_template_placeholders,
@@ -25,39 +30,37 @@ def _debug(msg: str) -> None:
 
 
 def _case_facts() -> str:
-    return (
-        "原告：张三E2E_TPL。\n"
-        "被告：李四E2E_TPL。\n"
-        "案由：民间借贷纠纷。\n"
-        "事实：2023-03-01，被告向原告借款人民币80000元，约定2023-10-01前归还；"
-        "原告已通过银行转账交付。\n"
-        "到期后被告未还，原告多次催收无果。\n"
-        "证据：借条、转账记录、聊天记录。\n"
-        "诉求：返还本金80000元，并按年利率6%支付逾期利息，承担诉讼费。"
-    )
+    return DEFAULT_LEGAL_OPINION_FACTS
 
 
-def _extract_templates(payload: dict) -> list[dict]:
+def _extract_templates(payload: dict[str, Any]) -> list[dict[str, Any]]:
     data = unwrap_api_response(payload)
-    if isinstance(data, dict) and isinstance(data.get("templates"), list):
-        return [t for t in data.get("templates") if isinstance(t, dict)]
-    if isinstance(payload, dict) and isinstance(payload.get("templates"), list):
-        return [t for t in payload.get("templates") if isinstance(t, dict)]
+    if isinstance(data, dict):
+        templates = data.get("templates")
+        if isinstance(templates, list):
+            return [t for t in templates if isinstance(t, dict)]
+    if isinstance(payload, dict):
+        templates = payload.get("templates")
+        if isinstance(templates, list):
+            return [t for t in templates if isinstance(t, dict)]
     return []
 
 
-def _pick_template(templates: list[dict]) -> dict:
-    def _out_key(t: dict) -> str:
+def _pick_template(templates: list[dict[str, Any]]) -> dict[str, Any]:
+    def _out_key(t: dict[str, Any]) -> str:
         return str(t.get("outputKey") or t.get("output_key") or "").strip()
 
-    def _name(t: dict) -> str:
+    def _name(t: dict[str, Any]) -> str:
         return str(t.get("name") or "").strip()
 
     for t in templates:
-        if _out_key(t) == "civil_complaint":
+        if _out_key(t) == "legal_opinion_contract_dispute":
             return t
     for t in templates:
-        if "起诉状" in _name(t):
+        if _out_key(t) == "legal_opinion":
+            return t
+    for t in templates:
+        if "法律意见书" in _name(t):
             return t
     for t in templates:
         if _out_key(t):
@@ -68,12 +71,8 @@ def _pick_template(templates: list[dict]) -> dict:
 @pytest.mark.e2e
 @pytest.mark.slow
 async def test_template_action_flow_generates_docx(lawyer_client):
-    evidence_dir = Path(__file__).resolve().parents[1] / "civil_prosecution" / "evidence"
-    paths = [
-        evidence_dir / "iou.txt",
-        evidence_dir / "sample_transfer_record.txt",
-        evidence_dir / "sample_chat_record.txt",
-    ]
+    repo_root = Path(__file__).resolve().parents[3]
+    paths = [repo_root / rel for rel in DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE]
 
     uploaded_file_ids: list[str] = []
     for p in paths:
@@ -176,7 +175,7 @@ async def test_template_action_flow_generates_docx(lawyer_client):
     docx_bytes = await lawyer_client.download_file_bytes(file_id)
     text = extract_docx_text(docx_bytes)
     assert_docx_has_no_template_placeholders(text)
-    assert_docx_contains(text, must_include=["张三E2E_TPL", "李四E2E_TPL"])
-    assert any(x in text for x in ["80000", "80,000", "8万元", "8万"]), text[:2000]
+    assert_docx_contains(text, must_include=["北京云杉科技有限公司", "上海启衡数据系统有限公司"])
+    assert any(x in text for x in ["360000", "360,000", "36万元", "252000", "252,000", "25.2万元"]), text[:2000]
     citations = re.findall(r"《[^》]{2,20}》第[一二三四五六七八九十百千0-9]+条", text)
     assert len(citations) >= 2, f"missing law citations in docx: {text[:1200]}"

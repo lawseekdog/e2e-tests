@@ -25,6 +25,7 @@ PendingCardStopFn = Callable[[dict[str, Any]], bool]
 _NUDGE_TEXT = "继续"
 _DEBUG = str(os.getenv("E2E_FLOW_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
 _AUTO_NUDGE = str(os.getenv("E2E_AUTO_NUDGE", "1") or "").strip().lower() in {"1", "true", "yes"}
+_PROGRESS = str(os.getenv("E2E_FLOW_PROGRESS", "1") or "").strip().lower() in {"1", "true", "yes"}
 
 
 def _read_int_env(name: str, default: int) -> int:
@@ -52,9 +53,16 @@ def _debug(msg: str) -> None:
         print(msg, flush=True)
 
 
+def _progress(msg: str) -> None:
+    if _PROGRESS:
+        print(msg, flush=True)
+
+
 def extract_last_card_from_sse(sse: dict[str, Any]) -> dict[str, Any] | None:
-    events = sse.get("events") if isinstance(sse.get("events"), list) else []
-    for it in reversed(events):
+    raw_events = sse.get("events")
+    events: list[Any] = list(raw_events) if isinstance(raw_events, list) else []
+    for idx in range(len(events) - 1, -1, -1):
+        it = events[idx]
         if not isinstance(it, dict):
             continue
         if it.get("event") != "card":
@@ -76,7 +84,8 @@ def _pending_card_intercept_sse(card: dict[str, Any]) -> dict[str, Any]:
 def is_session_busy_sse(sse: dict[str, Any] | None) -> bool:
     if not isinstance(sse, dict):
         return False
-    events = sse.get("events") if isinstance(sse.get("events"), list) else []
+    raw_events = sse.get("events")
+    events: list[Any] = list(raw_events) if isinstance(raw_events, list) else []
     for it in events:
         if not isinstance(it, dict):
             continue
@@ -84,7 +93,8 @@ def is_session_busy_sse(sse: dict[str, Any] | None) -> bool:
         if event_name == "session_busy":
             return True
         if event_name == "error":
-            data = it.get("data") if isinstance(it.get("data"), dict) else {}
+            raw_data = it.get("data")
+            data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
             if data.get("partial") is True:
                 err_code = str(data.get("error") or "").strip().lower()
                 if err_code in {"stream_timeout", "timeout", "request_timeout"}:
@@ -741,20 +751,23 @@ def auto_answer_card(
             else:
                 value = default if has_default else True
         elif it in {"select", "single_select", "single_choice"}:
-            value = default if has_default else _pick_recommended_or_first(q.get("options") if isinstance(q.get("options"), list) else [])
+            raw_options = q.get("options")
+            options: list[Any] = raw_options if isinstance(raw_options, list) else []
+            value = default if has_default else _pick_recommended_or_first(options)
             if fk in {"profile.review_scope", "review_scope"}:
                 value = _coerce_review_scope_for_options(
                     value,
-                    q.get("options") if isinstance(q.get("options"), list) else [],
+                    options,
                 )
         elif it in {"multi_select", "multiple_select"}:
             if has_default:
                 value = default
             else:
-                options = q.get("options") if isinstance(q.get("options"), list) else []
+                raw_options = q.get("options")
+                options: list[Any] = raw_options if isinstance(raw_options, list) else []
                 # For multi-select questions, picking all recommended options can trigger a lot of expensive
                 # downstream work (e.g., generating multiple documents). Prefer a minimal, deterministic choice.
-                picked = None
+                picked: Any | None = None
                 for opt in options:
                     if not isinstance(opt, dict) or opt.get("recommended") is not True:
                         continue
@@ -864,8 +877,9 @@ def card_signature(card: dict[str, Any]) -> str:
     skill = str(card.get("skill_id") or "").strip()
     task = str(card.get("task_key") or "").strip()
     review = str(card.get("review_type") or "").strip()
-    qs = card.get("questions") if isinstance(card.get("questions"), list) else []
-    sigs = []
+    raw_questions = card.get("questions")
+    qs: list[Any] = raw_questions if isinstance(raw_questions, list) else []
+    sigs: list[str] = []
     for q in qs:
         if not isinstance(q, dict):
             continue
@@ -904,6 +918,23 @@ def _compact_card_debug(card: dict[str, Any]) -> dict[str, Any]:
     if isinstance(questions, list):
         out["questions_count"] = len(questions)
     return out
+
+
+def _compact_sse_events(sse: dict[str, Any] | None) -> str:
+    if not isinstance(sse, dict):
+        return ""
+    raw_events = sse.get("events")
+    events: list[Any] = list(raw_events) if isinstance(raw_events, list) else []
+    names: list[str] = []
+    for row in events:
+        if not isinstance(row, dict):
+            continue
+        event_name = str(row.get("event") or "").strip()
+        if not event_name:
+            continue
+        if event_name not in names:
+            names.append(event_name)
+    return ",".join(names[:8])
 
 
 def _remediation_nudge_for_unanswerable_card(card: dict[str, Any]) -> str | None:
@@ -975,6 +1006,112 @@ class WorkbenchFlow:
     _repeat_card_count: int = 0
     _last_step_used_nudge: bool = False
 
+    async def _runtime_progress_snapshot(self) -> dict[str, str]:
+        snapshot: dict[str, str] = {
+            "session": self.session_id,
+            "matter": str(self.matter_id or "").strip(),
+            "status": str(self.session_status or "").strip(),
+            "phase": "",
+            "phase_status": "",
+            "trace_node": "",
+            "trace_status": "",
+            "deliverables": "",
+        }
+        if not self.matter_id:
+            return snapshot
+
+        try:
+            phase_resp = await self.client.get_matter_phase_timeline(self.matter_id)
+            phase_data = unwrap_api_response(phase_resp)
+            if isinstance(phase_data, dict):
+                snapshot["phase"] = str(phase_data.get("current_phase") or phase_data.get("currentPhase") or "").strip()
+                raw_phases = phase_data.get("phases")
+                phases: list[Any] = list(raw_phases) if isinstance(raw_phases, list) else []
+                for item in phases:
+                    if not isinstance(item, dict):
+                        continue
+                    phase_id = str(item.get("id") or "").strip()
+                    if phase_id and phase_id == snapshot["phase"]:
+                        snapshot["phase_status"] = str(item.get("status") or "").strip()
+                        break
+        except Exception:
+            pass
+
+        try:
+            trace_resp = await self.client.list_traces(self.matter_id, limit=1)
+            trace_data = unwrap_api_response(trace_resp)
+            raw_traces = trace_data.get("traces") if isinstance(trace_data, dict) else None
+            traces: list[Any] = list(raw_traces) if isinstance(raw_traces, list) else []
+            if traces:
+                latest = traces[0] if isinstance(traces[0], dict) else {}
+                snapshot["trace_node"] = str(
+                    latest.get("node_id") or latest.get("nodeId") or latest.get("task_id") or latest.get("taskId") or ""
+                ).strip()
+                snapshot["trace_status"] = str(latest.get("status") or latest.get("state") or "").strip()
+        except Exception:
+            pass
+
+        try:
+            deliverables_resp = await self.client.list_deliverables(self.matter_id)
+            deliverables_data = unwrap_api_response(deliverables_resp)
+            raw_rows = deliverables_data.get("deliverables") if isinstance(deliverables_data, dict) else None
+            rows: list[Any] = list(raw_rows) if isinstance(raw_rows, list) else []
+            output_keys: list[str] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                key = str(row.get("output_key") or row.get("outputKey") or "").strip()
+                if key and key not in output_keys:
+                    output_keys.append(key)
+            snapshot["deliverables"] = ",".join(output_keys[:6])
+        except Exception:
+            pass
+        return snapshot
+
+    async def _emit_progress(
+        self,
+        *,
+        label: str,
+        step_no: int | None = None,
+        max_steps: int | None = None,
+        card: dict[str, Any] | None = None,
+        sse: dict[str, Any] | None = None,
+    ) -> None:
+        snapshot = await self._runtime_progress_snapshot()
+        parts = [f"[flow-progress] {label}"]
+        if step_no is not None and max_steps is not None:
+            parts.append(f"step={step_no}/{max_steps}")
+        parts.append(f"session={snapshot.get('session')}")
+        if snapshot.get("matter"):
+            parts.append(f"matter={snapshot.get('matter')}")
+        if snapshot.get("status"):
+            parts.append(f"status={snapshot.get('status')}")
+        if snapshot.get("phase"):
+            phase = snapshot.get("phase")
+            phase_status = snapshot.get("phase_status")
+            if phase_status:
+                parts.append(f"phase={phase}:{phase_status}")
+            else:
+                parts.append(f"phase={phase}")
+        if snapshot.get("trace_node"):
+            trace = snapshot.get("trace_node")
+            trace_status = snapshot.get("trace_status")
+            if trace_status:
+                parts.append(f"trace={trace}:{trace_status}")
+            else:
+                parts.append(f"trace={trace}")
+        if card:
+            skill = str(card.get("skill_id") or "").strip()
+            task = str(card.get("task_key") or "").strip()
+            if skill or task:
+                parts.append(f"card={skill}/{task}".rstrip("/"))
+        event_summary = _compact_sse_events(sse)
+        if event_summary:
+            parts.append(f"events={event_summary}")
+        if snapshot.get("deliverables"):
+            parts.append(f"deliverables={snapshot.get('deliverables')}")
+        _progress(" ".join(parts))
+
     async def refresh(self) -> None:
         try:
             sess = unwrap_api_response(await self.client.get_session(self.session_id))
@@ -1034,7 +1171,8 @@ class WorkbenchFlow:
         self.seen_cards.append(card)
         self.seen_card_signatures.append(card_signature(card))
         if _DEBUG:
-            qs = card.get("questions") if isinstance(card.get("questions"), list) else []
+            raw_questions = card.get("questions")
+            qs: list[Any] = list(raw_questions) if isinstance(raw_questions, list) else []
             fields = [
                 {
                     "field_key": str(q.get("field_key") or "").strip(),
@@ -1067,6 +1205,7 @@ class WorkbenchFlow:
         if isinstance(sse, dict):
             self.last_sse = sse
             self.seen_sse.append(sse)
+        await self._emit_progress(label="resume", card=card, sse=sse)
         return sse
 
     async def nudge(self, text: str = _NUDGE_TEXT, *, attachments: list[str] | None = None, max_loops: int = 8) -> dict[str, Any]:
@@ -1075,6 +1214,7 @@ class WorkbenchFlow:
         if isinstance(sse, dict):
             self.last_sse = sse
             self.seen_sse.append(sse)
+        await self._emit_progress(label=f"nudge:{text[:24]}", sse=sse)
         return sse
 
     async def step(
@@ -1224,10 +1364,12 @@ class WorkbenchFlow:
             if asyncio.iscoroutine(ok):
                 ok = await ok
             if ok:
+                await self._emit_progress(label=f"ready:{description}", step_no=step_no + 1, max_steps=max_steps)
                 _debug(f"[flow] reached {description} at step {step_no + 1} (session_id={self.session_id}, matter_id={self.matter_id})")
                 return
 
             step_no += 1
+            await self._emit_progress(label=f"waiting:{description}", step_no=step_no, max_steps=max_steps)
             _debug(f"[flow] step {step_no}/{max_steps} waiting for {description} (session_id={self.session_id}, matter_id={self.matter_id})")
             allow_nudge = (suppress_nudge_rounds <= 0) and (nudge_cooldown <= 0)
             sse = await self.step(

@@ -1427,8 +1427,8 @@ async def run(args: argparse.Namespace) -> int:
                         payload={
                             "stall_rounds": stall_rounds,
                             "deliverable_status": _safe_str((deliverable_head or {}).get("status")),
-                            "current_phase": _safe_str(workbench_snapshot.get("current_phase")),
-                            "docgen_node": _safe_str(docgen_snapshot.get("docgen_node")),
+                            "current_phase": _safe_str(last_docgen_snapshot.get("current_phase")),
+                            "docgen_node": _safe_str(last_docgen_snapshot.get("docgen_node")),
                         },
                         sse={},
                         enforce_visibility=False,

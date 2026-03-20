@@ -154,6 +154,8 @@ output/template-draft-chain/<timestamp>/
 
 ## 7）建议排查方式
 
+- 脚本不会再自动发送“继续”之类的聊天 nudges；它只依赖 `snapshot / pending_card / deliverables / traces` 做真实状态判断。
+- 若没有 `pending_card` 且 `deliverable` 长时间无变化，脚本会直接判定为后端阻塞，而不是继续向会话注入文本。
 - 先用 `--stop-after-node section_contract` 验证章节契约阶段能否稳定到达。
 - 再用 `--stop-after-node soft_validate` 看软校验是否生成 `soft_reason_codes` / `docgen_repair_plan`。
 - 最后跑到 `finish`，对照：

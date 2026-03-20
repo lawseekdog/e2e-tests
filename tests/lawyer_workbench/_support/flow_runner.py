@@ -194,6 +194,21 @@ def _option_answer_value(option: Any) -> Any | None:
     return None
 
 
+def _option_label_for_value(options: list[Any], value: Any) -> str | None:
+    target = str(value).strip()
+    if not target:
+        return None
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        candidate = _option_answer_value(option)
+        if str(candidate).strip() != target:
+            continue
+        label = str(option.get("label") or "").strip()
+        return label or None
+    return None
+
+
 def _option_match_text(option: Any) -> str:
     if not isinstance(option, dict):
         return ""
@@ -685,6 +700,19 @@ def auto_answer_card(
 
     answers: list[dict[str, Any]] = []
 
+    def _append_answer(field_key: str, value: Any, *, question: dict[str, Any] | None = None) -> None:
+        answers.append({"field_key": field_key, "value": value})
+        if not isinstance(question, dict):
+            return
+        value_label_field_key = str(question.get("value_label_field_key") or "").strip()
+        if not value_label_field_key:
+            return
+        raw_options = question.get("options")
+        options: list[Any] = raw_options if isinstance(raw_options, list) else []
+        label_value = _option_label_for_value(options, value)
+        if label_value:
+            answers.append({"field_key": value_label_field_key, "value": label_value})
+
     for q in questions:
         if not isinstance(q, dict):
             continue
@@ -719,7 +747,7 @@ def auto_answer_card(
                     forced_value = []
                 else:
                     continue
-            answers.append({"field_key": fk, "value": forced_value})
+            _append_answer(fk, forced_value, question=q)
             continue
 
         override_value = _resolve_override_value(fk, overrides)
@@ -729,7 +757,7 @@ def auto_answer_card(
                     override_value,
                     q.get("options") if isinstance(q.get("options"), list) else [],
                 )
-            answers.append({"field_key": fk, "value": override_value})
+            _append_answer(fk, override_value, question=q)
             continue
 
         default = q.get("default")
@@ -821,7 +849,7 @@ def auto_answer_card(
         if value is None and not required:
             continue
 
-        answers.append({"field_key": fk, "value": value})
+        _append_answer(fk, value, question=q)
 
     inferred_missing = _infer_missing_fields_from_card(card)
     if inferred_missing:
@@ -835,7 +863,7 @@ def auto_answer_card(
             value = override_value if override_value is not None else _fallback_answer_for_missing_field(fk, uploaded_file_ids)
             if value is None:
                 continue
-            answers.append({"field_key": fk, "value": value})
+            _append_answer(fk, value)
 
     # Compatibility aliases:
     # Some environments still read legacy top-level fields, but strict card

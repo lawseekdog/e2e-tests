@@ -11,8 +11,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-
 import sys
 
 E2E_ROOT = Path(__file__).resolve().parent.parent
@@ -25,7 +23,16 @@ from tests.lawyer_workbench._support.docx import (
     extract_docx_text,
 )
 from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, is_session_busy_sse
-from tests.lawyer_workbench._support.utils import unwrap_api_response
+from scripts._support.workflow_real_flow_support import (
+    bootstrap_flow,
+    event_counts as _shared_event_counts,
+    fetch_workbench_snapshot as _shared_fetch_workbench_snapshot,
+    list_session_messages as _shared_list_session_messages,
+    load_real_flow_env,
+    resolve_output_dir,
+    upload_consultation_files,
+    write_json,
+)
 
 
 REQUIRED_DOC_OUTPUT_KEYS = (
@@ -111,14 +118,7 @@ def _select_contract_file(cli_value: str) -> Path:
 
 
 def _event_counts(sse: dict[str, Any]) -> dict[str, int]:
-    out: dict[str, int] = {}
-    events = sse.get("events") if isinstance(sse.get("events"), list) else []
-    for row in events:
-        if not isinstance(row, dict):
-            continue
-        name = _safe_str(row.get("event")) or "unknown"
-        out[name] = int(out.get(name) or 0) + 1
-    return out
+    return _shared_event_counts(sse)
 
 
 def _capture_runtime_images() -> dict[str, str]:
@@ -157,12 +157,7 @@ def _capture_runtime_images() -> dict[str, str]:
 
 
 async def _fetch_snapshot(client: ApiClient, matter_id: str) -> dict[str, Any] | None:
-    try:
-        resp = await client.get(f"/matter-service/lawyer/matters/{matter_id}/workbench/snapshot")
-    except Exception:
-        return None
-    payload = unwrap_api_response(resp)
-    return payload if isinstance(payload, dict) else None
+    return await _shared_fetch_workbench_snapshot(client, matter_id)
 
 
 def _extract_contract_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
@@ -195,16 +190,7 @@ async def _list_deliverables(client: ApiClient, matter_id: str) -> dict[str, dic
 
 
 async def _list_session_messages(client: ApiClient, session_id: str) -> list[dict[str, Any]]:
-    try:
-        resp = await client.get(
-            f"/consultations-service/consultations/sessions/{session_id}/messages",
-            params={"page": 1, "size": 200},
-        )
-    except Exception:
-        return []
-    data = unwrap_api_response(resp)
-    rows = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), list) else []
-    return [row for row in rows if isinstance(row, dict)]
+    return await _shared_list_session_messages(client, session_id)
 
 
 def _latest_assistant_message(rows: list[dict[str, Any]]) -> str:
@@ -368,8 +354,7 @@ async def _wait_for_clause_ids(
 
 
 async def run(args: argparse.Namespace) -> int:
-    load_dotenv(REPO_ROOT / ".env", override=False)
-    load_dotenv(E2E_ROOT / ".env", override=False)
+    load_real_flow_env(repo_root=REPO_ROOT, e2e_root=E2E_ROOT)
 
     base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
     username = _safe_str(args.username) or _safe_str(os.getenv("LAWYER_USERNAME")) or "lawyer1"
@@ -378,8 +363,11 @@ async def run(args: argparse.Namespace) -> int:
     contract_file = _select_contract_file(args.contract_file)
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_dir = (Path(args.output_dir).expanduser() if _safe_str(args.output_dir) else REPO_ROOT / f"output/contract-review-chain/{ts}").resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = resolve_output_dir(
+        repo_root=REPO_ROOT,
+        output_dir=_safe_str(args.output_dir),
+        default_leaf=f"output/contract-review-chain/{ts}",
+    )
 
     print(f"[config] base_url={base_url}")
     print(f"[config] user={username}")
@@ -394,35 +382,25 @@ async def run(args: argparse.Namespace) -> int:
         await client.login(username, password)
         print(f"[login] ok user_id={client.user_id} org_id={client.organization_id}")
 
-        upload = await client.upload_file(str(contract_file), purpose="consultation")
-        file_id = _safe_str(((upload.get("data") or {}) if isinstance(upload, dict) else {}).get("id"))
+        uploaded_file_ids = await upload_consultation_files(client, [contract_file])
+        file_id = uploaded_file_ids[0] if uploaded_file_ids else ""
         if not file_id:
-            raise RuntimeError(f"upload_file failed: {upload}")
+            raise RuntimeError(f"upload_file failed: {contract_file}")
         print(f"[upload] ok file_id={file_id}")
 
-        sess = await client.create_session(service_type_id="contract_review", client_role="applicant")
-        sess_data = (sess.get("data") if isinstance(sess, dict) else {}) or {}
-        session_id = _safe_str(sess_data.get("id"))
-        matter_id = _safe_str(sess_data.get("matter_id"))
-        if not session_id:
-            raise RuntimeError(f"create_session failed: {sess}")
-        print(f"[session] id={session_id} matter_id={matter_id or '-'}")
-
-        flow = WorkbenchFlow(
+        flow, session_id, matter_id = await bootstrap_flow(
             client=client,
-            session_id=session_id,
+            service_type_id="contract_review",
+            client_role="applicant",
             uploaded_file_ids=[file_id],
-            overrides=dict(FLOW_OVERRIDES),
-            matter_id=matter_id or None,
+            overrides=FLOW_OVERRIDES,
         )
+        print(f"[session] id={session_id} matter_id={matter_id or '-'}")
 
         kickoff_sse = await flow.nudge(kickoff, attachments=[file_id], max_loops=max(1, int(args.kickoff_max_loops)))
         kickoff_counts = _event_counts(kickoff_sse if isinstance(kickoff_sse, dict) else {})
         print(f"[kickoff] event_counts={kickoff_counts}")
-        (out_dir / "kickoff.sse.json").write_text(
-            json.dumps(kickoff_sse if isinstance(kickoff_sse, dict) else {}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_json(out_dir / "kickoff.sse.json", kickoff_sse if isinstance(kickoff_sse, dict) else {})
 
         async def _deliverables_ready(f: WorkbenchFlow) -> bool:
             await f.refresh()
@@ -484,21 +462,6 @@ async def run(args: argparse.Namespace) -> int:
                             "[deliverables_wait] resume_card missing user_message; "
                             "treat as in-flight and keep polling"
                         )
-                elif ((idx + 1) % drive_interval) == 0:
-                    try:
-                        sse = await asyncio.wait_for(
-                            client.chat(flow.session_id, "继续", attachments=flow.uploaded_file_ids, max_loops=2),
-                            timeout=_CONTINUE_STEP_TIMEOUT_S,
-                        )
-                    except asyncio.TimeoutError:
-                        print(
-                            f"[deliverables_wait] continue timeout after {_CONTINUE_STEP_TIMEOUT_S:.1f}s; "
-                            "treat as in-flight and keep polling"
-                        )
-                    else:
-                        if isinstance(sse, dict):
-                            flow.last_sse = sse
-                            flow.seen_sse.append(sse)
                 await asyncio.sleep(interval)
             raise AssertionError(
                 "Failed to reach contract review deliverables ready "
@@ -557,6 +520,7 @@ async def run(args: argparse.Namespace) -> int:
                     _deliverables_ready,
                     max_steps=max(1, int(args.max_steps)),
                     description="contract review deliverables ready",
+                    allow_nudge=bool(args.allow_nudge),
                 )
         except Exception as e:
             await flow.refresh()
@@ -586,19 +550,10 @@ async def run(args: argparse.Namespace) -> int:
                 "seen_cards": len(flow.seen_cards),
                 "seen_sse_rounds": len(flow.seen_sse),
             }
-            (out_dir / "failure_diagnostics.json").write_text(
-                json.dumps(failure_diag, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            (out_dir / "deliverables.failure.json").write_text(
-                json.dumps(fail_deliverables, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            write_json(out_dir / "failure_diagnostics.json", failure_diag)
+            write_json(out_dir / "deliverables.failure.json", fail_deliverables)
             if isinstance(fail_snapshot, dict) and fail_snapshot:
-                (out_dir / "snapshot.failure.json").write_text(
-                    json.dumps(fail_snapshot, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                write_json(out_dir / "snapshot.failure.json", fail_snapshot)
             raise
 
         await flow.refresh()
@@ -650,9 +605,9 @@ async def run(args: argparse.Namespace) -> int:
         if start_images and end_images and start_images != end_images and str(os.getenv("E2E_ALLOW_DEPLOYMENT_DRIFT", "") or "").strip() not in {"1", "true", "yes"}:
             raise RuntimeError(f"deployment_image_drift_detected: start={start_images} end={end_images}")
 
-        (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-        (out_dir / "deliverables.json").write_text(json.dumps(deliverables, ensure_ascii=False, indent=2), encoding="utf-8")
-        (out_dir / "snapshot.json").write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json(out_dir / "summary.json", summary)
+        write_json(out_dir / "deliverables.json", deliverables)
+        write_json(out_dir / "snapshot.json", snapshot)
         if report_text:
             (out_dir / "contract_review_report.txt").write_text(report_text, encoding="utf-8")
 
@@ -670,17 +625,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kickoff", default=DEFAULT_KICKOFF, help="Initial user query")
     parser.add_argument("--kickoff-max-loops", type=int, default=24, help="kickoff max_loops")
     parser.add_argument("--max-steps", type=int, default=220, help="run_until max steps")
+    card_mode = parser.add_mutually_exclusive_group()
+    card_mode.add_argument("--cards-only", dest="allow_nudge", action="store_false", default=False, help="Only answer cards and poll; do not auto-nudge (default)")
+    card_mode.add_argument("--allow-nudge", dest="allow_nudge", action="store_true", help="Allow nudge text when no pending card")
     parser.add_argument(
         "--apply-decisions",
         action="store_true",
-        default=True,
-        help="Send workflow_action=contract_review_apply_decisions before deliverables polling",
+        default=False,
+        help="Explicitly send workflow_action=contract_review_apply_decisions before deliverables polling",
     )
     parser.add_argument(
         "--no-apply-decisions",
         dest="apply_decisions",
         action="store_false",
-        help="Disable workflow_action=contract_review_apply_decisions",
+        help="Do not send workflow_action=contract_review_apply_decisions (default)",
     )
     parser.add_argument(
         "--assert-docx",

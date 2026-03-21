@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from scripts.template_draft_real_flow_support import (
+from scripts._support.template_draft_real_flow_support import (
     DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE,
     DEFAULT_LEGAL_OPINION_FACTS,
 )

@@ -32,7 +32,7 @@ from tests.lawyer_workbench._support.flow_runner import (
 from tests.lawyer_workbench._support.sse import assert_visible_response
 from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
 
-from scripts.template_draft_real_flow_support import (
+from scripts._support.template_draft_real_flow_support import (
     DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE,
     DEFAULT_LEGAL_OPINION_FACTS,
     DOCGEN_STOP_NODES,
@@ -50,10 +50,6 @@ DEFAULT_FACTS = DEFAULT_LEGAL_OPINION_FACTS
 DEFAULT_EVIDENCE_RELATIVE = DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE
 
 DEFAULT_SERVICE_TYPE_ID = "document_drafting"
-AUTO_NUDGE_TEXT = "继续"
-AUTO_NUDGE_ENABLED = str(os.getenv("E2E_AUTO_NUDGE", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
-AUTO_NUDGE_STALL_ROUNDS = max(1, int(os.getenv("E2E_AUTO_NUDGE_STALL_ROUNDS", "2") or "2"))
-
 REASONABLE_CARD_KINDS = {"clarify", "select", "confirm"}
 LOW_SIGNAL_HINTS = (
     "处理中",
@@ -1271,7 +1267,6 @@ async def run(args: argparse.Namespace) -> int:
             suppress_nudge_rounds = 0
             last_card_sig = ""
             last_card_repeats = 0
-            auto_nudge_count = 0
             deliverable_row: dict[str, Any] | None = None
             last_deliverable_sig = ""
             stall_rounds = 0
@@ -1389,29 +1384,6 @@ async def run(args: argparse.Namespace) -> int:
                         },
                     )
 
-                    # Some remote envs can loop on skill-error-analysis (docx_quality_gate_failed).
-                    # Only nudge when card policy allows free chat; otherwise nudges only produce card+error loops.
-                    chat_policy_obj = pending.get("chat_policy")
-                    chat_policy: dict[str, Any] = chat_policy_obj if isinstance(chat_policy_obj, dict) else {}
-                    allows_chat = bool(chat_policy.get("allows_chat"))
-                    if skill_id == "skill-error-analysis" and allows_chat and last_card_repeats >= 2:
-                        remediation_text = (
-                            "请按失败提示修复后重试："
-                            "1) 删除多余空行，段落空行率控制在20%以内；"
-                            "2) 保留完整标题/当事人/请求事项/事实理由/落款结构；"
-                            "3) 输出可直接交付的最终版本。"
-                        )
-                        remediation_sse = await flow.nudge(
-                            remediation_text,
-                            attachments=[],
-                            max_loops=max(1, int(args.max_loops)),
-                        )
-                        await _record_round(
-                            action="chat.skill_error_remediation",
-                            payload={"repeat": last_card_repeats},
-                            sse=remediation_sse if isinstance(remediation_sse, dict) else {},
-                            enforce_visibility=False,
-                        )
                 else:
                     last_card_sig = ""
                     last_card_repeats = 0
@@ -1454,19 +1426,17 @@ async def run(args: argparse.Namespace) -> int:
                         sse={},
                         enforce_visibility=False,
                     )
-                    if AUTO_NUDGE_ENABLED and stall_rounds >= AUTO_NUDGE_STALL_ROUNDS:
-                        auto_nudge_count += 1
+                    if bool(args.allow_nudge) and stall_rounds >= 2:
                         nudge_sse = await flow.nudge(
-                            AUTO_NUDGE_TEXT,
+                            "继续",
                             attachments=[],
                             max_loops=max(1, int(args.max_loops)),
                         )
                         await _record_round(
-                            action="chat.auto_nudge",
+                            action="chat.optional_nudge",
                             payload={
-                                "text": AUTO_NUDGE_TEXT,
+                                "text": "继续",
                                 "stall_rounds": stall_rounds,
-                                "auto_nudge_count": auto_nudge_count,
                                 "current_phase": _safe_str(last_docgen_snapshot.get("current_phase")),
                                 "current_task_id": _safe_str(last_docgen_snapshot.get("current_task_id")),
                                 "docgen_node": _safe_str(last_docgen_snapshot.get("docgen_node")),
@@ -1474,15 +1444,6 @@ async def run(args: argparse.Namespace) -> int:
                             sse=nudge_sse if isinstance(nudge_sse, dict) else {},
                             enforce_visibility=False,
                         )
-                        if is_session_busy_sse(nudge_sse if isinstance(nudge_sse, dict) else {}):
-                            busy_retries += 1
-                            if busy_nudge_hold_s > 0:
-                                busy_hold_until = max(busy_hold_until, asyncio.get_running_loop().time() + busy_nudge_hold_s)
-                            suppress_nudge_rounds = min(24, max(suppress_nudge_rounds, 2 + busy_retries // 2))
-                        else:
-                            busy_retries = 0
-                            busy_hold_until = 0.0
-                            suppress_nudge_rounds = 0
                         stall_rounds = 0
                         continue
                     await asyncio.sleep(max(0.5, float(args.poll_interval_s)))
@@ -1518,12 +1479,14 @@ async def run(args: argparse.Namespace) -> int:
                         "card": pending_after,
                     }
                 )
-                confirm_sse = await client.chat(session_id, "确认", attachments=[], max_loops=max(1, int(args.max_loops)))
-                await _record_round(
-                    action="chat.confirm",
-                    payload={"text": "确认"},
-                    sse=confirm_sse if isinstance(confirm_sse, dict) else {},
-                    enforce_visibility=True,
+                confirm_sse = await _resume_card_with_busy_retry(
+                    flow=flow,
+                    card=pending_after,
+                    action="resume.confirm_card",
+                    payload={
+                        "skill_id": _safe_str(pending_after.get("skill_id")),
+                        "task_key": _safe_str(pending_after.get("task_key")),
+                    },
                 )
 
             async def _deliverable_terminal() -> bool:
@@ -1811,6 +1774,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=160, help="Workflow driving max steps")
     parser.add_argument("--max-loops", type=int, default=12, help="WS max_loops per call")
     parser.add_argument("--poll-interval-s", type=float, default=2.0, help="Polling interval between state snapshots")
+    card_mode = parser.add_mutually_exclusive_group()
+    card_mode.add_argument("--cards-only", dest="allow_nudge", action="store_false", default=False, help="Only answer cards and poll; do not auto-nudge (default)")
+    card_mode.add_argument("--allow-nudge", dest="allow_nudge", action="store_true", help="Allow a minimal nudge when no pending card and workflow stalls")
     parser.add_argument("--stop-after-node", default="", help=f"Stop successfully after node reached: {', '.join(DOCGEN_STOP_NODES)}")
     parser.add_argument("--debug-json", action="store_true", help="Include raw API payloads in state snapshots")
     parser.add_argument("--max-low-signal-streak", type=int, default=4, help="Dialogue low-signal streak threshold")

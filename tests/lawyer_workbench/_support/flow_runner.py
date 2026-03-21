@@ -1393,6 +1393,7 @@ class WorkbenchFlow:
         step_sleep_s: float = 0.0,
         description: str = "target condition",
         stop_on_pending_card: PendingCardStopFn | None = None,
+        allow_nudge: bool = True,
     ) -> None:
         """Advance the workflow until predicate(flow) is truthy (sync/async)."""
         step_no = 0
@@ -1411,10 +1412,10 @@ class WorkbenchFlow:
             step_no += 1
             await self._emit_progress(label=f"waiting:{description}", step_no=step_no, max_steps=max_steps)
             _debug(f"[flow] step {step_no}/{max_steps} waiting for {description} (session_id={self.session_id}, matter_id={self.matter_id})")
-            allow_nudge = (suppress_nudge_rounds <= 0) and (nudge_cooldown <= 0)
+            step_allow_nudge = bool(allow_nudge) and (suppress_nudge_rounds <= 0) and (nudge_cooldown <= 0)
             sse = await self.step(
                 nudge_text=nudge_text,
-                allow_nudge=allow_nudge,
+                allow_nudge=step_allow_nudge,
                 stop_on_pending_card=stop_on_pending_card,
             )
             if self._last_step_used_nudge:
@@ -1422,7 +1423,7 @@ class WorkbenchFlow:
             else:
                 nudge_cooldown = max(0, nudge_cooldown - 1)
             if sse is None:
-                if not allow_nudge:
+                if not step_allow_nudge:
                     suppress_nudge_rounds = max(0, suppress_nudge_rounds - 1)
                 await asyncio.sleep(max(_SESSION_BUSY_BACKOFF_S, 0.8))
                 continue

@@ -23,9 +23,9 @@ DEFAULT_LEGAL_OPINION_FACTS = (
 )
 
 DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE = (
-    "scripts/fixtures/legal_opinion_supply_contract.txt",
-    "scripts/fixtures/legal_opinion_performance_timeline.txt",
-    "scripts/fixtures/legal_opinion_demand_reply.txt",
+    "scripts/_support/fixtures/legal_opinion_supply_contract.txt",
+    "scripts/_support/fixtures/legal_opinion_performance_timeline.txt",
+    "scripts/_support/fixtures/legal_opinion_demand_reply.txt",
 )
 
 DOCGEN_NODE_ORDER: tuple[str, ...] = (

@@ -33,10 +33,15 @@ e2e-tests/
 │       ├── document_drafting/
 │       └── legal_opinion/
 └── scripts/
+    ├── README.md
     ├── health_check.sh
     ├── smoke_test.py
+    ├── run_analysis_real_flow.py
     ├── run_contract_review_real_flow.py
+    ├── run_legal_opinion_real_flow.py
     ├── run_template_draft_real_flow.py
+    ├── _support/
+    │   └── ... shared support modules and fixtures
     └── _debug/
         ├── assert_workbench_hardcut_results.py
         ├── run_workbench_hardcut_playwright_cli.sh
@@ -102,6 +107,7 @@ pytest tests/ -v -m slow
 - matter 绑定与 snapshot
 - deliverable 生成
 - traces / timeline / workflow profile 基本可用
+- 正式脚本约束：kickoff 一次，后续只答卡，不自动发送“继续”
 
 ## 不再在本仓库维护
 
@@ -116,7 +122,9 @@ pytest tests/ -v -m slow
 ```bash
 ./scripts/health_check.sh
 python scripts/smoke_test.py
+python scripts/run_analysis_real_flow.py --base-url http://<host>/api/v1
 python scripts/run_contract_review_real_flow.py --base-url http://<host>/api/v1
+python scripts/run_legal_opinion_real_flow.py --base-url http://<host>/api/v1
 python scripts/run_template_draft_real_flow.py --base-url http://<host>/api/v1 --template-id <TEMPLATE_ID>
 ```
 

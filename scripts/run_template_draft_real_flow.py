@@ -50,6 +50,9 @@ DEFAULT_FACTS = DEFAULT_LEGAL_OPINION_FACTS
 DEFAULT_EVIDENCE_RELATIVE = DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE
 
 DEFAULT_SERVICE_TYPE_ID = "document_drafting"
+AUTO_NUDGE_TEXT = "继续"
+AUTO_NUDGE_ENABLED = str(os.getenv("E2E_AUTO_NUDGE", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+AUTO_NUDGE_STALL_ROUNDS = max(1, int(os.getenv("E2E_AUTO_NUDGE_STALL_ROUNDS", "2") or "2"))
 
 REASONABLE_CARD_KINDS = {"clarify", "select", "confirm"}
 LOW_SIGNAL_HINTS = (
@@ -1268,6 +1271,7 @@ async def run(args: argparse.Namespace) -> int:
             suppress_nudge_rounds = 0
             last_card_sig = ""
             last_card_repeats = 0
+            auto_nudge_count = 0
             deliverable_row: dict[str, Any] | None = None
             last_deliverable_sig = ""
             stall_rounds = 0
@@ -1444,11 +1448,43 @@ async def run(args: argparse.Namespace) -> int:
                             "stall_rounds": stall_rounds,
                             "deliverable_status": _safe_str((deliverable_head or {}).get("status")),
                             "current_phase": _safe_str(last_docgen_snapshot.get("current_phase")),
+                            "current_task_id": _safe_str(last_docgen_snapshot.get("current_task_id")),
                             "docgen_node": _safe_str(last_docgen_snapshot.get("docgen_node")),
                         },
                         sse={},
                         enforce_visibility=False,
                     )
+                    if AUTO_NUDGE_ENABLED and stall_rounds >= AUTO_NUDGE_STALL_ROUNDS:
+                        auto_nudge_count += 1
+                        nudge_sse = await flow.nudge(
+                            AUTO_NUDGE_TEXT,
+                            attachments=[],
+                            max_loops=max(1, int(args.max_loops)),
+                        )
+                        await _record_round(
+                            action="chat.auto_nudge",
+                            payload={
+                                "text": AUTO_NUDGE_TEXT,
+                                "stall_rounds": stall_rounds,
+                                "auto_nudge_count": auto_nudge_count,
+                                "current_phase": _safe_str(last_docgen_snapshot.get("current_phase")),
+                                "current_task_id": _safe_str(last_docgen_snapshot.get("current_task_id")),
+                                "docgen_node": _safe_str(last_docgen_snapshot.get("docgen_node")),
+                            },
+                            sse=nudge_sse if isinstance(nudge_sse, dict) else {},
+                            enforce_visibility=False,
+                        )
+                        if is_session_busy_sse(nudge_sse if isinstance(nudge_sse, dict) else {}):
+                            busy_retries += 1
+                            if busy_nudge_hold_s > 0:
+                                busy_hold_until = max(busy_hold_until, asyncio.get_running_loop().time() + busy_nudge_hold_s)
+                            suppress_nudge_rounds = min(24, max(suppress_nudge_rounds, 2 + busy_retries // 2))
+                        else:
+                            busy_retries = 0
+                            busy_hold_until = 0.0
+                            suppress_nudge_rounds = 0
+                        stall_rounds = 0
+                        continue
                     await asyncio.sleep(max(0.5, float(args.poll_interval_s)))
                     continue
 

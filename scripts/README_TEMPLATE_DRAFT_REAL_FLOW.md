@@ -18,7 +18,7 @@ python3 scripts/run_template_draft_real_flow.py \
 说明：
 - 默认案情已切成“公司服务器采购合同履约争议”的法律意见书风格。
 - 默认会自动上传 3 份更合理的材料：合同节选、履约时间线、往来函件摘要。
-- 默认 `service_type_id=document_generation`。
+- 默认 `service_type_id=document_drafting`。
 
 若本机代理影响 WebSocket：
 
@@ -58,7 +58,7 @@ python3 scripts/run_template_draft_real_flow.py \
 ## 3）常用参数
 
 - `--template-id`：必填，固定模板 ID。
-- `--service-type-id`：默认 `document_generation`。
+- `--service-type-id`：默认 `document_drafting`。
 - `--template-name`：可选，覆盖交付标题。
 - `--output-key`：默认 `template:<template_id>`。
 - `--facts-file /path/to/facts.txt`：覆盖默认案情。

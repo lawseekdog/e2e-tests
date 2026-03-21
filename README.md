@@ -36,9 +36,11 @@ e2e-tests/
     ├── health_check.sh
     ├── smoke_test.py
     ├── run_contract_review_real_flow.py
-    ├── run_litigation_flow_debug.py
-    ├── run_legal_opinion_flow_debug.py
-    └── run_template_draft_real_flow.py
+    ├── run_template_draft_real_flow.py
+    └── _debug/
+        ├── assert_workbench_hardcut_results.py
+        ├── run_workbench_hardcut_playwright_cli.sh
+        └── ... case-specific / one-off debug runners
 ```
 
 ## 环境准备
@@ -117,6 +119,12 @@ python scripts/smoke_test.py
 python scripts/run_contract_review_real_flow.py --base-url http://<host>/api/v1
 python scripts/run_template_draft_real_flow.py --base-url http://<host>/api/v1 --template-id <TEMPLATE_ID>
 ```
+
+说明：
+
+- `scripts/` 顶层只保留规范主入口
+- case-specific / one-off debug runner 已收口到 `scripts/_debug/`
+- 排障时可以使用 `scripts/_debug/inspect_session_progress.py` 等脚本，但它们不再视为规范入口
 
 ## 维护原则
 

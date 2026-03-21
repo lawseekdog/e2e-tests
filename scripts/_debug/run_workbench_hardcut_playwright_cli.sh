@@ -582,7 +582,7 @@ summary = {
 (out_root / "run_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
 print(f"[OK] Hardcut Playwright artifacts: {out_root}")
-print(f"[NEXT] python3 scripts/assert_workbench_hardcut_results.py --artifacts {out_root}")
+print(f"[NEXT] python3 scripts/_debug/assert_workbench_hardcut_results.py --artifacts {out_root}")
 PY
 
-echo "[DONE] run_workbench_hardcut_playwright_cli.sh"
+echo "[DONE] scripts/_debug/run_workbench_hardcut_playwright_cli.sh"

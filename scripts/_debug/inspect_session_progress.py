@@ -15,8 +15,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from client.api_client import ApiClient
-from tests.lawyer_workbench._support.flow_runner import auto_answer_card
-from tests.lawyer_workbench._support.utils import unwrap_api_response
+from support.workbench.flow_runner import auto_answer_card
+from support.workbench.utils import unwrap_api_response
 
 
 def _parse_args() -> argparse.Namespace:

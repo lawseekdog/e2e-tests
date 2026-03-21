@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
+from support.workbench.flow_runner import WorkbenchFlow
 
 
 @pytest.mark.asyncio

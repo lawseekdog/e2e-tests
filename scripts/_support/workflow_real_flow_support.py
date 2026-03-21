@@ -7,8 +7,8 @@ from typing import Any
 from dotenv import load_dotenv
 
 from client.api_client import ApiClient
-from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow
-from tests.lawyer_workbench._support.utils import unwrap_api_response
+from support.workbench.flow_runner import WorkbenchFlow
+from support.workbench.utils import unwrap_api_response
 
 
 def safe_str(value: Any) -> str:

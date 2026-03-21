@@ -6,7 +6,7 @@
 
 ## 1. 仓库角色
 
-- `e2e-tests` 是跨微服务的端到端回归测试仓库（pytest）。
+- `e2e-tests` 是跨微服务的端到端回归测试仓库（scripts-first，pytest 仅保留最小 support/unit）。
 - 目标：验证“对话 → 事项 → 产物”全链路与关键基础能力（auth/knowledge/memory/files 等）。
 - 注意：本仓库通常依赖真实环境（不 mock LLM），需要正确的 `BASE_URL/INTERNAL_API_KEY/LLM_KEY`。
 
@@ -21,4 +21,10 @@
 参考 `README.md`：
 
 - 安装：`pip install -r requirements.txt`
-- 运行：`pytest tests/ -v`
+- 主入口：
+  - `python scripts/smoke_test.py`
+  - `python scripts/run_analysis_real_flow.py --cards-only`
+  - `python scripts/run_contract_review_real_flow.py --cards-only`
+  - `python scripts/run_legal_opinion_real_flow.py --cards-only`
+  - `python scripts/run_template_draft_real_flow.py --template-id <TEMPLATE_ID> --cards-only`
+- pytest 仅保留最小 support/unit：`pytest tests/support/test_flow_runner_unit.py -q`

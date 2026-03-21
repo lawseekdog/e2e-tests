@@ -17,7 +17,7 @@ REPO_ROOT = E2E_ROOT.parent
 sys.path.insert(0, str(E2E_ROOT))
 
 from client.api_client import ApiClient
-from tests.lawyer_workbench._support.docx import extract_docx_text
+from support.workbench.docx import extract_docx_text
 
 from scripts._support.template_draft_real_flow_support import (
     DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE,

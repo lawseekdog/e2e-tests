@@ -13,6 +13,7 @@
 
 - `_debug/`：一次性排障 / hardcut / case-specific runner
 - `_support/`：被正式入口复用的支持模块与 fixtures
+- `../support/workbench/`：被脚本与 pytest 黑盒用例共同复用的通用 support 包
 
 约束：
 

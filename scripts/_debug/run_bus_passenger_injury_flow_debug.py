@@ -124,7 +124,7 @@ async def main() -> None:
     user = os.getenv("LAWYER_USERNAME", "lawyer1")
     pwd = os.getenv("LAWYER_PASSWORD", "lawyer123456")
 
-    evidence_dir = Path(__file__).resolve().parent.parent / "tests" / "lawyer_workbench" / "civil_prosecution" / "evidence"
+    evidence_dir = Path(__file__).resolve().parent.parent / "fixtures" / "workbench" / "civil_prosecution"
     init_paths = [
         evidence_dir / "bus_ticket.txt",
         evidence_dir / "outpatient_diagnosis.txt",

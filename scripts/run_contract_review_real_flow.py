@@ -18,11 +18,11 @@ REPO_ROOT = E2E_ROOT.parent
 sys.path.insert(0, str(E2E_ROOT))
 
 from client.api_client import ApiClient
-from tests.lawyer_workbench._support.docx import (
+from support.workbench.docx import (
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
-from tests.lawyer_workbench._support.flow_runner import WorkbenchFlow, is_session_busy_sse
+from support.workbench.flow_runner import WorkbenchFlow, is_session_busy_sse
 from scripts._support.workflow_real_flow_support import (
     bootstrap_flow,
     event_counts as _shared_event_counts,
@@ -109,7 +109,7 @@ def _select_contract_file(cli_value: str) -> Path:
 
     candidates = [
         REPO_ROOT / "已征收闲置土地垃圾清运.docx",
-        E2E_ROOT / "tests/lawyer_workbench/contract_review/evidence/sample_contract.txt",
+        E2E_ROOT / "fixtures/workbench/contract_review/sample_contract.txt",
     ]
     for p in candidates:
         if p.exists() and p.is_file():

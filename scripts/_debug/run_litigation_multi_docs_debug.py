@@ -28,7 +28,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from client.api_client import ApiClient
-from tests.lawyer_workbench._support.docx import extract_docx_text, assert_docx_has_no_template_placeholders
+from support.workbench.docx import extract_docx_text, assert_docx_has_no_template_placeholders
 
 
 def _split_csv(v: str) -> list[str]:

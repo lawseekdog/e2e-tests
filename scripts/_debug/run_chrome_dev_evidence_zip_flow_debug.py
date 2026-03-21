@@ -25,13 +25,13 @@ _REPO_ROOT = _E2E_ROOT.parent
 sys.path.insert(0, str(_E2E_ROOT))
 
 from client.api_client import ApiClient
-from tests.lawyer_workbench._support.docx import (
+from support.workbench.docx import (
     assert_docx_contains,
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
-from tests.lawyer_workbench._support.flow_runner import auto_answer_card
-from tests.lawyer_workbench._support.utils import unwrap_api_response
+from support.workbench.flow_runner import auto_answer_card
+from support.workbench.utils import unwrap_api_response
 
 
 def _read_text(path: Path) -> str:

@@ -20,17 +20,17 @@ REPO_ROOT = E2E_ROOT.parent
 sys.path.insert(0, str(E2E_ROOT))
 
 from client.api_client import ApiClient
-from tests.lawyer_workbench._support.docx import (
+from support.workbench.docx import (
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
-from tests.lawyer_workbench._support.flow_runner import (
+from support.workbench.flow_runner import (
     WorkbenchFlow,
     extract_last_card_from_sse,
     is_session_busy_sse,
 )
-from tests.lawyer_workbench._support.sse import assert_visible_response
-from tests.lawyer_workbench._support.utils import eventually, unwrap_api_response
+from support.workbench.sse import assert_visible_response
+from support.workbench.utils import eventually, unwrap_api_response
 
 from scripts._support.template_draft_real_flow_support import (
     DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE,

@@ -20,18 +20,18 @@ e2e-tests/
 ├── conftest.py
 ├── client/
 │   └── api_client.py
+├── support/
+│   └── workbench/
+│       └── ... shared flow/docx/sse/utils helpers
 ├── fixtures/
 │   ├── sample_iou.pdf
 │   ├── sample_transfer_record.txt
-│   └── sample_chat_record.txt
+│   ├── sample_chat_record.txt
+│   └── workbench/
+│       └── ... per-flow evidence fixtures
 ├── tests/
-│   ├── test_auth.py
-│   └── lawyer_workbench/
-│       ├── _support/
-│       ├── civil_prosecution/
-│       ├── contract_review/
-│       ├── document_drafting/
-│       └── legal_opinion/
+│   ├── support/
+│   └── ... minimal support/unit tests only
 └── scripts/
     ├── README.md
     ├── health_check.sh
@@ -63,45 +63,32 @@ cp .env.example .env
 
 ## 运行
 
+正式入口统一走 scripts：
+
 ```bash
-pytest tests/ -v
+python scripts/smoke_test.py
+python scripts/run_analysis_real_flow.py --base-url http://<host>/api/v1 --cards-only
+python scripts/run_contract_review_real_flow.py --base-url http://<host>/api/v1 --cards-only
+python scripts/run_legal_opinion_real_flow.py --base-url http://<host>/api/v1 --cards-only
+python scripts/run_template_draft_real_flow.py --base-url http://<host>/api/v1 --template-id <TEMPLATE_ID> --cards-only
 ```
 
-### 关键用例
+pytest 只保留最小 support / unit：
 
 ```bash
-pytest tests/test_auth.py -v
-pytest tests/lawyer_workbench/civil_prosecution/test_flow.py -v
-pytest tests/lawyer_workbench/contract_review/test_flow.py -v
-pytest tests/lawyer_workbench/legal_opinion/test_flow.py -v
-pytest tests/lawyer_workbench/document_drafting/test_template_action_flow.py -v
-```
-
-### 标记
-
-```bash
-pytest tests/ -v -m e2e
-pytest tests/ -v -m smoke
-pytest tests/ -v -m "e2e and not slow"
-pytest tests/ -v -m slow
+pytest tests/support/test_flow_runner_unit.py -q
 ```
 
 ## 保留范围
 
-### 1. 认证链路
-
-- 登录成功
-- 登录失败
-- 获取当前用户
-
-### 2. 产品主链
+### 1. 产品主链
 
 - 民事起诉
 - 合同审查
 - 法律意见
 - 模板文书起草
 
-这些用例只验证产品链路：
+这些脚本只验证产品链路：
 
 - 对话与卡片推进
 - matter 绑定与 snapshot
@@ -122,10 +109,10 @@ pytest tests/ -v -m slow
 ```bash
 ./scripts/health_check.sh
 python scripts/smoke_test.py
-python scripts/run_analysis_real_flow.py --base-url http://<host>/api/v1
-python scripts/run_contract_review_real_flow.py --base-url http://<host>/api/v1
-python scripts/run_legal_opinion_real_flow.py --base-url http://<host>/api/v1
-python scripts/run_template_draft_real_flow.py --base-url http://<host>/api/v1 --template-id <TEMPLATE_ID>
+python scripts/run_analysis_real_flow.py --base-url http://<host>/api/v1 --cards-only
+python scripts/run_contract_review_real_flow.py --base-url http://<host>/api/v1 --cards-only
+python scripts/run_legal_opinion_real_flow.py --base-url http://<host>/api/v1 --cards-only
+python scripts/run_template_draft_real_flow.py --base-url http://<host>/api/v1 --template-id <TEMPLATE_ID> --cards-only
 ```
 
 说明：

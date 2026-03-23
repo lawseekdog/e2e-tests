@@ -29,6 +29,7 @@ from scripts._support.workflow_real_flow_support import (
     upload_consultation_files,
     write_json,
 )
+from scripts._support.flow_score_support import build_flow_scores, collect_flow_observability
 
 
 DEFAULT_KICKOFF = (
@@ -191,6 +192,20 @@ async def run(args: argparse.Namespace) -> int:
         key_risks = risk_assessment.get("key_risks") if isinstance(risk_assessment.get("key_risks"), list) else []
         pending_card = await flow.get_pending_card()
         messages = await list_session_messages(client, session_id)
+        observability = await collect_flow_observability(client, matter_id=final_matter_id, session_id=session_id)
+        flow_scores = build_flow_scores(
+            flow_id="analysis",
+            seen_cards=flow.seen_cards,
+            pending_card=pending_card,
+            snapshot=snapshot,
+            current_view=analysis_view,
+            aux_views={"pricing_view": pricing_view},
+            deliverables={},
+            deliverable_text="",
+            deliverable_status=_safe_str(pricing_view.get("status")),
+            observability=observability,
+            goal_completion_mode="card" if is_goal_completion_card(pending_card) else "none",
+        )
 
         summary = {
             "base_url": base_url,
@@ -217,9 +232,11 @@ async def run(args: argparse.Namespace) -> int:
             "seen_cards": len(flow.seen_cards),
             "seen_sse_rounds": len(flow.seen_sse),
             "recent_messages_count": len(messages),
+            "flow_scores": flow_scores,
         }
 
         write_json(out_dir / "summary.json", summary)
+        write_json(out_dir / "flow_scores.json", flow_scores)
         write_json(out_dir / "snapshot.json", snapshot)
         write_json(out_dir / "analysis_view.json", analysis_view)
         write_json(out_dir / "pricing_plan_view.json", pricing_view)

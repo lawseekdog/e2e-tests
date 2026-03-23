@@ -36,6 +36,7 @@ from scripts._support.workflow_real_flow_support import (
     upload_consultation_files,
     write_json,
 )
+from scripts._support.flow_score_support import build_flow_scores, collect_flow_observability
 
 
 DEFAULT_KICKOFF = "请基于已上传材料形成一份结构化法律意见分析，输出结论、风险与行动建议。"
@@ -170,6 +171,20 @@ async def run(args: argparse.Namespace) -> int:
                 raw = await client.download_file_bytes(file_id)
                 opinion_text = extract_docx_text(raw)
                 (out_dir / "legal_opinion.txt").write_text(opinion_text, encoding="utf-8")
+        observability = await collect_flow_observability(client, matter_id=final_matter_id, session_id=session_id)
+        flow_scores = build_flow_scores(
+            flow_id="legal_opinion",
+            seen_cards=flow.seen_cards,
+            pending_card=pending_card,
+            snapshot=snapshot,
+            current_view=view,
+            aux_views={},
+            deliverables=deliverables,
+            deliverable_text=opinion_text,
+            deliverable_status=_safe_str((deliverables.get("legal_opinion") or {}).get("status")),
+            observability=observability,
+            goal_completion_mode="card" if is_goal_completion_card(pending_card) else "none",
+        )
 
         summary = {
             "base_url": base_url,
@@ -192,9 +207,11 @@ async def run(args: argparse.Namespace) -> int:
             "seen_cards": len(flow.seen_cards),
             "seen_sse_rounds": len(flow.seen_sse),
             "recent_messages_count": len(messages),
+            "flow_scores": flow_scores,
         }
 
         write_json(out_dir / "summary.json", summary)
+        write_json(out_dir / "flow_scores.json", flow_scores)
         write_json(out_dir / "snapshot.json", snapshot)
         write_json(out_dir / "legal_opinion_view.json", view)
         write_json(out_dir / "deliverables.json", deliverables)

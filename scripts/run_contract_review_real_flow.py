@@ -34,6 +34,7 @@ from scripts._support.workflow_real_flow_support import (
     upload_consultation_files,
     write_json,
 )
+from scripts._support.flow_score_support import build_flow_scores, collect_flow_observability
 
 
 REQUIRED_DOC_OUTPUT_KEYS = (
@@ -312,11 +313,27 @@ async def run(args: argparse.Namespace) -> int:
             "runtime_images_end": end_images,
             "runtime_images_stable": (start_images == end_images) if start_images and end_images else None,
         }
+        observability = await collect_flow_observability(client, matter_id=final_matter_id, session_id=session_id)
+        flow_scores = build_flow_scores(
+            flow_id="contract_review",
+            seen_cards=flow.seen_cards,
+            pending_card=pending_card,
+            snapshot=snapshot,
+            current_view=contract_view,
+            aux_views={},
+            deliverables=deliverables,
+            deliverable_text=report_text,
+            deliverable_status=_safe_str((deliverables.get("contract_review_report") or {}).get("status")),
+            observability=observability,
+            goal_completion_mode="card" if _safe_str((pending_card or {}).get("skill_id")).lower() == "goal-completion" else "none",
+        )
+        summary["flow_scores"] = flow_scores
 
         if start_images and end_images and start_images != end_images and str(os.getenv("E2E_ALLOW_DEPLOYMENT_DRIFT", "") or "").strip() not in {"1", "true", "yes"}:
             raise RuntimeError(f"deployment_image_drift_detected: start={start_images} end={end_images}")
 
         write_json(out_dir / "summary.json", summary)
+        write_json(out_dir / "flow_scores.json", flow_scores)
         write_json(out_dir / "deliverables.json", deliverables)
         write_json(out_dir / "snapshot.json", snapshot)
         if report_text:

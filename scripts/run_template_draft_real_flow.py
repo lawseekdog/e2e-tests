@@ -43,6 +43,7 @@ from scripts._support.template_draft_real_flow_support import (
     _is_stop_node_reached,
     _normalize_stop_node,
 )
+from scripts._support.flow_score_support import build_template_flow_scores
 
 
 DEFAULT_FACTS = DEFAULT_LEGAL_OPINION_FACTS
@@ -1570,11 +1571,22 @@ async def run(args: argparse.Namespace) -> int:
                     "deliverable_status": status,
                 }
             )
+            flow_scores = build_template_flow_scores(
+                cards=cards_seen,
+                pending_card=last_pending if isinstance(last_pending, dict) else {},
+                node_timeline=node_timeline,
+                summary=summary,
+                last_docgen_snapshot=last_docgen_snapshot,
+                dialogue_quality=dialogue_quality,
+                document_quality=document_quality,
+            )
+            summary["flow_scores"] = flow_scores
 
             _write_json(out_dir / "deliverables.json", {"deliverables": rows})
             _write_json(out_dir / "cards.json", cards_seen)
             _write_events_ndjson(out_dir / "events.ndjson", event_rows)
             _write_json(out_dir / "node_timeline.json", node_timeline)
+            _write_json(out_dir / "flow_scores.json", flow_scores)
             _write_json(out_dir / "summary.json", summary)
 
             print("[done] template draft workflow completed")
@@ -1660,12 +1672,23 @@ async def run(args: argparse.Namespace) -> int:
                     "deliverable_status": stop_deliverable_status,
                 }
             )
+            flow_scores = build_template_flow_scores(
+                cards=cards_seen,
+                pending_card=last_pending if isinstance(last_pending, dict) else {},
+                node_timeline=node_timeline,
+                summary=summary,
+                last_docgen_snapshot=stop_exc.snapshot if isinstance(stop_exc.snapshot, dict) else last_docgen_snapshot,
+                dialogue_quality=dialogue_quality,
+                document_quality=document_quality,
+            )
+            summary["flow_scores"] = flow_scores
 
             _write_events_ndjson(out_dir / "events.ndjson", event_rows)
             _write_json(out_dir / "cards.json", cards_seen)
             _write_json(out_dir / "dialogue_quality.json", dialogue_quality)
             _write_json(out_dir / "document_quality.json", document_quality)
             _write_json(out_dir / "node_timeline.json", node_timeline)
+            _write_json(out_dir / "flow_scores.json", flow_scores)
             _write_json(out_dir / "summary.json", summary)
 
             print(f"[stopped] stop_after_node={stop_exc.target_node} reached")
@@ -1710,6 +1733,16 @@ async def run(args: argparse.Namespace) -> int:
                     "latest_docgen_node": _safe_str(last_docgen_snapshot.get("docgen_node")),
                 }
             )
+            flow_scores = build_template_flow_scores(
+                cards=cards_seen,
+                pending_card=last_pending if isinstance(last_pending, dict) else {},
+                node_timeline=node_timeline,
+                summary=summary,
+                last_docgen_snapshot=last_docgen_snapshot,
+                dialogue_quality=dialogue_quality,
+                document_quality=document_quality,
+            )
+            summary["flow_scores"] = flow_scores
 
             matter_id = _safe_str(summary.get("matter_id"))
             session_id = _safe_str(summary.get("session_id"))
@@ -1747,6 +1780,7 @@ async def run(args: argparse.Namespace) -> int:
             _write_json(out_dir / "document_quality.json", document_quality)
             _write_json(out_dir / "node_timeline.json", node_timeline)
             _write_json(out_dir / "failure_diagnostics.json", failure_diag)
+            _write_json(out_dir / "flow_scores.json", flow_scores)
             _write_json(out_dir / "summary.json", summary)
             print(f"[failed] {e}")
             print(f"[artifacts] {out_dir}")

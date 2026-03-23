@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+os.environ.setdefault("E2E_STRICT_CARD_DRIVEN", "0")
 
 from client.api_client import ApiClient
 from support.workbench.flow_runner import auto_answer_card

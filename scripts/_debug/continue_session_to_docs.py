@@ -19,6 +19,7 @@ import sys
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
+os.environ.setdefault("E2E_STRICT_CARD_DRIVEN", "0")
 
 from client.api_client import ApiClient
 from support.workbench.docx import extract_docx_text

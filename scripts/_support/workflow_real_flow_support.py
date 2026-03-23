@@ -57,6 +57,7 @@ async def bootstrap_flow(
     client_role: str,
     uploaded_file_ids: list[str],
     overrides: dict[str, Any],
+    strict_card_driven: bool = True,
 ) -> tuple[WorkbenchFlow, str, str]:
     sess = await client.create_session(service_type_id=service_type_id, client_role=client_role)
     sess_data = (sess.get("data") if isinstance(sess, dict) else {}) or {}
@@ -69,6 +70,7 @@ async def bootstrap_flow(
         session_id=session_id,
         uploaded_file_ids=uploaded_file_ids,
         overrides=dict(overrides),
+        strict_card_driven=bool(strict_card_driven),
         matter_id=matter_id or None,
     )
     return flow, session_id, matter_id

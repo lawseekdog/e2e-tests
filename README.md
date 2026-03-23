@@ -44,8 +44,10 @@ e2e-tests/
     │   └── ... shared support modules and fixtures
     └── _debug/
         ├── assert_workbench_hardcut_results.py
+        ├── continue_session_to_docs.py
+        ├── inspect_session_progress.py
         ├── run_workbench_hardcut_playwright_cli.sh
-        └── ... case-specific / one-off debug runners
+        └── ... generic debug / hardcut tools only
 ```
 
 ## 环境准备
@@ -95,6 +97,7 @@ pytest tests/support/test_flow_runner_unit.py -q
 - deliverable 生成
 - traces / timeline / workflow profile 基本可用
 - 正式脚本约束：kickoff 一次，后续只答卡，不自动发送“继续”
+- 唯一保留的前置动作例外：模板起草的 `template_draft_start`
 
 ## 不再在本仓库维护
 
@@ -118,11 +121,12 @@ python scripts/run_template_draft_real_flow.py --base-url http://<host>/api/v1 -
 说明：
 
 - `scripts/` 顶层只保留规范主入口
-- case-specific / one-off debug runner 已收口到 `scripts/_debug/`
-- 排障时可以使用 `scripts/_debug/inspect_session_progress.py` 等脚本，但它们不再视为规范入口
+- `_debug/` 只保留通用排障工具与 hardcut 工具
+- 排障时可以使用 `scripts/_debug/inspect_session_progress.py`、`scripts/_debug/continue_session_to_docs.py` 等脚本，但它们不再视为规范入口
 
 ## 维护原则
 
 - 这里只保留少量高价值产品 E2E。
 - 法律正确性、benchmark、golden cases 不再堆在本仓库。
 - 基础能力回归回到 integration / unit / capability eval 层。
+- 新增测试若不是 support/unit，必须放正式入口脚本或 `_debug/`，不要再回到 `tests/lawyer_workbench/**`。

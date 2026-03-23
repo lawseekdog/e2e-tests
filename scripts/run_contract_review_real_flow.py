@@ -22,11 +22,12 @@ from support.workbench.docx import (
     assert_docx_has_no_template_placeholders,
     extract_docx_text,
 )
-from support.workbench.flow_runner import WorkbenchFlow, is_session_busy_sse
+from support.workbench.flow_runner import WorkbenchFlow
 from scripts._support.workflow_real_flow_support import (
     bootstrap_flow,
     event_counts as _shared_event_counts,
     fetch_workbench_snapshot as _shared_fetch_workbench_snapshot,
+    list_deliverables as _shared_list_deliverables,
     list_session_messages as _shared_list_session_messages,
     load_real_flow_env,
     resolve_output_dir,
@@ -57,43 +58,6 @@ FLOW_OVERRIDES = {
     "profile.contract_type": "建设工程施工合同",
     "profile.summary": "已征收闲置土地垃圾清运工程施工合同审查，重点关注付款条件、违约责任、争议解决与免责条款。",
 }
-
-
-def _read_timeout_env(name: str, default: float, *, min_value: float = 1.0) -> float:
-    raw = str(os.getenv(name, "") or "").strip()
-    if not raw:
-        return float(default)
-    try:
-        value = float(raw)
-    except ValueError:
-        return float(default)
-    if value < min_value:
-        return float(default)
-    return value
-
-
-def _read_int_env(name: str, default: int, *, min_value: int = 1) -> int:
-    raw = str(os.getenv(name, "") or "").strip()
-    if not raw:
-        return int(default)
-    try:
-        value = int(raw)
-    except ValueError:
-        return int(default)
-    if value < min_value:
-        return int(default)
-    return value
-
-
-_WORKFLOW_ACTION_TIMEOUT_S = _read_timeout_env("E2E_WORKFLOW_ACTION_TIMEOUT_S", 1800.0)
-_RESUME_STEP_TIMEOUT_S = _read_timeout_env("E2E_RESUME_STEP_TIMEOUT_S", 1800.0)
-_CONTINUE_STEP_TIMEOUT_S = _read_timeout_env("E2E_CONTINUE_STEP_TIMEOUT_S", 180.0)
-_CLAUSE_RESUME_MAX_LOOPS = _read_int_env("E2E_CONTRACT_REVIEW_CLAUSE_RESUME_MAX_LOOPS", 24)
-_INTAKE_GATE_RESUME_MAX_LOOPS = _read_int_env("E2E_CONTRACT_REVIEW_INTAKE_GATE_RESUME_MAX_LOOPS", 4)
-_CLAUSE_REPEAT_CARD_ABORT_COUNT = _read_int_env(
-    "E2E_CONTRACT_REVIEW_REPEAT_CARD_ABORT_COUNT",
-    6,
-)
 
 
 def _safe_str(value: Any) -> str:
@@ -173,20 +137,7 @@ def _extract_contract_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
 
 
 async def _list_deliverables(client: ApiClient, matter_id: str) -> dict[str, dict[str, Any]]:
-    try:
-        resp = await client.list_deliverables(matter_id)
-    except Exception:
-        return {}
-    data = unwrap_api_response(resp)
-    rows = data.get("deliverables") if isinstance(data, dict) and isinstance(data.get("deliverables"), list) else []
-    out: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        key = _safe_str(row.get("output_key"))
-        if key:
-            out[key] = row
-    return out
+    return await _shared_list_deliverables(client, matter_id)
 
 
 async def _list_session_messages(client: ApiClient, session_id: str) -> list[dict[str, Any]]:
@@ -201,156 +152,6 @@ def _latest_assistant_message(rows: list[dict[str, Any]]) -> str:
         if text:
             return text
     return ""
-
-
-async def _try_apply_clause_decisions(
-    *,
-    client: ApiClient,
-    flow: WorkbenchFlow,
-    matter_id: str,
-    clause_ids: list[str] | None = None,
-) -> bool:
-    if clause_ids is None:
-        snapshot = await _fetch_snapshot(client, matter_id)
-        view = _extract_contract_view(snapshot)
-        clause_ids = _extract_clause_ids(view)
-    accepted = clause_ids[: min(len(clause_ids), 8)]
-    if not accepted:
-        return False
-
-    sse = await asyncio.wait_for(
-        client.workflow_action(
-            flow.session_id,
-            workflow_action="contract_review_apply_decisions",
-            workflow_action_params={
-                "accepted_clause_ids": accepted,
-                "ignored_clause_ids": [],
-                "overrides": {},
-                "regenerate_documents": True,
-            },
-            max_loops=36,
-        ),
-        timeout=_WORKFLOW_ACTION_TIMEOUT_S,
-    )
-    if isinstance(sse, dict):
-        flow.last_sse = sse
-        flow.seen_sse.append(sse)
-    if is_session_busy_sse(sse if isinstance(sse, dict) else {}):
-        return False
-    return True
-
-
-def _extract_clause_ids(contract_view: dict[str, Any] | None) -> list[str]:
-    view = contract_view if isinstance(contract_view, dict) else {}
-    clauses = view.get("clauses") if isinstance(view.get("clauses"), list) else []
-    return [
-        _safe_str(row.get("clause_id"))
-        for row in clauses
-        if isinstance(row, dict) and _safe_str(row.get("clause_id"))
-    ]
-
-
-def _is_resume_user_message_transient(exc: AssertionError) -> bool:
-    return "SSE missing user_message" in _safe_str(exc)
-
-
-async def _wait_for_clause_ids(
-    *,
-    client: ApiClient,
-    flow: WorkbenchFlow,
-    matter_id: str,
-    max_polls: int = 360,
-    poll_interval_s: float = 2.0,
-    drive_every: int = 6,
-    resume_max_loops: int = _CLAUSE_RESUME_MAX_LOOPS,
-) -> list[str]:
-    attempts = max(1, int(max_polls))
-    interval = max(0.2, float(poll_interval_s))
-    drive_interval = max(1, int(drive_every))
-    last_card_signature = ""
-    same_card_streak = 0
-    intake_gate_rounds = 0
-    last_card_skill = ""
-    for idx in range(attempts):
-        snapshot = await _fetch_snapshot(client, matter_id)
-        clause_ids = _extract_clause_ids(_extract_contract_view(snapshot))
-        if clause_ids:
-            return clause_ids
-
-        # Prefer explicit card resume over blind nudges.
-        card = await flow.get_pending_card()
-        if isinstance(card, dict) and card:
-            skill_id = _safe_str(card.get("skill_id"))
-            task_key = _safe_str(card.get("task_key"))
-            last_card_skill = skill_id
-            card_signature = f"{skill_id}:{task_key}"
-            if card_signature and card_signature == last_card_signature:
-                same_card_streak += 1
-            else:
-                last_card_signature = card_signature
-                same_card_streak = 1
-
-            resolved_resume_loops = max(1, int(resume_max_loops))
-            if skill_id == "intake-gate-blocked":
-                intake_gate_rounds += 1
-                resolved_resume_loops = max(1, int(_INTAKE_GATE_RESUME_MAX_LOOPS))
-            print(
-                f"[clause_wait] resume_card skill={skill_id or '-'} task={task_key or '-'} "
-                f"max_loops={resolved_resume_loops} repeat={same_card_streak} intake_round={intake_gate_rounds}"
-            )
-
-            if (
-                skill_id == "intake-gate-blocked"
-                and intake_gate_rounds >= max(1, int(_CLAUSE_REPEAT_CARD_ABORT_COUNT))
-            ):
-                analysis = snapshot.get("analysis_state") if isinstance(snapshot, dict) else {}
-                phase = _safe_str(analysis.get("current_phase")) if isinstance(analysis, dict) else ""
-                node = _safe_str(analysis.get("current_node")) if isinstance(analysis, dict) else ""
-                raise AssertionError(
-                    "Clause extraction stuck on repeated intake gate card "
-                    f"(intake_round={intake_gate_rounds}, skill={skill_id}, task={task_key}, "
-                    f"phase={phase or '-'}, node={node or '-'})."
-                )
-
-            try:
-                await asyncio.wait_for(
-                    flow.resume_card(card, max_loops=resolved_resume_loops),
-                    timeout=_RESUME_STEP_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError:
-                print(
-                    f"[clause_wait] resume_card timeout after {_RESUME_STEP_TIMEOUT_S:.1f}s; "
-                    "continue polling"
-                )
-            except AssertionError as exc:
-                if not _is_resume_user_message_transient(exc):
-                    raise
-                print(
-                    "[clause_wait] resume_card missing user_message; "
-                    "treat as in-flight and continue polling"
-                )
-        elif ((idx + 1) % drive_interval) == 0:
-            # Some remote runs end the first stream with partial progress only.
-            # Trigger a short "continue" round to move the workflow cursor.
-            nudge_text = "继续"
-            if last_card_skill == "intake-gate-blocked":
-                nudge_text = _safe_str(FLOW_OVERRIDES.get("profile.summary")) or "请使用既有案件概述继续推进 intake。"
-            try:
-                sse = await asyncio.wait_for(
-                    client.chat(flow.session_id, nudge_text, attachments=flow.uploaded_file_ids, max_loops=2),
-                    timeout=_CONTINUE_STEP_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError:
-                print(
-                    f"[clause_wait] continue timeout after {_CONTINUE_STEP_TIMEOUT_S:.1f}s; "
-                    "treat as in-flight and keep polling"
-                )
-            else:
-                if isinstance(sse, dict):
-                    flow.last_sse = sse
-                    flow.seen_sse.append(sse)
-        await asyncio.sleep(interval)
-    raise AssertionError(f"Failed to extract contract clauses after {attempts} polls (matter_id={matter_id})")
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -394,6 +195,7 @@ async def run(args: argparse.Namespace) -> int:
             client_role="applicant",
             uploaded_file_ids=[file_id],
             overrides=FLOW_OVERRIDES,
+            strict_card_driven=True,
         )
         print(f"[session] id={session_id} matter_id={matter_id or '-'}")
 
@@ -418,110 +220,13 @@ async def run(args: argparse.Namespace) -> int:
                     return False
             return True
 
-        async def _wait_deliverables_ready_passive(
-            *,
-            max_polls: int,
-            poll_interval_s: float = 2.0,
-            drive_every: int = 5,
-            resume_max_loops: int = _CLAUSE_RESUME_MAX_LOOPS,
-        ) -> None:
-            polls = max(1, int(max_polls))
-            interval = max(0.2, float(poll_interval_s))
-            drive_interval = max(1, int(drive_every))
-            for idx in range(polls):
-                if await _deliverables_ready(flow):
-                    return
-
-                card = await flow.get_pending_card()
-                if isinstance(card, dict) and card:
-                    skill_id = _safe_str(card.get("skill_id"))
-                    task_key = _safe_str(card.get("task_key"))
-                    resolved_resume_loops = max(1, int(resume_max_loops))
-                    if skill_id == "skill-error-analysis" and "doc_draft" in task_key:
-                        resolved_resume_loops = 1
-                    if skill_id == "intake-gate-blocked":
-                        resolved_resume_loops = max(1, int(_INTAKE_GATE_RESUME_MAX_LOOPS))
-                    print(
-                        f"[deliverables_wait] resume_card skill={skill_id or '-'} task={task_key or '-'} "
-                        f"max_loops={resolved_resume_loops}"
-                    )
-                    try:
-                        await asyncio.wait_for(
-                            flow.resume_card(card, max_loops=resolved_resume_loops),
-                            timeout=_RESUME_STEP_TIMEOUT_S,
-                        )
-                    except asyncio.TimeoutError:
-                        print(
-                            f"[deliverables_wait] resume_card timeout after {_RESUME_STEP_TIMEOUT_S:.1f}s; "
-                            "treat as in-flight and keep polling"
-                        )
-                    except AssertionError as exc:
-                        if not _is_resume_user_message_transient(exc):
-                            raise
-                        print(
-                            "[deliverables_wait] resume_card missing user_message; "
-                            "treat as in-flight and keep polling"
-                        )
-                await asyncio.sleep(interval)
-            raise AssertionError(
-                "Failed to reach contract review deliverables ready "
-                f"after {polls} passive polls (session_id={flow.session_id}, matter_id={flow.matter_id})"
-            )
-
-        if args.apply_decisions:
-            await flow.refresh()
-            mid = _safe_str(flow.matter_id)
-            if not mid:
-                raise RuntimeError("matter_id missing before contract_review_apply_decisions")
-            clause_ids = await _wait_for_clause_ids(
-                client=client,
-                flow=flow,
-                matter_id=mid,
-                max_polls=max(60, int(args.max_steps) * 3),
-                poll_interval_s=2.0,
-            )
-            applied = False
-            for attempt in range(1, 7):
-                applied = await _try_apply_clause_decisions(
-                    client=client,
-                    flow=flow,
-                    matter_id=mid,
-                    clause_ids=clause_ids,
-                )
-                print(f"[workflow_action] contract_review_apply_decisions attempt={attempt} applied={applied}")
-                if applied:
-                    break
-                await asyncio.sleep(min(8.0, 1.5 * attempt))
-            if not applied:
-                post_action_snapshot = await _fetch_snapshot(client, mid) or {}
-                post_action_analysis = (
-                    post_action_snapshot.get("analysis_state")
-                    if isinstance(post_action_snapshot, dict)
-                    and isinstance(post_action_snapshot.get("analysis_state"), dict)
-                    else {}
-                )
-                current_node = _safe_str(post_action_analysis.get("current_node")).lower()
-                if current_node in {"contract_output", "doc_draft", "document_generation", "documents_finalize"}:
-                    print(
-                        "[workflow_action] contract_review_apply_decisions skipped "
-                        f"(already running downstream node={current_node})"
-                    )
-                else:
-                    raise RuntimeError("contract_review_apply_decisions failed after clauses became available")
-
         try:
-            if args.apply_decisions:
-                await _wait_deliverables_ready_passive(
-                    max_polls=max(1, int(args.max_steps) * 3),
-                    poll_interval_s=2.0,
-                )
-            else:
-                await flow.run_until(
-                    _deliverables_ready,
-                    max_steps=max(1, int(args.max_steps)),
-                    description="contract review deliverables ready",
-                    allow_nudge=bool(args.allow_nudge),
-                )
+            await flow.run_until(
+                _deliverables_ready,
+                max_steps=max(1, int(args.max_steps)),
+                description="contract review deliverables ready",
+                allow_nudge=bool(args.allow_nudge),
+            )
         except Exception as e:
             await flow.refresh()
             fail_matter_id = _safe_str(flow.matter_id) or matter_id
@@ -564,6 +269,7 @@ async def run(args: argparse.Namespace) -> int:
         deliverables = await _list_deliverables(client, final_matter_id)
         snapshot = await _fetch_snapshot(client, final_matter_id) or {}
         contract_view = _extract_contract_view(snapshot)
+        pending_card = await flow.get_pending_card()
 
         report_file_id = _safe_str((deliverables.get("contract_review_report") or {}).get("file_id"))
         report_text = ""
@@ -589,6 +295,11 @@ async def run(args: argparse.Namespace) -> int:
                 "",
             ),
             "report_file_id": report_file_id,
+            "pending_card": {
+                "skill_id": _safe_str((pending_card or {}).get("skill_id")),
+                "task_key": _safe_str((pending_card or {}).get("task_key")),
+                "review_type": _safe_str((pending_card or {}).get("review_type")),
+            },
             "contract_view": {
                 "overall_risk_level": _safe_str(contract_view.get("overall_risk_level")),
                 "contract_type": _safe_str(contract_view.get("contract_type")),
@@ -625,21 +336,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kickoff", default=DEFAULT_KICKOFF, help="Initial user query")
     parser.add_argument("--kickoff-max-loops", type=int, default=24, help="kickoff max_loops")
     parser.add_argument("--max-steps", type=int, default=220, help="run_until max steps")
-    card_mode = parser.add_mutually_exclusive_group()
-    card_mode.add_argument("--cards-only", dest="allow_nudge", action="store_false", default=False, help="Only answer cards and poll; do not auto-nudge (default)")
-    card_mode.add_argument("--allow-nudge", dest="allow_nudge", action="store_true", help="Allow nudge text when no pending card")
-    parser.add_argument(
-        "--apply-decisions",
-        action="store_true",
-        default=False,
-        help="Explicitly send workflow_action=contract_review_apply_decisions before deliverables polling",
-    )
-    parser.add_argument(
-        "--no-apply-decisions",
-        dest="apply_decisions",
-        action="store_false",
-        help="Do not send workflow_action=contract_review_apply_decisions (default)",
-    )
+    parser.add_argument("--cards-only", action="store_true", default=False, help="Kickoff once, then only poll and answer cards")
+    parser.add_argument("--allow-nudge", dest="allow_nudge", action="store_true", default=False, help=argparse.SUPPRESS)
     parser.add_argument(
         "--assert-docx",
         action="store_true",

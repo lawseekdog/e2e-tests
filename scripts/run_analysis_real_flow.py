@@ -238,9 +238,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kickoff", default=DEFAULT_KICKOFF, help="Initial user query")
     parser.add_argument("--kickoff-max-loops", type=int, default=24, help="kickoff max_loops")
     parser.add_argument("--max-steps", type=int, default=220, help="run_until max steps")
-    card_mode = parser.add_mutually_exclusive_group()
-    card_mode.add_argument("--cards-only", dest="allow_nudge", action="store_false", default=False, help="Only answer cards and poll; do not auto-nudge (default)")
-    card_mode.add_argument("--allow-nudge", dest="allow_nudge", action="store_true", help="Allow nudge text when no pending card")
+    parser.add_argument("--cards-only", action="store_true", default=False, help="Kickoff once, then only poll and answer cards")
+    parser.add_argument("--allow-nudge", dest="allow_nudge", action="store_true", default=False, help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", default="", help="Artifacts output directory")
     return parser.parse_args()
 

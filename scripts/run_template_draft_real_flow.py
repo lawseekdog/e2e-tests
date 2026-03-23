@@ -1191,6 +1191,7 @@ async def run(args: argparse.Namespace) -> int:
                 session_id=session_id,
                 uploaded_file_ids=uploaded_file_ids,
                 overrides=flow_overrides,
+                strict_card_driven=True,
                 matter_id=matter_id,
             )
             start_settle = await _wait_template_draft_start_settled(
@@ -1774,9 +1775,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=160, help="Workflow driving max steps")
     parser.add_argument("--max-loops", type=int, default=12, help="WS max_loops per call")
     parser.add_argument("--poll-interval-s", type=float, default=2.0, help="Polling interval between state snapshots")
-    card_mode = parser.add_mutually_exclusive_group()
-    card_mode.add_argument("--cards-only", dest="allow_nudge", action="store_false", default=False, help="Only answer cards and poll; do not auto-nudge (default)")
-    card_mode.add_argument("--allow-nudge", dest="allow_nudge", action="store_true", help="Allow a minimal nudge when no pending card and workflow stalls")
+    parser.add_argument("--cards-only", action="store_true", default=False, help="Kickoff/start once, then only poll and answer cards")
+    parser.add_argument("--allow-nudge", dest="allow_nudge", action="store_true", default=False, help=argparse.SUPPRESS)
     parser.add_argument("--stop-after-node", default="", help=f"Stop successfully after node reached: {', '.join(DOCGEN_STOP_NODES)}")
     parser.add_argument("--debug-json", action="store_true", help="Include raw API payloads in state snapshots")
     parser.add_argument("--max-low-signal-streak", type=int, default=4, help="Dialogue low-signal streak threshold")

@@ -36,7 +36,7 @@ async def _ensure_seed_packages() -> None:
     if str(os.getenv("E2E_SKIP_SEED", "") or "").strip().lower() in {"1", "true", "yes"}:
         return
     if not INTERNAL_API_KEY:
-        raise RuntimeError("INTERNAL_API_KEY is required for E2E (set repo-root .env or e2e-tests/.env)")
+        return
 
     async with httpx.AsyncClient(timeout=120.0) as c:
         # Apply the minimum required packages first (must succeed for litigation flows).

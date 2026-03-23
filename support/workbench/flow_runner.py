@@ -26,6 +26,7 @@ _NUDGE_TEXT = "继续"
 _DEBUG = str(os.getenv("E2E_FLOW_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
 _AUTO_NUDGE = str(os.getenv("E2E_AUTO_NUDGE", "1") or "").strip().lower() in {"1", "true", "yes"}
 _PROGRESS = str(os.getenv("E2E_FLOW_PROGRESS", "1") or "").strip().lower() in {"1", "true", "yes"}
+_STRICT_CARD_DRIVEN_DEFAULT = str(os.getenv("E2E_STRICT_CARD_DRIVEN", "1") or "").strip().lower() in {"1", "true", "yes"}
 
 
 def _read_int_env(name: str, default: int) -> int:
@@ -207,6 +208,45 @@ def _option_label_for_value(options: list[Any], value: Any) -> str | None:
         label = str(option.get("label") or "").strip()
         return label or None
     return None
+
+
+def _pick_all_recommended_values(options: list[Any]) -> list[Any]:
+    picked: list[Any] = []
+    seen: set[str] = set()
+    for opt in options if isinstance(options, list) else []:
+        if not isinstance(opt, dict) or opt.get("recommended") is not True:
+            continue
+        value = _option_answer_value(opt)
+        token = str(value).strip()
+        if value is None or not token or token in seen:
+            continue
+        seen.add(token)
+        picked.append(value)
+    return picked
+
+
+def _pick_contract_review_clause_values(options: list[Any]) -> list[Any]:
+    picked = _pick_all_recommended_values(options)
+    if picked:
+        return picked
+
+    risk_tokens = ("high", "critical", "medium", "高风险", "重大", "中风险")
+    out: list[Any] = []
+    seen: set[str] = set()
+    for opt in options if isinstance(options, list) else []:
+        value = _option_answer_value(opt)
+        token = str(value).strip()
+        text = _option_match_text(opt)
+        if value is None or not token or token in seen:
+            continue
+        if any(risk_token in text for risk_token in risk_tokens):
+            seen.add(token)
+            out.append(value)
+    if out:
+        return out
+
+    fallback = _pick_recommended_or_first(options)
+    return [fallback] if fallback is not None else []
 
 
 def _option_match_text(option: Any) -> str:
@@ -790,6 +830,12 @@ def auto_answer_card(
         elif it in {"multi_select", "multiple_select"}:
             if has_default:
                 value = default
+            elif fk == "profile.decisions.contract_review_accepted_clause_ids":
+                raw_options = q.get("options")
+                options: list[Any] = raw_options if isinstance(raw_options, list) else []
+                value = _pick_contract_review_clause_values(options)
+            elif fk == "profile.decisions.contract_review_ignored_clause_ids":
+                value = []
             else:
                 raw_options = q.get("options")
                 options: list[Any] = raw_options if isinstance(raw_options, list) else []
@@ -1021,6 +1067,7 @@ class WorkbenchFlow:
     session_id: str
     uploaded_file_ids: list[str] = field(default_factory=list)
     overrides: dict[str, Any] = field(default_factory=dict)
+    strict_card_driven: bool = _STRICT_CARD_DRIVEN_DEFAULT
     matter_id: str | None = None
     session_status: str | None = None
     session_archived: bool = False
@@ -1295,7 +1342,7 @@ class WorkbenchFlow:
             task_key = str(card.get("task_key") or "").strip()
             if skill_id == "skill-error-analysis" and self._repeat_card_count >= 2:
                 remediation = _remediation_nudge_for_unanswerable_card(card)
-                if remediation:
+                if remediation and not self.strict_card_driven:
                     _debug(
                         "[flow] skill-error-analysis remediation nudge "
                         f"repeat={self._repeat_card_count} task={task_key}"
@@ -1304,22 +1351,24 @@ class WorkbenchFlow:
                     return await self.nudge(remediation, attachments=self.uploaded_file_ids, max_loops=12)
 
             if skill_id == "intent-route-v3" and ("doc_draft" in task_key) and self._repeat_card_count >= 3:
-                _debug(
-                    "[flow] intent-route doc_draft remediation nudge "
-                    f"repeat={self._repeat_card_count} task={task_key}"
-                )
-                self._last_step_used_nudge = True
-                return await self.nudge(
-                    "角色已确认：申请人。审查范围：全面审查。请不要重复追问，直接继续合同审查并生成交付物。",
-                    attachments=self.uploaded_file_ids,
-                    max_loops=12,
-                )
+                if not self.strict_card_driven:
+                    _debug(
+                        "[flow] intent-route doc_draft remediation nudge "
+                        f"repeat={self._repeat_card_count} task={task_key}"
+                    )
+                    self._last_step_used_nudge = True
+                    return await self.nudge(
+                        "角色已确认：申请人。审查范围：全面审查。请不要重复追问，直接继续合同审查并生成交付物。",
+                        attachments=self.uploaded_file_ids,
+                        max_loops=12,
+                    )
 
             if skill_id == "reference-grounding" and self._repeat_card_count >= 3:
-                hint = _remediation_nudge_for_reference_grounding(card)
-                _debug(f"[flow] reference-grounding remediation nudge repeat={self._repeat_card_count}")
-                self._last_step_used_nudge = True
-                return await self.nudge(hint, attachments=self.uploaded_file_ids, max_loops=12)
+                if not self.strict_card_driven:
+                    hint = _remediation_nudge_for_reference_grounding(card)
+                    _debug(f"[flow] reference-grounding remediation nudge repeat={self._repeat_card_count}")
+                    self._last_step_used_nudge = True
+                    return await self.nudge(hint, attachments=self.uploaded_file_ids, max_loops=12)
 
             if _is_unanswerable_card(card):
                 if sig == self._repeat_unanswerable_signature:
@@ -1328,7 +1377,7 @@ class WorkbenchFlow:
                     self._repeat_unanswerable_signature = sig
                     self._repeat_unanswerable_count = 1
                 remediation = _remediation_nudge_for_unanswerable_card(card)
-                if remediation and self._repeat_unanswerable_count >= 2:
+                if remediation and self._repeat_unanswerable_count >= 2 and not self.strict_card_driven:
                     _debug(
                         "[flow] unanswerable card remediation nudge "
                         f"repeat={self._repeat_unanswerable_count} task={card.get('task_key')}"

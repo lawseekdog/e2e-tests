@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from support.workbench.flow_runner import WorkbenchFlow
+from support.workbench.flow_runner import WorkbenchFlow, auto_answer_card, card_signature
 
 
 @pytest.mark.asyncio
@@ -60,6 +60,7 @@ async def test_step_intercepts_goal_completion_card_emitted_from_nudge() -> None
     flow.get_pending_card = _get_pending_card  # type: ignore[method-assign]
     flow.nudge = _nudge  # type: ignore[method-assign]
     flow.resume_card = _resume_card  # type: ignore[method-assign]
+    flow._pending_card_poll_unavailable = True
 
     result = await flow.step(
         stop_on_pending_card=lambda card: str(card.get("skill_id")) == "goal-completion",
@@ -67,3 +68,105 @@ async def test_step_intercepts_goal_completion_card_emitted_from_nudge() -> None
 
     assert isinstance(result, dict)
     assert result.get("pending_card") == goal_card
+
+
+def test_auto_answer_card_covers_basic_card_input_types() -> None:
+    card = {
+        "skill_id": "test-skill",
+        "questions": [
+            {"field_key": "profile.summary", "input_type": "text", "required": True},
+            {"field_key": "profile.facts", "input_type": "textarea", "required": True},
+            {
+                "field_key": "profile.review_scope",
+                "input_type": "select",
+                "required": True,
+                "options": [
+                    {"label": "全面审查", "value": "full", "recommended": True},
+                    {"label": "重点审查", "value": "focused"},
+                ],
+            },
+            {"field_key": "case.file_refs.pending_upload_file_ids", "input_type": "file_ids", "required": True},
+            {"field_key": "profile.decisions.contract_reviewed", "input_type": "boolean", "required": True},
+        ],
+    }
+
+    response = auto_answer_card(card, uploaded_file_ids=["file_1", "file_2"])
+    answers = {str(item.get("field_key")): item.get("value") for item in response["answers"]}
+
+    assert answers["profile.summary"]
+    assert answers["profile.facts"]
+    assert answers["profile.review_scope"] == "full"
+    assert answers["case.file_refs.pending_upload_file_ids"] == ["file_1", "file_2"]
+    assert answers["profile.decisions.contract_reviewed"] is True
+
+
+def test_auto_answer_card_selects_all_recommended_contract_review_clauses() -> None:
+    card = {
+        "skill_id": "contract-review",
+        "questions": [
+            {
+                "field_key": "profile.decisions.contract_review_accepted_clause_ids",
+                "input_type": "multi_select",
+                "required": True,
+                "options": [
+                    {"label": "第1条（high）", "value": "c1", "recommended": True},
+                    {"label": "第2条（medium）", "value": "c2", "recommended": True},
+                    {"label": "第3条（low）", "value": "c3"},
+                ],
+            },
+            {
+                "field_key": "profile.decisions.contract_review_ignored_clause_ids",
+                "input_type": "multi_select",
+                "required": False,
+                "options": [
+                    {"label": "第1条（high）", "value": "c1"},
+                    {"label": "第2条（medium）", "value": "c2"},
+                ],
+            },
+            {"field_key": "profile.decisions.contract_reviewed", "input_type": "boolean", "required": True},
+            {"field_key": "data.work_product.regenerate_documents", "input_type": "boolean", "required": True, "default": True},
+        ],
+    }
+
+    response = auto_answer_card(card)
+    answers = {str(item.get("field_key")): item.get("value") for item in response["answers"]}
+
+    assert answers["profile.decisions.contract_review_accepted_clause_ids"] == ["c1", "c2"]
+    assert answers["profile.decisions.contract_review_ignored_clause_ids"] == []
+    assert answers["profile.decisions.contract_reviewed"] is True
+    assert answers["data.work_product.regenerate_documents"] is True
+
+
+@pytest.mark.asyncio
+async def test_step_strict_card_mode_skips_hidden_remediation_nudge() -> None:
+    card = {
+        "skill_id": "skill-error-analysis",
+        "task_key": "doc_draft_retry",
+        "prompt": "合同审查报告法条引用不足",
+        "questions": [{"field_key": "data.workbench.skill_error_acknowledged", "input_type": "boolean", "required": True}],
+    }
+    flow = WorkbenchFlow(client=object(), session_id="session-3", strict_card_driven=True)
+
+    async def _refresh() -> None:
+        return None
+
+    async def _get_pending_card() -> dict[str, object]:
+        return card
+
+    async def _nudge(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("strict card mode should not send hidden remediation nudges")
+
+    async def _resume_card(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return {"pending_card": card}
+
+    flow.refresh = _refresh  # type: ignore[method-assign]
+    flow.get_pending_card = _get_pending_card  # type: ignore[method-assign]
+    flow.nudge = _nudge  # type: ignore[method-assign]
+    flow.resume_card = _resume_card  # type: ignore[method-assign]
+    flow._repeat_card_signature = card_signature(card)
+    flow._repeat_card_count = 1
+
+    result = await flow.step()
+
+    assert isinstance(result, dict)
+    assert result.get("pending_card") == card

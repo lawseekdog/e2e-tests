@@ -1412,12 +1412,9 @@ class WorkbenchFlow:
         # so the flow can continue without waiting for pending_card API consistency.
         sse_card = extract_last_card_from_sse(sse if isinstance(sse, dict) else {})
         if isinstance(sse_card, dict) and sse_card:
-            if not self._pending_card_poll_unavailable:
-                _debug(
-                    f"[flow] ignore sse card after clean pending-card poll skill_id={sse_card.get('skill_id')} "
-                    f"task_key={sse_card.get('task_key')}"
-                )
-                return sse
+            # If the same step reached the nudge path, pending_card polling has already
+            # returned empty. In that case the SSE-emitted card is the freshest truth,
+            # even when the poll endpoint itself responded 200 instead of an error.
             if stop_on_pending_card is not None and stop_on_pending_card(sse_card):
                 _debug(
                     f"[flow] nudge produced interceptable card skill_id={sse_card.get('skill_id')} "

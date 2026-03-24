@@ -70,6 +70,38 @@ async def test_step_intercepts_goal_completion_card_emitted_from_nudge() -> None
     assert result.get("pending_card") == goal_card
 
 
+@pytest.mark.asyncio
+async def test_step_resumes_sse_card_even_when_pending_poll_returned_empty() -> None:
+    review_card = {
+        "skill_id": "civil-analysis-intake",
+        "task_key": "intake_clarify",
+        "questions": [{"field_key": "profile.summary", "input_type": "text"}],
+    }
+    flow = WorkbenchFlow(client=object(), session_id="session-2b")
+
+    async def _refresh() -> None:
+        return None
+
+    async def _get_pending_card():
+        return None
+
+    async def _nudge(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return {"events": [{"event": "card", "data": review_card}], "output": "需要补充案件信息。"}
+
+    async def _resume_card(card, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return {"pending_card": card, "events": [{"event": "user_message"}]}
+
+    flow.refresh = _refresh  # type: ignore[method-assign]
+    flow.get_pending_card = _get_pending_card  # type: ignore[method-assign]
+    flow.nudge = _nudge  # type: ignore[method-assign]
+    flow.resume_card = _resume_card  # type: ignore[method-assign]
+
+    result = await flow.step()
+
+    assert isinstance(result, dict)
+    assert result.get("pending_card") == review_card
+
+
 def test_auto_answer_card_covers_basic_card_input_types() -> None:
     card = {
         "skill_id": "test-skill",

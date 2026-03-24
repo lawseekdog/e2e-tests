@@ -119,7 +119,7 @@ async def run(args: argparse.Namespace) -> int:
             if not f.matter_id:
                 return False
             pending = await f.get_pending_card()
-            if _is_goal_completion_card(pending):
+            if is_goal_completion_card(pending):
                 return True
             snapshot = await fetch_workbench_snapshot(client, f.matter_id)
             view = _extract_legal_opinion_view(snapshot)

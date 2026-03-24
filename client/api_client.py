@@ -569,7 +569,14 @@ class ApiClient:
         return await self.post(f"{CONSULTATIONS}/consultations/sessions", payload)
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
-        return await self.get(f"{CONSULTATIONS}/consultations/sessions/{session_id}")
+        timeout_s = float(os.getenv("E2E_SESSION_GET_TIMEOUT_S", "3") or 3)
+        get_retries = int(os.getenv("E2E_SESSION_GET_RETRIES", "1") or 1)
+        return await self._request(
+            "GET",
+            f"{CONSULTATIONS}/consultations/sessions/{session_id}",
+            timeout=timeout_s,
+            get_retries=max(1, get_retries),
+        )
 
     async def chat(
         self,

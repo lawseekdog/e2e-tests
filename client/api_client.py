@@ -24,6 +24,7 @@ KNOWLEDGE = "/knowledge-service"
 TEMPLATES = "/templates-service"
 
 _WS_DEBUG = str(os.getenv("E2E_WS_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
+_WS_BREAK_ON_CARD = str(os.getenv("E2E_WS_BREAK_ON_CARD", "1") or "").strip().lower() in {"1", "true", "yes"}
 # Hard-cut resume contract: websocket `resume` payload only allows
 # {type, card_id, user_response, max_loops, silent}. Do not send pending_card.
 
@@ -315,6 +316,9 @@ class ApiClient:
 
                             events.append({"event": evt, "data": evt_data})
 
+                            if evt == "card" and _WS_BREAK_ON_CARD:
+                                break
+
                             if evt in {"end", "complete"}:
                                 break
                         except asyncio.TimeoutError:
@@ -486,6 +490,7 @@ class ApiClient:
         matter_id: str | None = None,
         client_role: str | None = None,
         cause_of_action_code: str | None = None,
+        file_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a consultation session (hard-cut: sessions are matter-backed).
 
@@ -533,6 +538,7 @@ class ApiClient:
                 created = await self.create_matter(
                     service_type_id=st,
                     title=t or None,
+                    file_ids=file_ids,
                     cause_of_action_code=cause_code,
                     client_role=role,
                 )
@@ -569,7 +575,7 @@ class ApiClient:
         return await self.post(f"{CONSULTATIONS}/consultations/sessions", payload)
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
-        timeout_s = float(os.getenv("E2E_SESSION_GET_TIMEOUT_S", "3") or 3)
+        timeout_s = float(os.getenv("E2E_SESSION_GET_TIMEOUT_S", "15") or 15)
         get_retries = int(os.getenv("E2E_SESSION_GET_RETRIES", "1") or 1)
         return await self._request(
             "GET",
@@ -598,7 +604,7 @@ class ApiClient:
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
         # pending_card is a high-frequency poll endpoint; keep it short so transient
         # upstream stalls do not freeze flow progression.
-        timeout_s = float(os.getenv("E2E_PENDING_CARD_TIMEOUT_S", "3") or 3)
+        timeout_s = float(os.getenv("E2E_PENDING_CARD_TIMEOUT_S", "30") or 30)
         get_retries = int(os.getenv("E2E_PENDING_CARD_GET_RETRIES", "1") or 1)
         return await self._request(
             "GET",

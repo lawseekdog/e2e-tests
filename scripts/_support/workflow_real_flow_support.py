@@ -59,7 +59,11 @@ async def bootstrap_flow(
     overrides: dict[str, Any],
     strict_card_driven: bool = True,
 ) -> tuple[WorkbenchFlow, str, str]:
-    sess = await client.create_session(service_type_id=service_type_id, client_role=client_role)
+    sess = await client.create_session(
+        service_type_id=service_type_id,
+        client_role=client_role,
+        file_ids=uploaded_file_ids,
+    )
     sess_data = (sess.get("data") if isinstance(sess, dict) else {}) or {}
     session_id = safe_str(sess_data.get("id"))
     matter_id = safe_str(sess_data.get("matter_id"))

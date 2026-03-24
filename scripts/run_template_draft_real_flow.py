@@ -695,12 +695,17 @@ class StopAfterNodeReached(RuntimeError):
 async def run(args: argparse.Namespace) -> int:
     load_dotenv(REPO_ROOT / ".env", override=False)
     load_dotenv(E2E_ROOT / ".env", override=False)
+    remote_stack_host = _safe_str(os.getenv("LAWSEEKDOG_REMOTE_STACK_HOST"))
 
     if bool(args.direct_local):
         os.environ["E2E_CONSULTATIONS_BASE_URL"] = "http://127.0.0.1:18021/api/v1"
         os.environ["E2E_MATTER_BASE_URL"] = "http://127.0.0.1:18020/api/v1"
         os.environ["E2E_TEMPLATES_BASE_URL"] = "http://127.0.0.1:18022/api/v1"
-        os.environ["E2E_FILES_BASE_URL"] = "http://127.0.0.1:18011/api/v1"
+        os.environ["E2E_FILES_BASE_URL"] = (
+            f"http://{remote_stack_host}:18104/api/v1"
+            if remote_stack_host
+            else "http://127.0.0.1:18011/api/v1"
+        )
         os.environ["E2E_DIRECT_USER_ID"] = _safe_str(args.direct_user_id) or "2"
         os.environ["E2E_DIRECT_ORG_ID"] = _safe_str(args.direct_org_id) or "1"
         os.environ["E2E_DIRECT_IS_SUPERUSER"] = "false"

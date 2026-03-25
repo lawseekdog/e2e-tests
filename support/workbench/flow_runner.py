@@ -1539,6 +1539,42 @@ class WorkbenchFlow:
             return {"events": [{"event": "session_archived"}], "output": "session archived"}
         card = await self.get_pending_card()
         if card:
+            snapshot = await self._get_workflow_snapshot()
+            if _is_stale_pending_card(card, snapshot):
+                _debug(
+                    f"[flow] ignore stale pending card before resume skill_id={card.get('skill_id')} "
+                    f"task_key={card.get('task_key')}"
+                )
+                card = None
+            if not card:
+                self._repeat_card_signature = None
+                self._repeat_card_count = 0
+                self._repeat_unanswerable_signature = None
+                self._repeat_unanswerable_count = 0
+                self._last_step_used_nudge = False
+                if not allow_nudge:
+                    return None
+                if not _AUTO_NUDGE:
+                    return None
+                _debug(f"[flow] nudge {nudge_text!r}")
+                self._last_step_used_nudge = True
+                sse = await self.nudge(nudge_text, attachments=self.uploaded_file_ids, max_loops=8)
+                sse_card = await self.actionable_card_from_sse(sse if isinstance(sse, dict) else {})
+                if isinstance(sse_card, dict) and sse_card:
+                    if stop_on_pending_card is not None and stop_on_pending_card(sse_card):
+                        _debug(
+                            f"[flow] nudge produced interceptable card skill_id={sse_card.get('skill_id')} "
+                            f"task_key={sse_card.get('task_key')}"
+                        )
+                        if isinstance(sse, dict):
+                            sse["pending_card"] = sse_card
+                        return sse
+                    _debug(
+                        f"[flow] nudge produced card skill_id={sse_card.get('skill_id')} "
+                        f"task_key={sse_card.get('task_key')}; resume directly"
+                    )
+                    return await self.resume_card(sse_card)
+                return sse
             self._last_step_used_nudge = False
             sig = card_signature(card)
             if sig == self._repeat_card_signature:

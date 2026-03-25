@@ -102,6 +102,7 @@ async def test_step_resumes_sse_card_even_when_pending_poll_returned_empty() -> 
     flow.get_pending_card = _get_pending_card  # type: ignore[method-assign]
     flow.nudge = _nudge  # type: ignore[method-assign]
     flow.resume_card = _resume_card  # type: ignore[method-assign]
+    flow._pending_card_poll_unavailable = True
 
     result = await flow.step()
 
@@ -474,3 +475,39 @@ async def test_actionable_card_from_sse_uses_matching_pending_card_when_availabl
 
     assert isinstance(resolved, dict)
     assert resolved.get("title") == "authoritative"
+
+
+@pytest.mark.asyncio
+async def test_step_ignores_stale_pending_card_before_resume() -> None:
+    stale_card = {
+        "id": "card-stale-step",
+        "skill_id": "legal_opinion-intake-gate",
+        "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
+    }
+    flow = WorkbenchFlow(client=object(), session_id="session-8b", matter_id="matter-8b")
+
+    async def _refresh() -> None:
+        return None
+
+    async def _get_pending_card() -> dict[str, object]:
+        return stale_card
+
+    async def _get_workflow_snapshot() -> dict[str, object]:
+        return {
+            "analysis_state": {
+                "current_task_id": "legal_opinion_mode_router",
+                "current_subgraph": "analysis",
+            }
+        }
+
+    async def _resume_card(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("resume_card should not run for stale pending card")
+
+    flow.refresh = _refresh  # type: ignore[method-assign]
+    flow.get_pending_card = _get_pending_card  # type: ignore[method-assign]
+    flow._get_workflow_snapshot = _get_workflow_snapshot  # type: ignore[method-assign]
+    flow.resume_card = _resume_card  # type: ignore[method-assign]
+
+    result = await flow.step(allow_nudge=False)
+
+    assert result is None

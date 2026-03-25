@@ -10,6 +10,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from typing import cast
 
 import sys
 
@@ -54,10 +55,7 @@ DEFAULT_KICKOFF = (
 
 FLOW_OVERRIDES = {
     "profile.client_role": "applicant",
-    "profile.review_scope": "full",
-    "review_scope": "full",
-    "profile.contract_type": "建设工程施工合同",
-    "profile.summary": "已征收闲置土地垃圾清运工程施工合同审查，重点关注付款条件、违约责任、争议解决与免责条款。",
+    "profile.summary": "合同审查，重点关注付款条件、违约责任、争议解决与免责条款。",
 }
 
 
@@ -65,7 +63,7 @@ def _safe_str(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _select_contract_file(cli_value: str) -> Path:
+def _select_contract_file(cli_value: str, *, contract_type_id: str) -> Path:
     if _safe_str(cli_value):
         p = Path(cli_value).expanduser().resolve()
         if not p.exists() or not p.is_file():
@@ -73,6 +71,7 @@ def _select_contract_file(cli_value: str) -> Path:
         return p
 
     candidates = [
+        E2E_ROOT / f"fixtures/workbench/contract_review/{_safe_str(contract_type_id).lower()}.txt",
         REPO_ROOT / "已征收闲置土地垃圾清运.docx",
         E2E_ROOT / "fixtures/workbench/contract_review/sample_contract.txt",
     ]
@@ -80,6 +79,48 @@ def _select_contract_file(cli_value: str) -> Path:
         if p.exists() and p.is_file():
             return p
     raise FileNotFoundError("未找到可用合同文件，请通过 --contract-file 显式指定。")
+
+
+def _load_contract_review_expectations(contract_file: Path) -> dict[str, Any]:
+    expectation_candidates = [
+        contract_file.with_suffix(".expectation.json"),
+        contract_file.parent / f"{contract_file.stem}.expectation.json",
+    ]
+    for path in expectation_candidates:
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"invalid_expectation_json:{path}:{exc}") from exc
+        if isinstance(payload, dict):
+            return payload
+    return {
+        "contract_type_id": "construction",
+        "review_scope": "full",
+        "required_output_keys": list(REQUIRED_DOC_OUTPUT_KEYS),
+        "mandatory_issue_types": [
+            "effectiveness",
+            "payment",
+            "tax_invoice",
+            "delivery_acceptance",
+            "quality",
+            "change_order",
+            "delay",
+            "liability",
+            "indemnity",
+            "termination",
+            "compliance",
+            "dispute_resolution",
+            "notice",
+        ],
+        "required_section_markers": [
+            "合同审查意见书",
+            "审查范围",
+            "主要问题及修改建议",
+            "声明与保留",
+        ],
+    }
 
 
 def _event_counts(sse: dict[str, Any]) -> dict[str, int]:
@@ -162,7 +203,18 @@ async def run(args: argparse.Namespace) -> int:
     username = _safe_str(args.username) or _safe_str(os.getenv("LAWYER_USERNAME")) or "lawyer1"
     password = _safe_str(args.password) or _safe_str(os.getenv("LAWYER_PASSWORD")) or "lawyer123456"
     kickoff = _safe_str(args.kickoff) or DEFAULT_KICKOFF
-    contract_file = _select_contract_file(args.contract_file)
+    requested_contract_type_id = _safe_str(args.contract_type_id).lower() or "construction"
+    contract_file = _select_contract_file(args.contract_file, contract_type_id=requested_contract_type_id)
+    contract_review_expectations = _load_contract_review_expectations(contract_file)
+    contract_type_id = _safe_str(contract_review_expectations.get("contract_type_id")).lower() or requested_contract_type_id
+    review_scope = _safe_str(contract_review_expectations.get("review_scope")).lower() or "full"
+    flow_overrides = {
+        **FLOW_OVERRIDES,
+        "profile.review_scope": review_scope,
+        "review_scope": review_scope,
+        "profile.contract_type_id": contract_type_id,
+        "profile.summary": f"{contract_type_id} 合同审查，重点关注付款条件、违约责任、争议解决与免责条款。",
+    }
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir = resolve_output_dir(
@@ -195,7 +247,7 @@ async def run(args: argparse.Namespace) -> int:
             service_type_id="contract_review",
             client_role="applicant",
             uploaded_file_ids=[file_id],
-            overrides=FLOW_OVERRIDES,
+            overrides=flow_overrides,
             strict_card_driven=True,
         )
         print(f"[session] id={session_id} matter_id={matter_id or '-'}")
@@ -303,7 +355,7 @@ async def run(args: argparse.Namespace) -> int:
             },
             "contract_view": {
                 "overall_risk_level": _safe_str(contract_view.get("overall_risk_level")),
-                "contract_type": _safe_str(contract_view.get("contract_type")),
+                "contract_type_id": _safe_str(contract_view.get("contract_type_id")),
                 "summary_len": len(_safe_str(contract_view.get("summary"))),
                 "clauses_count": len(contract_view.get("clauses")) if isinstance(contract_view.get("clauses"), list) else 0,
             },
@@ -324,6 +376,8 @@ async def run(args: argparse.Namespace) -> int:
             deliverables=deliverables,
             deliverable_text=report_text,
             deliverable_status=_safe_str((deliverables.get("contract_review_report") or {}).get("status")),
+            gold_text=_safe_str(contract_review_expectations.get("gold_text")),
+            contract_review_expectations=cast(dict[str, Any], contract_review_expectations),
             observability=observability,
             goal_completion_mode="card" if _safe_str((pending_card or {}).get("skill_id")).lower() == "goal-completion" else "none",
         )
@@ -350,6 +404,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--username", default="", help="Lawyer username")
     parser.add_argument("--password", default="", help="Lawyer password")
     parser.add_argument("--contract-file", default="", help="Contract file path (.docx/.txt)")
+    parser.add_argument("--contract-type-id", default="construction", help="Default fixture contract_type_id when --contract-file is omitted")
     parser.add_argument("--kickoff", default=DEFAULT_KICKOFF, help="Initial user query")
     parser.add_argument("--kickoff-max-loops", type=int, default=24, help="kickoff max_loops")
     parser.add_argument("--max-steps", type=int, default=220, help="run_until max steps")

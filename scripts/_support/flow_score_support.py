@@ -43,6 +43,72 @@ _NODE_HINTS: dict[str, tuple[str, ...]] = {
 }
 
 _CITATION_RE = re.compile(r"《[^》]{2,40}》第[一二三四五六七八九十百千万0-9]{1,8}条")
+_CONTRACT_REVIEW_OUTPUT_KEYS = ("contract_review_report", "modification_suggestion", "redline_comparison")
+
+
+def _contract_review_expected_output_keys(*, review_scope: str, expectations: dict[str, Any] | None = None) -> set[str]:
+    expected = {
+        _safe_str(item)
+        for item in _as_list(_as_dict(expectations).get("required_output_keys"))
+        if _safe_str(item)
+    }
+    if expected:
+        return expected
+    scope = _safe_str(review_scope).lower()
+    if scope == "quick":
+        return {"contract_review_report"}
+    if scope == "risk":
+        return {"contract_review_report", "modification_suggestion"}
+    if scope in {"redline", "full"}:
+        return set(_CONTRACT_REVIEW_OUTPUT_KEYS)
+    return {"contract_review_report"}
+
+
+def _contract_review_actual_output_keys(deliverables: dict[str, dict[str, Any]]) -> set[str]:
+    return {
+        key
+        for key in deliverables
+        if _safe_str(key) in _CONTRACT_REVIEW_OUTPUT_KEYS
+    }
+
+
+def _collect_clause_issue_types(current_view: dict[str, Any]) -> set[str]:
+    out: set[str] = set()
+    for row in _as_list(_as_dict(current_view).get("clauses")):
+        if not isinstance(row, dict):
+            continue
+        token = _safe_str(row.get("risk_type"))
+        if token:
+            out.add(token)
+    return out
+
+
+def _contract_review_grounding_failures(current_view: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    for row in _as_list(_as_dict(current_view).get("clauses")):
+        if not isinstance(row, dict):
+            continue
+        clause_id = _safe_str(row.get("clause_id"))
+        risk_level = _safe_str(row.get("risk_level")).lower()
+        if risk_level not in {"medium", "high", "critical"}:
+            continue
+        anchor_refs = _as_list(row.get("anchor_refs"))
+        law_ref_ids = [_safe_str(item) for item in _as_list(row.get("law_ref_ids")) if _safe_str(item)]
+        if not anchor_refs:
+            failures.append(f"missing_clause_anchor:{clause_id or 'unknown'}")
+        if not law_ref_ids:
+            failures.append(f"missing_law_ref:{clause_id or 'unknown'}")
+    return failures
+
+
+def _missing_section_markers(text: str, expectations: dict[str, Any] | None = None) -> list[str]:
+    content = _safe_str(text)
+    missing: list[str] = []
+    for marker in _as_list(_as_dict(expectations).get("required_section_markers")):
+        token = _safe_str(marker)
+        if token and token not in content:
+            missing.append(token)
+    return missing
 
 
 async def collect_flow_observability(
@@ -250,6 +316,7 @@ def score_snapshot_progress(
     aux_views: dict[str, Any] | None = None,
     deliverables: dict[str, dict[str, Any]] | None = None,
     pending_card: dict[str, Any] | None = None,
+    contract_review_expectations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     snap = snapshot if isinstance(snapshot, dict) else {}
     view = current_view if isinstance(current_view, dict) else {}
@@ -315,10 +382,52 @@ def score_snapshot_progress(
             score += 5
         else:
             failures.append("contract_review_risk_level_missing")
-        if {"contract_review_report", "modification_suggestion", "redline_comparison"}.issubset(set(deliverable_map.keys())):
+        contract_type_id = _safe_str(view.get("contract_type_id"))
+        review_scope = _safe_str(view.get("review_scope"))
+        expected_contract_type_id = _safe_str(_as_dict(contract_review_expectations).get("contract_type_id"))
+        expected_review_scope = _safe_str(_as_dict(contract_review_expectations).get("review_scope"))
+        if contract_type_id:
             score += 15
         else:
-            failures.append("contract_review_deliverables_incomplete")
+            failures.append("contract_review_contract_type_missing")
+        if review_scope:
+            score += 5
+        else:
+            failures.append("contract_review_review_scope_missing")
+        if expected_contract_type_id and contract_type_id != expected_contract_type_id:
+            failures.append(f"contract_review_contract_type_mismatch:{contract_type_id or 'missing'}")
+        if expected_review_scope and review_scope != expected_review_scope:
+            failures.append(f"contract_review_review_scope_mismatch:{review_scope or 'missing'}")
+
+        expected_output_keys = _contract_review_expected_output_keys(
+            review_scope=review_scope or expected_review_scope,
+            expectations=contract_review_expectations,
+        )
+        actual_output_keys = _contract_review_actual_output_keys(deliverable_map)
+        if actual_output_keys == expected_output_keys:
+            score += 10
+        else:
+            failures.append(
+                f"contract_review_deliverables_mismatch:expected={sorted(expected_output_keys)!r}:actual={sorted(actual_output_keys)!r}"
+            )
+
+        mandatory_issue_types = {
+            _safe_str(item)
+            for item in _as_list(_as_dict(contract_review_expectations).get("mandatory_issue_types"))
+            if _safe_str(item)
+        }
+        actual_issue_types = _collect_clause_issue_types(view)
+        missing_issue_types = sorted(mandatory_issue_types - actual_issue_types)
+        if not missing_issue_types:
+            score += 10
+        elif mandatory_issue_types:
+            failures.append(f"contract_review_issue_types_missing:{','.join(missing_issue_types)}")
+
+        grounding_failures = _contract_review_grounding_failures(view)
+        if not grounding_failures:
+            score += 10
+        else:
+            failures.extend(grounding_failures)
     elif flow_id == "legal_opinion":
         issues = len(_as_list(view.get("issues")))
         risks = len(_as_list(view.get("risks")))
@@ -377,7 +486,14 @@ def _score_analysis_output_quality(*, current_view: dict[str, Any], aux_views: d
     return {"score": min(100, score), "passed": score >= 75 and not failures, "failures": failures, "details": {"issues": issues, "strategies": strategies, "risks": risks, "pricing_status": pricing_status}}
 
 
-def _score_contract_review_output_quality(*, text: str, deliverable_status: str, current_view: dict[str, Any]) -> dict[str, Any]:
+def _score_contract_review_output_quality(
+    *,
+    text: str,
+    deliverable_status: str,
+    current_view: dict[str, Any],
+    gold_text: str = "",
+    contract_review_expectations: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     content = _safe_str(text)
     if not content:
         clauses = len(_as_list(_as_dict(current_view).get("clauses")))
@@ -391,10 +507,13 @@ def _score_contract_review_output_quality(*, text: str, deliverable_status: str,
         assert_docx_has_no_template_placeholders(content)
     except AssertionError as exc:
         failures.append(str(exc))
-    benchmark = score_contract_review_docx_benchmark(content, gold_text=content)
+    benchmark = score_contract_review_docx_benchmark(content, gold_text=_safe_str(gold_text))
     failures.extend(list(benchmark.hard_gate_failures))
     if _safe_str(deliverable_status).lower() not in {"completed", "archived", "done"}:
         failures.append(f"deliverable_status:{deliverable_status or 'missing'}")
+    missing_markers = _missing_section_markers(content, contract_review_expectations)
+    if missing_markers:
+        failures.append(f"contract_review_section_markers_missing:{','.join(missing_markers)}")
     return {
         "score": int(benchmark.score),
         "passed": benchmark.passed and not failures,
@@ -408,35 +527,166 @@ def _score_contract_review_output_quality(*, text: str, deliverable_status: str,
     }
 
 
-def _score_legal_opinion_output_quality(*, text: str, deliverable_status: str, current_view: dict[str, Any]) -> dict[str, Any]:
+def build_legal_opinion_formal_ready_report(
+    *,
+    current_view: dict[str, Any] | None,
+    aux_views: dict[str, Any] | None = None,
+    deliverable_text: str = "",
+    deliverable_status: str = "",
+) -> dict[str, Any]:
+    view = current_view if isinstance(current_view, dict) else {}
+    aux = aux_views if isinstance(aux_views, dict) else {}
+    docgen_view = _as_dict(aux.get("document_generation_view"))
+    content = _safe_str(deliverable_text)
+    title = _safe_str(view.get("title"))
+    summary = _safe_str(view.get("summary"))
+    confirmed_rows = [
+        row
+        for row in _as_list(view.get("confirmed_opinions"))
+        if isinstance(row, dict)
+    ]
+    if not confirmed_rows:
+        confirmed_rows = [
+            row
+            for row in _as_list(view.get("conclusion_targets"))
+            if isinstance(row, dict) and _safe_str(row.get("status")).lower() == "confirmed"
+        ]
+    risks = len(_as_list(view.get("risks")))
+    actions = len(_as_list(view.get("action_items")))
+    material_gaps = [_safe_str(item) for item in _as_list(view.get("material_gaps")) if _safe_str(item)]
+    fact_gaps = [_safe_str(item) for item in _as_list(view.get("fact_gaps")) if _safe_str(item)]
+    formal_gate_blocked = bool(docgen_view.get("formal_gate_blocked"))
+    formal_gate_reason_codes = [
+        _safe_str(code)
+        for code in _as_list(docgen_view.get("formal_gate_reason_codes"))
+        if _safe_str(code)
+    ]
+    formal_gate_actions = [
+        row for row in _as_list(docgen_view.get("formal_gate_actions")) if isinstance(row, dict)
+    ]
+    pollution_hits = [
+        token
+        for token in ("contract_dispute", "dispute_response", "陈述泳道", "证据泳道", "client")
+        if token and token.lower() in "\n".join([title, summary, content]).lower()
+    ]
+
+    failures: list[str] = []
+    score = 0
+    if len(summary) >= 60:
+        score += 15
+    else:
+        failures.append("legal_opinion_summary_too_short")
+    if confirmed_rows:
+        score += 20
+    else:
+        failures.append("legal_opinion_confirmed_opinions_missing")
+    if risks > 0:
+        score += 10
+    else:
+        failures.append("legal_opinion_risks_missing")
+    if actions > 0:
+        score += 10
+    else:
+        failures.append("legal_opinion_action_items_missing")
+    if not material_gaps and not fact_gaps:
+        score += 15
+    else:
+        failures.append("legal_opinion_unresolved_gaps_present")
+    if not pollution_hits:
+        score += 10
+    else:
+        failures.append(f"legal_opinion_pollution:{','.join(pollution_hits)}")
+    if formal_gate_blocked:
+        if formal_gate_reason_codes:
+            score += 10
+        else:
+            failures.append("formal_gate_reason_codes_missing")
+        if formal_gate_actions:
+            score += 10
+        else:
+            failures.append("formal_gate_actions_missing")
+    elif docgen_view:
+        score += 20
+    else:
+        failures.append("document_generation_view_missing")
+    if _safe_str(deliverable_status).lower() in {"completed", "archived", "done"}:
+        score += 10
+    elif content:
+        failures.append(f"deliverable_status:{deliverable_status or 'missing'}")
+
+    return {
+        "score": min(100, score),
+        "passed": score >= 75 and not failures,
+        "failures": failures,
+        "blocking_reason_codes": formal_gate_reason_codes,
+        "required_actions": formal_gate_actions,
+        "details": {
+            "confirmed_count": len(confirmed_rows),
+            "risk_count": risks,
+            "action_count": actions,
+            "material_gap_count": len(material_gaps),
+            "fact_gap_count": len(fact_gaps),
+            "formal_gate_blocked": formal_gate_blocked,
+            "pollution_hits": pollution_hits,
+        },
+    }
+
+
+def _score_legal_opinion_output_quality(
+    *,
+    text: str,
+    deliverable_status: str,
+    current_view: dict[str, Any],
+    gold_text: str = "",
+    aux_views: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     content = _safe_str(text)
+    formal_ready = build_legal_opinion_formal_ready_report(
+        current_view=current_view,
+        aux_views=aux_views,
+        deliverable_text=content,
+        deliverable_status=deliverable_status,
+    )
     if not content:
         issues = len(_as_list(_as_dict(current_view).get("issues")))
         risks = len(_as_list(_as_dict(current_view).get("risks")))
         actions = len(_as_list(_as_dict(current_view).get("action_items")))
-        failures = ["legal_opinion_doc_missing"]
+        failures = ["legal_opinion_doc_missing", *[str(item) for item in _as_list(formal_ready.get("failures")) if _safe_str(item)]]
         if issues + risks + actions < 2:
             failures.append("legal_opinion_sections_insufficient")
-        return {"score": 50 if issues + risks + actions >= 2 else 0, "passed": False, "failures": failures, "details": {"issues": issues, "risks": risks, "actions": actions}}
+        return {
+            "score": max(int(formal_ready.get("score") or 0), 50 if issues + risks + actions >= 2 else 0),
+            "passed": False,
+            "failures": failures,
+            "details": {
+                "issues": issues,
+                "risks": risks,
+                "actions": actions,
+                "formal_ready": formal_ready,
+            },
+        }
 
-    failures: list[str] = []
+    failures: list[str] = [str(item) for item in _as_list(formal_ready.get("failures")) if _safe_str(item)]
     try:
         assert_docx_has_no_template_placeholders(content)
     except AssertionError as exc:
         failures.append(str(exc))
-    benchmark = score_legal_opinion_docx_benchmark(content, gold_text=content)
+    benchmark = score_legal_opinion_docx_benchmark(content, gold_text=_safe_str(gold_text))
     failures.extend(list(benchmark.hard_gate_failures))
     if _safe_str(deliverable_status).lower() not in {"completed", "archived", "done"}:
         failures.append(f"deliverable_status:{deliverable_status or 'missing'}")
     return {
-        "score": int(benchmark.score),
-        "passed": benchmark.passed and not failures,
+        "score": int(round((benchmark.score * 0.65) + (int(formal_ready.get("score") or 0) * 0.35))),
+        "passed": benchmark.passed and bool(formal_ready.get("passed")) and not failures,
         "failures": failures,
         "details": {
             "legal_citation_count": benchmark.legal_citation_count,
+            "clause_reference_count": benchmark.clause_reference_count,
             "numbered_item_count": benchmark.numbered_item_count,
             "has_uncertainty_notice": benchmark.has_uncertainty_notice,
             "text_length": benchmark.text_length,
+            "pollution_hits": benchmark.pollution_hits,
+            "formal_ready": formal_ready,
         },
     }
 
@@ -448,15 +698,29 @@ def score_deliverable_quality(
     deliverable_status: str = "",
     current_view: dict[str, Any] | None = None,
     aux_views: dict[str, Any] | None = None,
+    gold_text: str = "",
+    contract_review_expectations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     view = current_view if isinstance(current_view, dict) else {}
     aux = aux_views if isinstance(aux_views, dict) else {}
     if flow_id == "analysis":
         return _score_analysis_output_quality(current_view=view, aux_views=aux)
     if flow_id == "contract_review":
-        return _score_contract_review_output_quality(text=text, deliverable_status=deliverable_status, current_view=view)
+        return _score_contract_review_output_quality(
+            text=text,
+            deliverable_status=deliverable_status,
+            current_view=view,
+            gold_text=gold_text,
+            contract_review_expectations=contract_review_expectations,
+        )
     if flow_id == "legal_opinion":
-        return _score_legal_opinion_output_quality(text=text, deliverable_status=deliverable_status, current_view=view)
+        return _score_legal_opinion_output_quality(
+            text=text,
+            deliverable_status=deliverable_status,
+            current_view=view,
+            gold_text=gold_text,
+            aux_views=aux,
+        )
     return {"score": 0, "passed": False, "failures": ["unsupported_flow"], "details": {}}
 
 
@@ -471,6 +735,8 @@ def build_flow_scores(
     deliverables: dict[str, dict[str, Any]] | None = None,
     deliverable_text: str = "",
     deliverable_status: str = "",
+    gold_text: str = "",
+    contract_review_expectations: dict[str, Any] | None = None,
     observability: dict[str, Any] | None = None,
     goal_completion_mode: str = "",
 ) -> dict[str, Any]:
@@ -483,6 +749,7 @@ def build_flow_scores(
         aux_views=aux_views,
         deliverables=deliverables,
         pending_card=pending_card,
+        contract_review_expectations=contract_review_expectations,
     )
     deliverable_quality = score_deliverable_quality(
         flow_id=flow_id,
@@ -490,6 +757,8 @@ def build_flow_scores(
         deliverable_status=deliverable_status,
         current_view=current_view,
         aux_views=aux_views,
+        gold_text=gold_text,
+        contract_review_expectations=contract_review_expectations,
     )
 
     overall_score = int(round(unexpected["score"] * 0.25 + node_path["score"] * 0.25 + snapshot_progress["score"] * 0.20 + deliverable_quality["score"] * 0.30))

@@ -213,7 +213,7 @@ def score_contract_review_docx_benchmark(text: str, *, gold_text: str) -> Contra
     ratio, ratio_score = _score_ratio(len(content), len(gold))
 
     raw_score = section_score + legal_cite_score + clause_ref_score + numbered_item_score + placeholder_score + ratio_score
-    total_score = int(round(raw_score))
+    total_score = min(100, int(round(raw_score)))
 
     hard_gate_failures: list[str] = []
     if not all(section_hits.values()):
@@ -261,43 +261,42 @@ def assert_contract_review_docx_benchmark(text: str, *, gold_text: str) -> Contr
 _LEGAL_OPINION_SECTION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "title": (
         re.compile(r"法律意见书|法律意见"),
-        re.compile(r"赵丽珍"),
     ),
-    "background": (
-        re.compile(r"基本事实|事实背景|案情概述|问题概述|案情要点"),
+    "facts": (
+        re.compile(r"基本事实|事实基础|事实背景|争议背景|履约经过|案情概述|问题背景"),
     ),
-    "non_work_injury": (
-        re.compile(r"不(?:属于|构成).{0,12}工伤|不(?:属于|构成).{0,12}工亡|非因工死亡"),
-        re.compile(r"视同工伤|工伤亡|三工"),
+    "issues": (
+        re.compile(r"争议焦点|核心争议|法律问题|待分析问题"),
     ),
-    "labor_relation": (
-        re.compile(r"劳动关系|用工关系"),
-        re.compile(r"社保|工伤保险|失业保险|未签.{0,8}合同"),
+    "legal_basis": (
+        re.compile(r"法律依据|规则依据|合同依据|条款依据|裁判规则|类案依据"),
     ),
-    "management_fault": (
-        re.compile(r"管理疏漏|管理责任|监理公司"),
-        re.compile(r"同吃同住|吃住在工地|管理义务"),
-    ),
-    "project_fault": (
-        re.compile(r"安全保障义务|安全防范措施|及时救治"),
-        re.compile(r"项目部|施工单位|板房|监控"),
-    ),
-    "drinking_fault": (
-        re.compile(r"共同饮酒|陪同.{0,8}饮酒|饮酒赔偿义务"),
-    ),
-    "self_fault": (
-        re.compile(r"自身过错|自身责任|疾病|责任比例"),
-    ),
-    "strategy": (
-        re.compile(r"应对策略|处理建议|谈判建议|证据保全|后续建议|人道主义补偿"),
+    "analysis": (
+        re.compile(r"分析论证|法律分析|分析意见|分析结论"),
     ),
     "conclusion": (
-        re.compile(r"结论|综上|意见如下"),
+        re.compile(r"结论意见|结论|意见如下|综合结论"),
+    ),
+    "risk": (
+        re.compile(r"风险提示|主要风险|风险分析"),
+    ),
+    "action": (
+        re.compile(r"应对建议|行动建议|处理建议|后续建议|下一步建议"),
     ),
 }
 
 _LEGAL_OPINION_UNCERTAINTY_RE = re.compile(
     r"基于目前了解的情况|基于现有陈述|基于现有情况|需进一步核实|需结合后续证据|初步意见|供内部研判"
+)
+_LEGAL_OPINION_POLLUTION_MARKERS = (
+    "contract_dispute",
+    "dispute_response",
+    "accident_death",
+    "陈述泳道",
+    "证据泳道",
+    "client",
+    "facts_only",
+    "analysis_backed",
 )
 
 
@@ -306,9 +305,11 @@ class LegalOpinionDocxBenchmarkResult:
     score: int
     section_hits: dict[str, bool]
     legal_citation_count: int
+    clause_reference_count: int
     numbered_item_count: int
     has_uncertainty_notice: bool
     has_placeholder: bool
+    pollution_hits: list[str]
     text_length: int
     gold_text_length: int
     length_ratio: float
@@ -324,46 +325,48 @@ def score_legal_opinion_docx_benchmark(text: str, *, gold_text: str) -> LegalOpi
     gold = str(gold_text or "")
 
     section_hits: dict[str, bool] = {}
-    topic_hits = 0
     for name, pats in _LEGAL_OPINION_SECTION_PATTERNS.items():
-        hit = _section_hit(content, pats, require_all=(name in {"title", "non_work_injury", "labor_relation", "management_fault", "project_fault"}))
+        hit = _section_hit(content, pats, require_all=False)
         section_hits[name] = hit
-        if name != "title" and hit:
-            topic_hits += 1
-    section_score = sum(5.0 for ok in section_hits.values() if ok)
+    section_score = sum(8.0 for ok in section_hits.values() if ok)
 
     legal_cite_count = len(_LAW_CITE_RE.findall(content))
-    legal_cite_score = min(10.0, (legal_cite_count / 2.0) * 10.0)
+    legal_cite_score = min(12.0, (legal_cite_count / 2.0) * 12.0)
+
+    clause_ref_count = len(_CLAUSE_REF_RE.findall(content))
+    clause_ref_score = min(10.0, (clause_ref_count / 3.0) * 10.0)
 
     numbered_item_count = len(_NUMBERED_ITEM_RE.findall(content))
-    numbered_item_score = min(10.0, (numbered_item_count / 6.0) * 10.0)
+    numbered_item_score = min(10.0, (numbered_item_count / 4.0) * 10.0)
 
     has_uncertainty_notice = bool(_LEGAL_OPINION_UNCERTAINTY_RE.search(content))
-    uncertainty_score = 8.0 if has_uncertainty_notice else 0.0
+    uncertainty_score = 4.0 if has_uncertainty_notice else 0.0
 
     has_placeholder = any(tok in content for tok in _PLACEHOLDER_TOKENS)
     placeholder_score = 0.0 if has_placeholder else 8.0
+    pollution_hits = [token for token in _LEGAL_OPINION_POLLUTION_MARKERS if token and token.lower() in content.lower()]
+    pollution_score = max(0.0, 8.0 - min(8.0, float(len(pollution_hits)) * 2.0))
 
     ratio, ratio_score = _score_ratio(len(content), len(gold))
 
-    raw_score = section_score + legal_cite_score + numbered_item_score + uncertainty_score + placeholder_score + ratio_score
+    raw_score = section_score + legal_cite_score + clause_ref_score + numbered_item_score + uncertainty_score + placeholder_score + pollution_score + ratio_score
     total_score = int(round(raw_score))
 
     hard_gate_failures: list[str] = []
-    must_hit = ["title", "non_work_injury", "labor_relation", "project_fault", "strategy", "conclusion"]
+    must_hit = ["title", "facts", "legal_basis", "analysis", "conclusion", "risk", "action"]
     missing = [k for k in must_hit if not section_hits.get(k)]
     if missing:
-        hard_gate_failures.append(f"核心章节/主题命中不足：缺少 {', '.join(missing)}")
-    if topic_hits < 7:
-        hard_gate_failures.append(f"责任分析主题覆盖不足：{topic_hits}（要求 >= 7）")
-    if legal_cite_count < 2:
-        hard_gate_failures.append(f"法条引用不足：{legal_cite_count}（要求 >= 2）")
+        hard_gate_failures.append(f"核心章节命中不足：缺少 {', '.join(missing)}")
+    if legal_cite_count < 1:
+        hard_gate_failures.append(f"法条引用不足：{legal_cite_count}（要求 >= 1）")
+    if clause_ref_count < 1:
+        hard_gate_failures.append(f"合同条款或款项定位不足：{clause_ref_count}（要求 >= 1）")
     if numbered_item_count < 4:
         hard_gate_failures.append(f"编号条目不足：{numbered_item_count}（要求 >= 4）")
-    if not has_uncertainty_notice:
-        hard_gate_failures.append("缺少无材料场景的不确定性/补证提示")
     if has_placeholder:
         hard_gate_failures.append("存在模板占位符（{{ / TODO / PLACEHOLDER）")
+    if pollution_hits:
+        hard_gate_failures.append(f"存在内部词污染：{', '.join(pollution_hits)}")
     if not (0.5 <= ratio <= 1.8):
         hard_gate_failures.append(f"文本长度比不达标：{ratio:.3f}（要求 0.5~1.8）")
     if total_score < 80:
@@ -373,9 +376,11 @@ def score_legal_opinion_docx_benchmark(text: str, *, gold_text: str) -> LegalOpi
         score=total_score,
         section_hits=section_hits,
         legal_citation_count=legal_cite_count,
+        clause_reference_count=clause_ref_count,
         numbered_item_count=numbered_item_count,
         has_uncertainty_notice=has_uncertainty_notice,
         has_placeholder=has_placeholder,
+        pollution_hits=pollution_hits,
         text_length=len(content),
         gold_text_length=len(gold),
         length_ratio=ratio,
@@ -388,8 +393,9 @@ def assert_legal_opinion_docx_benchmark(text: str, *, gold_text: str) -> LegalOp
     if result.hard_gate_failures:
         details = (
             f"score={result.score}, ratio={result.length_ratio:.3f}, "
-            f"law_cites={result.legal_citation_count}, numbered={result.numbered_item_count}, "
-            f"uncertainty={result.has_uncertainty_notice}"
+            f"law_cites={result.legal_citation_count}, clause_refs={result.clause_reference_count}, "
+            f"numbered={result.numbered_item_count}, uncertainty={result.has_uncertainty_notice}, "
+            f"pollution={result.pollution_hits}"
         )
         raise AssertionError("法律意见书质量基线未达标: " + "; ".join(result.hard_gate_failures) + f". details: {details}")
     return result

@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from support.workbench.flow_runner import WorkbenchFlow, auto_answer_card, card_signature
+from support.workbench.flow_runner import (
+    WorkbenchFlow,
+    _is_stale_pending_card,
+    auto_answer_card,
+    card_signature,
+)
 
 
 @pytest.mark.asyncio
@@ -114,7 +121,7 @@ def test_auto_answer_card_covers_basic_card_input_types() -> None:
                 "required": True,
                 "options": [
                     {"label": "全面审查", "value": "full", "recommended": True},
-                    {"label": "重点审查", "value": "focused"},
+                    {"label": "风险审查", "value": "risk"},
                 ],
             },
             {"field_key": "case.file_refs.pending_upload_file_ids", "input_type": "file_ids", "required": True},
@@ -202,3 +209,268 @@ async def test_step_strict_card_mode_skips_hidden_remediation_nudge() -> None:
 
     assert isinstance(result, dict)
     assert result.get("pending_card") == card
+
+
+@pytest.mark.asyncio
+async def test_workflow_action_uses_websocket_actions_endpoint() -> None:
+    called: dict[str, object] = {}
+
+    class _Client:
+        async def workflow_action(self, session_id: str, **kwargs):  # type: ignore[no-untyped-def]
+            called["session_id"] = session_id
+            called.update(kwargs)
+            return {"events": [{"event": "workflow_action"}], "output": "ok"}
+
+        async def get_matter_phase_timeline(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": {}}
+
+        async def list_traces(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": {"traces": []}}
+
+        async def list_deliverables(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": {"deliverables": []}}
+
+    flow = WorkbenchFlow(client=_Client(), session_id="session-4", uploaded_file_ids=["file-1"])
+    result = await flow.workflow_action(
+        "set_goal",
+        workflow_action_params={"goal": "document_generation"},
+        max_loops=18,
+    )
+
+    assert isinstance(result, dict)
+    assert called["session_id"] == "session-4"
+    assert called["workflow_action"] == "set_goal"
+    assert called["workflow_action_params"] == {"goal": "document_generation"}
+    assert called["attachments"] == ["file-1"]
+    assert called["max_loops"] == 18
+
+
+@pytest.mark.asyncio
+async def test_resume_card_detaches_after_timeout_when_state_advanced_past_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Client:
+        async def resume(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(0.05)
+            return {"events": [{"event": "end", "data": {"output": "late"}}], "output": "late"}
+
+        async def get_workflow_snapshot(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "code": 0,
+                "data": {
+                    "workbench_runtime": {
+                        "current_task_id": "references_finalize",
+                        "current_subgraph": "analysis",
+                        "pending_cards": None,
+                    }
+                },
+            }
+
+    monkeypatch.setattr("support.workbench.flow_runner._CARD_RESUME_SETTLE_TIMEOUT_S", 0.01)
+    flow = WorkbenchFlow(client=_Client(), session_id="session-timeout", matter_id="matter-timeout")
+    flow._emit_progress = lambda *args, **kwargs: asyncio.sleep(0)  # type: ignore[method-assign]
+    card = {
+        "id": "card-timeout",
+        "skill_id": "legal_opinion-intake-gate",
+        "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
+        "questions": [{"field_key": "profile.background", "input_type": "text", "required": True}],
+    }
+
+    sse = await flow.resume_card(card, max_loops=4)
+
+    assert isinstance(sse, dict)
+    assert sse.get("output")
+    assert "继续推进" in str(sse.get("output"))
+
+
+def test_is_stale_pending_card_ignores_old_intake_card_after_runtime_leaves_intake() -> None:
+    card = {
+        "id": "card-1",
+        "skill_id": "legal_opinion-intake-gate",
+        "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
+    }
+    snapshot = {
+        "workbench_runtime": {
+            "current_task_id": "references",
+            "current_subgraph": "analysis",
+            "pending_cards": [],
+        }
+    }
+
+    assert _is_stale_pending_card(card, snapshot) is True
+
+
+def test_is_stale_pending_card_keeps_runtime_pending_card_match() -> None:
+    card = {
+        "id": "card-1",
+        "skill_id": "legal_opinion-intake-gate",
+        "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
+    }
+    snapshot = {
+        "workbench_runtime": {
+            "current_task_id": "references",
+            "current_subgraph": "analysis",
+            "pending_cards": [
+                {
+                    "id": "card-1",
+                    "skill_id": "legal_opinion-intake-gate",
+                    "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
+                }
+            ],
+        }
+    }
+
+    assert _is_stale_pending_card(card, snapshot) is False
+
+
+def test_is_stale_pending_card_ignores_old_skill_error_card_after_runtime_moves_on() -> None:
+    card = {
+        "id": "card-2",
+        "skill_id": "skill-error-analysis",
+        "task_key": "workflow_confirm_evidence_conflicts_skill-error-analysis",
+    }
+    snapshot = {
+        "workbench_runtime": {
+            "current_task_id": "references_finalize",
+            "current_subgraph": "analysis",
+            "pending_cards": None,
+        }
+    }
+
+    assert _is_stale_pending_card(card, snapshot) is True
+
+
+def test_is_stale_pending_card_keeps_current_skill_error_card() -> None:
+    card = {
+        "id": "card-3",
+        "skill_id": "skill-error-analysis",
+        "task_key": "workflow_confirm_evidence_conflicts_skill-error-analysis",
+    }
+    snapshot = {
+        "workbench_runtime": {
+            "current_task_id": "evidence_conflicts",
+            "current_subgraph": "analysis",
+            "pending_cards": None,
+        }
+    }
+
+    assert _is_stale_pending_card(card, snapshot) is False
+
+
+@pytest.mark.asyncio
+async def test_get_pending_card_filters_stale_intake_card_using_workbench_snapshot() -> None:
+    card = {
+        "id": "card-1",
+        "skill_id": "legal_opinion-intake-gate",
+        "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
+    }
+
+    class _Client:
+        async def get_pending_card(self, _session_id: str):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": card}
+
+        async def get_workflow_snapshot(self, _matter_id: str):  # type: ignore[no-untyped-def]
+            return {
+                "code": 0,
+                "data": {
+                    "workbench_runtime": {
+                        "current_task_id": "references",
+                        "current_subgraph": "analysis",
+                        "pending_cards": [],
+                    }
+                },
+            }
+
+    flow = WorkbenchFlow(client=_Client(), session_id="session-5", matter_id="matter-5")
+
+    assert await flow.get_pending_card() is None
+
+
+@pytest.mark.asyncio
+async def test_get_pending_card_filters_stale_skill_error_card_using_workbench_snapshot() -> None:
+    card = {
+        "id": "card-2",
+        "skill_id": "skill-error-analysis",
+        "task_key": "workflow_confirm_evidence_conflicts_skill-error-analysis",
+    }
+
+    class _Client:
+        async def get_pending_card(self, _session_id: str):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": card}
+
+        async def get_workflow_snapshot(self, _matter_id: str):  # type: ignore[no-untyped-def]
+            return {
+                "code": 0,
+                "data": {
+                    "workbench_runtime": {
+                        "current_task_id": "references_finalize",
+                        "current_subgraph": "analysis",
+                        "pending_cards": None,
+                    }
+                },
+            }
+
+    flow = WorkbenchFlow(client=_Client(), session_id="session-6", matter_id="matter-6")
+
+    assert await flow.get_pending_card() is None
+
+
+@pytest.mark.asyncio
+async def test_actionable_card_from_sse_ignores_unconfirmed_card_after_clean_pending_poll() -> None:
+    stale_card = {
+        "id": "card-stale",
+        "skill_id": "legal_opinion-intake-gate",
+        "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
+    }
+
+    class _Client:
+        async def get_pending_card(self, _session_id: str):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": None}
+
+        async def get_workflow_snapshot(self, _matter_id: str):  # type: ignore[no-untyped-def]
+            return {
+                "code": 0,
+                "data": {
+                    "workbench_runtime": {
+                        "current_task_id": "evidence_sufficiency_seed",
+                        "current_subgraph": "analysis",
+                        "pending_cards": [],
+                    }
+                },
+            }
+
+    flow = WorkbenchFlow(client=_Client(), session_id="session-7", matter_id="matter-7")
+    sse = {"events": [{"event": "card", "data": stale_card}]}
+
+    assert await flow.actionable_card_from_sse(sse) is None
+
+
+@pytest.mark.asyncio
+async def test_actionable_card_from_sse_uses_matching_pending_card_when_available() -> None:
+    sse_card = {
+        "id": "card-live",
+        "skill_id": "goal-completion",
+        "task_key": "goal_completion",
+    }
+
+    class _Client:
+        async def get_pending_card(self, _session_id: str):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": {**sse_card, "title": "authoritative"}}
+
+        async def get_workflow_snapshot(self, _matter_id: str):  # type: ignore[no-untyped-def]
+            return {
+                "code": 0,
+                "data": {
+                    "workbench_runtime": {
+                        "current_task_id": "goal_completion",
+                        "current_subgraph": "analysis",
+                        "pending_cards": [{**sse_card, "title": "authoritative"}],
+                    }
+                },
+            }
+
+    flow = WorkbenchFlow(client=_Client(), session_id="session-8", matter_id="matter-8")
+    sse = {"events": [{"event": "card", "data": sse_card}]}
+
+    resolved = await flow.actionable_card_from_sse(sse)
+
+    assert isinstance(resolved, dict)
+    assert resolved.get("title") == "authoritative"

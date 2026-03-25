@@ -1,0 +1,17 @@
+{
+  "contract_type_id": "loan",
+  "review_scope": "full",
+  "required_output_keys": ["contract_review_report", "modification_suggestion", "redline_comparison"],
+  "mandatory_issue_types": [
+    "subject_authority",
+    "effectiveness",
+    "payment",
+    "tax_invoice",
+    "liability",
+    "termination",
+    "dispute_resolution",
+    "compliance",
+    "notice"
+  ],
+  "required_section_markers": ["合同审查报告", "审查范围", "主要问题及修改建议"]
+}

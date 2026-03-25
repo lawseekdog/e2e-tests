@@ -124,7 +124,7 @@ class ApiClient:
     async def __aenter__(self) -> "ApiClient":
         # Chat endpoints are SSE streams and may take longer than typical JSON APIs.
         timeout_s = float(os.getenv("E2E_HTTP_TIMEOUT_S", "1800") or 1800)
-        self._client = httpx.AsyncClient(timeout=timeout_s)
+        self._client = httpx.AsyncClient(timeout=timeout_s, trust_env=False)
         return self
 
     async def __aexit__(self, *args):
@@ -489,9 +489,9 @@ class ApiClient:
         title: str | None = None,
         service_type_id: str | None = None,
         matter_id: str | None = None,
+        file_ids: list[str] | None = None,
         client_role: str | None = None,
         cause_of_action_code: str | None = None,
-        file_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a consultation session (hard-cut: sessions are matter-backed).
 
@@ -502,6 +502,7 @@ class ApiClient:
         mid = str(matter_id or "").strip() or None
         st = str(service_type_id or "").strip() or None
         role = str(client_role or "").strip() or None
+        normalized_file_ids = [str(x).strip() for x in (file_ids or []) if str(x).strip()]
 
         payload: dict[str, Any] = {}
         t = str(title or "").strip()
@@ -539,7 +540,7 @@ class ApiClient:
                 created = await self.create_matter(
                     service_type_id=st,
                     title=t or None,
-                    file_ids=file_ids,
+                    file_ids=normalized_file_ids,
                     cause_of_action_code=cause_code,
                     client_role=role,
                 )

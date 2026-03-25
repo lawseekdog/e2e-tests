@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -47,6 +48,7 @@ _SESSION_BUSY_BACKOFF_S = float(os.getenv("E2E_SESSION_BUSY_BACKOFF_S", "2.5") o
 _SESSION_BUSY_EXTRA_RETRIES = _read_int_env("E2E_SESSION_BUSY_EXTRA_RETRIES", 180)
 _UNANSWERABLE_CARD_MAX_REPEATS = _read_int_env("E2E_UNANSWERABLE_CARD_MAX_REPEATS", 6)
 _REPEATED_CARD_ABORT_COUNT = _read_int_env("E2E_REPEATED_CARD_ABORT_COUNT", 10)
+_CARD_RESUME_SETTLE_TIMEOUT_S = float(os.getenv("E2E_CARD_RESUME_SETTLE_TIMEOUT_S", "45") or 45)
 
 
 def _debug(msg: str) -> None:
@@ -74,11 +76,129 @@ def extract_last_card_from_sse(sse: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _extract_runtime_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    direct = _as_dict(snapshot.get("workbench_runtime"))
+    if direct:
+        return direct
+    analysis_state = _as_dict(snapshot.get("analysis_state"))
+    nested = _as_dict(analysis_state.get("workbench_runtime"))
+    if nested:
+        return nested
+    if analysis_state:
+        return analysis_state
+    return {}
+
+
+def _card_matches_pending_snapshot(card: dict[str, Any], pending_cards: list[Any]) -> bool:
+    if not isinstance(card, dict):
+        return False
+    card_id = str(card.get("id") or card.get("card_id") or "").strip()
+    skill_id = str(card.get("skill_id") or "").strip().lower()
+    task_key = str(card.get("task_key") or "").strip().lower()
+    for row in pending_cards:
+        pending = _as_dict(row)
+        pending_id = str(pending.get("id") or pending.get("card_id") or "").strip()
+        pending_skill = str(pending.get("skill_id") or "").strip().lower()
+        pending_task = str(pending.get("task_key") or "").strip().lower()
+        if card_id and pending_id and card_id == pending_id:
+            return True
+        if skill_id and task_key and skill_id == pending_skill and task_key == pending_task:
+            return True
+    return False
+
+
+def _is_intake_like_card(card: dict[str, Any]) -> bool:
+    skill_id = str(card.get("skill_id") or "").strip().lower()
+    task_key = str(card.get("task_key") or "").strip().lower()
+    return (
+        "intake-gate" in skill_id
+        or "capability-gap" in skill_id
+        or "intake_gate" in task_key
+        or "capability_gap" in task_key
+    )
+
+
+def _is_goal_completion_card(card: dict[str, Any]) -> bool:
+    skill_id = str(card.get("skill_id") or "").strip().lower()
+    task_key = str(card.get("task_key") or "").strip().lower()
+    return skill_id == "goal-completion" or task_key == "goal_completion"
+
+
+def _skill_error_target_task_id(card: dict[str, Any]) -> str:
+    skill_id = str(card.get("skill_id") or "").strip().lower()
+    if skill_id != "skill-error-analysis":
+        return ""
+    task_key = str(card.get("task_key") or "").strip().lower()
+    prefix = "workflow_confirm_"
+    suffix = "_skill-error-analysis"
+    if task_key.startswith(prefix) and task_key.endswith(suffix):
+        return task_key[len(prefix) : -len(suffix)].strip("_")
+    return ""
+
+
+def _is_stale_pending_card(card: dict[str, Any], snapshot: dict[str, Any] | None) -> bool:
+    runtime = _extract_runtime_snapshot(snapshot)
+    if not runtime:
+        return False
+
+    pending_cards = _as_list(runtime.get("pending_cards"))
+    if pending_cards:
+        return not _card_matches_pending_snapshot(card, pending_cards)
+
+    current_task_id = str(runtime.get("current_task_id") or "").strip().lower()
+    current_subgraph = str(runtime.get("current_subgraph") or "").strip().lower()
+    if _is_intake_like_card(card):
+        return current_task_id not in {"intake_gate", "legal_opinion_capability_gap"} and current_subgraph != "intake"
+    if _is_goal_completion_card(card):
+        return current_task_id != "goal_completion"
+    skill_error_target = _skill_error_target_task_id(card)
+    if skill_error_target:
+        return current_task_id not in {skill_error_target, ""}
+    return False
+
+
 def _pending_card_intercept_sse(card: dict[str, Any]) -> dict[str, Any]:
     return {
         "events": [{"event": "card", "data": card}],
         "pending_card": card,
         "output": "pending card intercepted",
+    }
+
+
+def _resume_detached_sse(card: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    task_key = str(card.get("task_key") or "").strip()
+    skill_id = str(card.get("skill_id") or "").strip()
+    content = "已提交当前卡片，流程已继续推进；旧卡回执未及时收尾，runner 改为按最新状态继续。"
+    return {
+        "events": [
+            {
+                "event": "user_message",
+                "data": {
+                    "role": "user",
+                    "content": content,
+                },
+            },
+            {
+                "event": "end",
+                "data": {
+                    "output": content,
+                    "reason": reason,
+                    "skill_id": skill_id,
+                    "task_key": task_key,
+                },
+            },
+        ],
+        "output": content,
     }
 
 
@@ -175,10 +295,15 @@ def _normalize_review_scope(value: Any) -> Any:
     s = str(value or "").strip().lower()
     if not s:
         return value
-    if s in {"full", "全面审查", "全面", "all"}:
-        return "full"
-    if s in {"focused", "重点条款审查", "重点审查", "重点", "partial"}:
-        return "focused"
+    aliases = {
+        "quick": {"quick", "快速审查", "快速筛查", "quick_review"},
+        "risk": {"risk", "风险审查", "风险筛查"},
+        "redline": {"redline", "红线审查", "red_line"},
+        "full": {"full", "全面审查", "全面", "all"},
+    }
+    for normalized, tokens in aliases.items():
+        if s in tokens:
+            return normalized
     return value
 
 
@@ -266,23 +391,19 @@ def _coerce_review_scope_for_options(value: Any, options: list[Any] | None) -> A
     if not opts:
         return normalized
 
-    if normalized == "full":
+    review_scope_tokens = {
+        "quick": ("quick", "快速"),
+        "risk": ("risk", "风险"),
+        "redline": ("redline", "红线"),
+        "full": ("full", "全面", "all"),
+    }
+    if normalized in review_scope_tokens:
         for opt in opts:
             picked = _option_answer_value(opt)
             if picked is None:
                 continue
             text = _option_match_text(opt)
-            if ("full" in text) or ("全面" in text) or ("all" in text):
-                return picked
-        return normalized
-
-    if normalized == "focused":
-        for opt in opts:
-            picked = _option_answer_value(opt)
-            if picked is None:
-                continue
-            text = _option_match_text(opt)
-            if ("focused" in text) or ("重点" in text) or ("partial" in text):
+            if any(token in text for token in review_scope_tokens[normalized]):
                 return picked
         return normalized
 
@@ -399,13 +520,12 @@ def _fallback_answer_for_missing_field(field_key: str, uploaded_file_ids: list[s
     if fk.endswith("file_ids"):
         return uploaded_file_ids
     if fk in {"profile.review_scope", "review_scope"}:
-        # contract-intake enforces enum values: focused/full.
-        # Prefer full to avoid introducing a new focus_areas follow-up dependency.
+        # contract-intake V2 enforces exact enum values.
         return "full"
     if fk in {"profile.summary"}:
         return "张三起诉李四民间借贷纠纷，借款10万元到期未还，请求返还本金及利息。"
-    if fk in {"profile.contract_type"}:
-        return "建设工程施工合同"
+    if fk in {"profile.contract_type_id"}:
+        return "construction"
     if fk in {"profile.document_type"}:
         return "民事起诉状"
     if fk in {"profile.court_name"}:
@@ -809,7 +929,7 @@ def auto_answer_card(
 
         value: Any | None = None
         if it in {"boolean", "bool"}:
-            if fk == "data.evidence.evidence_gap_stop_ask":
+            if fk.endswith(".evidence_gap_stop_ask"):
                 # Do not auto-stop evidence gap follow-up in E2E; keep this gate strict.
                 value = default if has_default else False
             elif fk == "data.work_product.regenerate_documents":
@@ -977,6 +1097,19 @@ def _is_unanswerable_card(card: dict[str, Any]) -> bool:
     return len(questions) == 0
 
 
+def _is_goal_completion_card(card: dict[str, Any]) -> bool:
+    if not isinstance(card, dict) or not card:
+        return False
+    if str(card.get("skill_id") or "").strip().lower() != "goal-completion":
+        return False
+    for row in (card.get("questions") if isinstance(card.get("questions"), list) else []):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("field_key") or "").strip() == "data.workbench.goal":
+            return True
+    return False
+
+
 def _compact_card_debug(card: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(card, dict):
         return {}
@@ -1081,6 +1214,16 @@ class WorkbenchFlow:
     _repeat_card_count: int = 0
     _last_step_used_nudge: bool = False
     _pending_card_poll_unavailable: bool = False
+
+    async def _get_workflow_snapshot(self) -> dict[str, Any] | None:
+        if not self.matter_id or not hasattr(self.client, "get_workflow_snapshot"):
+            return None
+        try:
+            snapshot_resp = await self.client.get_workflow_snapshot(self.matter_id)
+            snapshot_unwrapped = unwrap_api_response(snapshot_resp)
+            return snapshot_unwrapped if isinstance(snapshot_unwrapped, dict) else None
+        except Exception:
+            return None
 
     async def _runtime_progress_snapshot(self) -> dict[str, str]:
         snapshot: dict[str, str] = {
@@ -1242,10 +1385,49 @@ class WorkbenchFlow:
         card = unwrap_api_response(resp)
         self._pending_card_poll_unavailable = False
         if isinstance(card, dict) and card:
+            snapshot = await self._get_workflow_snapshot()
+            if _is_stale_pending_card(card, snapshot):
+                _debug(
+                    f"[flow] ignore stale pending card skill_id={card.get('skill_id')} "
+                    f"task_key={card.get('task_key')}"
+                )
+                return None
             _debug(
                 f"[flow] pending card skill_id={card.get('skill_id')} task_key={card.get('task_key')} review_type={card.get('review_type')}"
             )
         return card if isinstance(card, dict) and card else None
+
+    async def actionable_card_from_sse(self, sse: dict[str, Any] | None) -> dict[str, Any] | None:
+        sse_card = extract_last_card_from_sse(sse if isinstance(sse, dict) else {})
+        if not isinstance(sse_card, dict) or not sse_card:
+            return None
+
+        snapshot = await self._get_workflow_snapshot()
+        if _is_stale_pending_card(sse_card, snapshot):
+            _debug(
+                f"[flow] ignore stale sse card skill_id={sse_card.get('skill_id')} "
+                f"task_key={sse_card.get('task_key')}"
+            )
+            return None
+
+        if self._pending_card_poll_unavailable:
+            return sse_card
+
+        pending_card = await self.get_pending_card()
+        if isinstance(pending_card, dict) and pending_card:
+            if _card_matches_pending_snapshot(sse_card, [pending_card]):
+                return pending_card
+            _debug(
+                f"[flow] ignore unmatched sse card after clean pending-card poll "
+                f"skill_id={sse_card.get('skill_id')} task_key={sse_card.get('task_key')}"
+            )
+            return None
+
+        _debug(
+            f"[flow] ignore unconfirmed sse card after clean pending-card poll "
+            f"skill_id={sse_card.get('skill_id')} task_key={sse_card.get('task_key')}"
+        )
+        return None
 
     async def resume_card(self, card: dict[str, Any], *, max_loops: int | None = None) -> dict[str, Any]:
         # Keep an audit trail for assertions/debugging.
@@ -1272,12 +1454,32 @@ class WorkbenchFlow:
             f"payload={user_response}"
         )
         resolved_max_loops = _RESUME_MAX_LOOPS if max_loops is None else max(1, int(max_loops))
-        sse = await self.client.resume(
-            self.session_id,
-            user_response,
-            pending_card=card,
-            max_loops=resolved_max_loops,
+        resume_task = asyncio.create_task(
+            self.client.resume(
+                self.session_id,
+                user_response,
+                pending_card=card,
+                max_loops=resolved_max_loops,
+            )
         )
+        try:
+            if _CARD_RESUME_SETTLE_TIMEOUT_S > 0:
+                sse = await asyncio.wait_for(resume_task, timeout=_CARD_RESUME_SETTLE_TIMEOUT_S)
+            else:
+                sse = await resume_task
+        except asyncio.TimeoutError:
+            resume_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await resume_task
+            snapshot = await self._get_workflow_snapshot()
+            if _is_stale_pending_card(card, snapshot):
+                _debug(
+                    f"[flow] resume detached after timeout skill_id={card.get('skill_id')} "
+                    f"task_key={card.get('task_key')}"
+                )
+                sse = _resume_detached_sse(card, reason="state_advanced_past_card")
+            else:
+                raise
         try:
             assert_has_user_message(sse)
         except AssertionError:
@@ -1296,6 +1498,31 @@ class WorkbenchFlow:
             self.last_sse = sse
             self.seen_sse.append(sse)
         await self._emit_progress(label=f"nudge:{text[:24]}", sse=sse)
+        return sse
+
+    async def workflow_action(
+        self,
+        workflow_action: str,
+        *,
+        workflow_action_params: dict[str, Any] | None = None,
+        attachments: list[str] | None = None,
+        max_loops: int = 12,
+    ) -> dict[str, Any]:
+        _debug(
+            f"[flow] workflow_action action={workflow_action!r} params={workflow_action_params or {}} "
+            f"attachments={len(attachments or self.uploaded_file_ids)} max_loops={max_loops}"
+        )
+        sse = await self.client.workflow_action(
+            self.session_id,
+            workflow_action=workflow_action,
+            workflow_action_params=workflow_action_params or {},
+            attachments=attachments or self.uploaded_file_ids,
+            max_loops=max_loops,
+        )
+        if isinstance(sse, dict):
+            self.last_sse = sse
+            self.seen_sse.append(sse)
+        await self._emit_progress(label=f"action:{workflow_action}", sse=sse)
         return sse
 
     async def step(
@@ -1365,10 +1592,9 @@ class WorkbenchFlow:
 
             if skill_id == "reference-grounding" and self._repeat_card_count >= 3:
                 if not self.strict_card_driven:
-                    hint = _remediation_nudge_for_reference_grounding(card)
-                    _debug(f"[flow] reference-grounding remediation nudge repeat={self._repeat_card_count}")
+                    _debug(f"[flow] reference-grounding remediation workflow_action repeat={self._repeat_card_count}")
                     self._last_step_used_nudge = True
-                    return await self.nudge(hint, attachments=self.uploaded_file_ids, max_loops=12)
+                    return await self.workflow_action("references_refresh_partial", max_loops=12)
 
             if _is_unanswerable_card(card):
                 if sig == self._repeat_unanswerable_signature:
@@ -1410,7 +1636,7 @@ class WorkbenchFlow:
         # Some remote environments intermittently fail pending_card polling but still
         # emit the actionable card in the nudge stream itself. Consume it immediately
         # so the flow can continue without waiting for pending_card API consistency.
-        sse_card = extract_last_card_from_sse(sse if isinstance(sse, dict) else {})
+        sse_card = await self.actionable_card_from_sse(sse if isinstance(sse, dict) else {})
         if isinstance(sse_card, dict) and sse_card:
             # If the same step reached the nudge path, pending_card polling has already
             # returned empty. In that case the SSE-emitted card is the freshest truth,

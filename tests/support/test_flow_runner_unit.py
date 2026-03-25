@@ -281,6 +281,43 @@ async def test_resume_card_detaches_after_timeout_when_state_advanced_past_card(
     assert "继续推进" in str(sse.get("output"))
 
 
+@pytest.mark.asyncio
+async def test_resume_card_detaches_after_timeout_when_snapshot_only_shows_pending_count_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        async def resume(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(0.05)
+            return {"events": [{"event": "end", "data": {"output": "late"}}], "output": "late"}
+
+        async def get_workflow_snapshot(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "code": 0,
+                "data": {
+                    "matter": {"pending_task_count": 0},
+                    "analysis_state": {
+                        "current_task_id": "evidence_file_analysis_parallel",
+                        "current_subgraph": "analysis",
+                    },
+                },
+            }
+
+    monkeypatch.setattr("support.workbench.flow_runner._CARD_RESUME_SETTLE_TIMEOUT_S", 0.01)
+    flow = WorkbenchFlow(client=_Client(), session_id="session-timeout-2", matter_id="matter-timeout-2")
+    flow._emit_progress = lambda *args, **kwargs: asyncio.sleep(0)  # type: ignore[method-assign]
+    card = {
+        "id": "card-timeout-2",
+        "skill_id": "civil-analysis-intake",
+        "task_key": "workflow_input_case_intake_civil-analysis-intake",
+        "questions": [{"field_key": "profile.claims", "input_type": "text", "required": True}],
+    }
+
+    sse = await flow.resume_card(card, max_loops=4)
+
+    assert isinstance(sse, dict)
+    assert "继续推进" in str(sse.get("output"))
+
+
 def test_is_stale_pending_card_ignores_old_intake_card_after_runtime_leaves_intake() -> None:
     card = {
         "id": "card-1",
@@ -350,6 +387,40 @@ def test_is_stale_pending_card_keeps_current_skill_error_card() -> None:
             "current_subgraph": "analysis",
             "pending_cards": None,
         }
+    }
+
+    assert _is_stale_pending_card(card, snapshot) is False
+
+
+def test_is_stale_pending_card_ignores_generic_old_card_when_pending_task_count_is_zero() -> None:
+    card = {
+        "id": "card-4",
+        "skill_id": "civil-analysis-intake",
+        "task_key": "workflow_input_case_intake_civil-analysis-intake",
+    }
+    snapshot = {
+        "matter": {"pending_task_count": 0},
+        "analysis_state": {
+            "current_task_id": "evidence_file_analysis_parallel",
+            "current_subgraph": "analysis",
+        },
+    }
+
+    assert _is_stale_pending_card(card, snapshot) is True
+
+
+def test_is_stale_pending_card_keeps_generic_card_when_snapshot_still_has_pending_work() -> None:
+    card = {
+        "id": "card-5",
+        "skill_id": "cause-recommendation",
+        "task_key": "confirm_claim_path",
+    }
+    snapshot = {
+        "matter": {"pending_task_count": 1},
+        "analysis_state": {
+            "current_task_id": "case_cause",
+            "current_subgraph": "analysis",
+        },
     }
 
     assert _is_stale_pending_card(card, snapshot) is False

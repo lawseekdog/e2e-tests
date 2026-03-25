@@ -99,6 +99,50 @@ def _extract_runtime_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any]
     return {}
 
 
+def _snapshot_pending_task_count(snapshot: dict[str, Any] | None) -> int | None:
+    if not isinstance(snapshot, dict):
+        return None
+
+    candidates: list[Any] = [
+        _as_dict(snapshot.get("matter")).get("pending_task_count"),
+        snapshot.get("pending_task_count"),
+    ]
+    runtime = _extract_runtime_snapshot(snapshot)
+    if runtime:
+        candidates.extend(
+            [
+                runtime.get("pending_task_count"),
+                runtime.get("pending_card_count"),
+            ]
+        )
+
+    for raw in candidates:
+        if isinstance(raw, bool):
+            continue
+        if isinstance(raw, int):
+            return raw
+        text = str(raw or "").strip()
+        if text.isdigit():
+            return int(text)
+    return None
+
+
+def _snapshot_awaiting_user_input(snapshot: dict[str, Any] | None) -> bool | None:
+    runtime = _extract_runtime_snapshot(snapshot)
+    if not runtime:
+        return None
+
+    direct = runtime.get("awaiting_user_input")
+    if isinstance(direct, bool):
+        return direct
+
+    routing = _as_dict(runtime.get("routing"))
+    nested = routing.get("awaiting_user_input")
+    if isinstance(nested, bool):
+        return nested
+    return None
+
+
 def _card_matches_pending_snapshot(card: dict[str, Any], pending_cards: list[Any]) -> bool:
     if not isinstance(card, dict):
         return False
@@ -164,6 +208,11 @@ def _is_stale_pending_card(card: dict[str, Any], snapshot: dict[str, Any] | None
     skill_error_target = _skill_error_target_task_id(card)
     if skill_error_target:
         return current_task_id not in {skill_error_target, ""}
+
+    pending_task_count = _snapshot_pending_task_count(snapshot)
+    awaiting_user_input = _snapshot_awaiting_user_input(snapshot)
+    if pending_task_count == 0 and awaiting_user_input is not True and (current_task_id or current_subgraph):
+        return True
     return False
 
 
@@ -1424,10 +1473,10 @@ class WorkbenchFlow:
             return None
 
         _debug(
-            f"[flow] ignore unconfirmed sse card after clean pending-card poll "
+            f"[flow] reuse sse card after clean pending-card poll returned empty "
             f"skill_id={sse_card.get('skill_id')} task_key={sse_card.get('task_key')}"
         )
-        return None
+        return sse_card
 
     async def resume_card(self, card: dict[str, Any], *, max_loops: int | None = None) -> dict[str, Any]:
         # Keep an audit trail for assertions/debugging.

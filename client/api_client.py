@@ -392,8 +392,9 @@ class ApiClient:
             }
         # NOTE: auth-service exposes a form login endpoint; JSON login may be disabled by server config.
         # Use x-www-form-urlencoded to keep E2E stable across gateway/service implementations.
-        auth_base = self.service_base_urls.get(AUTH) or self.base_url
-        url = f"{auth_base}/auth/login"
+        auth_route = f"{AUTH}/auth/login"
+        auth_base, auth_path = self._resolve_base_for_path(auth_route)
+        url = f"{auth_base}{auth_path}"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         max_attempts = int(os.getenv("E2E_HTTP_LOGIN_RETRIES", "180") or 180)
         transient = {500, 502, 503, 504}

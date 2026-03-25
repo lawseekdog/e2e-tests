@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 import sys
 
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 os.environ.setdefault("E2E_STRICT_CARD_DRIVEN", "0")
 

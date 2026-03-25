@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("E2E_STRICT_CARD_DRIVEN", "0")
 

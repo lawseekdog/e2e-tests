@@ -53,6 +53,54 @@ FLOW_OVERRIDES = {
     "profile.legal_issue": "借贷关系成立、本金返还、逾期利息支持。",
 }
 
+_DEFAULT_REMOTE_STACK_HOST = "100.116.203.71"
+_DEFAULT_LOCAL_CONSULTATIONS_BASE_URL = "http://127.0.0.1:18021/api/v1"
+_DEFAULT_REMOTE_FILES_PORT = 18104
+_DEFAULT_REMOTE_MATTER_PORT = 18107
+
+
+def _api_url(host: str, port: int) -> str:
+    return f"http://{host}:{int(port)}/api/v1"
+
+
+def _configure_direct_service_mode(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
+    remote_stack_host = (
+        _safe_str(os.getenv("LAWSEEKDOG_REMOTE_STACK_HOST"))
+        or _safe_str(os.getenv("REMOTE_STACK_HOST"))
+        or _DEFAULT_REMOTE_STACK_HOST
+    )
+    consultations_base_url = (
+        _safe_str(args.consultations_base_url)
+        or _safe_str(os.getenv("E2E_CONSULTATIONS_BASE_URL"))
+        or _DEFAULT_LOCAL_CONSULTATIONS_BASE_URL
+    )
+    files_base_url = (
+        _safe_str(args.files_base_url)
+        or _safe_str(os.getenv("E2E_FILES_BASE_URL"))
+        or _api_url(remote_stack_host, _DEFAULT_REMOTE_FILES_PORT)
+    )
+    matter_base_url = (
+        _safe_str(args.matter_base_url)
+        or _safe_str(os.getenv("E2E_MATTER_BASE_URL"))
+        or _api_url(remote_stack_host, _DEFAULT_REMOTE_MATTER_PORT)
+    )
+
+    os.environ["E2E_CONSULTATIONS_BASE_URL"] = consultations_base_url
+    os.environ["E2E_FILES_BASE_URL"] = files_base_url
+    os.environ["E2E_MATTER_BASE_URL"] = matter_base_url
+    os.environ["E2E_DIRECT_USER_ID"] = _safe_str(args.direct_user_id) or _safe_str(os.getenv("E2E_DIRECT_USER_ID")) or "1"
+    os.environ["E2E_DIRECT_ORG_ID"] = _safe_str(args.direct_org_id) or _safe_str(os.getenv("E2E_DIRECT_ORG_ID")) or "1"
+    os.environ["E2E_DIRECT_IS_SUPERUSER"] = str(os.getenv("E2E_DIRECT_IS_SUPERUSER") or "false")
+
+    return consultations_base_url, {
+        "consultations_base_url": consultations_base_url,
+        "files_base_url": files_base_url,
+        "matter_base_url": matter_base_url,
+        "direct_user_id": os.environ["E2E_DIRECT_USER_ID"],
+        "direct_org_id": os.environ["E2E_DIRECT_ORG_ID"],
+        "remote_stack_host": remote_stack_host,
+    }
+
 def _extract_analysis_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
@@ -84,7 +132,12 @@ def _extract_pricing_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
 async def run(args: argparse.Namespace) -> int:
     load_real_flow_env(repo_root=REPO_ROOT, e2e_root=E2E_ROOT)
 
-    base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
+    direct_mode = not bool(args.use_gateway)
+    direct_config: dict[str, str] = {}
+    if direct_mode:
+        base_url, direct_config = _configure_direct_service_mode(args)
+    else:
+        base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
     username = _safe_str(args.username) or _safe_str(os.getenv("LAWYER_USERNAME")) or "lawyer1"
     password = _safe_str(args.password) or _safe_str(os.getenv("LAWYER_PASSWORD")) or "lawyer123456"
     kickoff = _safe_str(args.kickoff) or DEFAULT_KICKOFF
@@ -104,6 +157,15 @@ async def run(args: argparse.Namespace) -> int:
     )
 
     print(f"[config] base_url={base_url}")
+    print(f"[config] direct_service_mode={direct_mode}")
+    if direct_mode:
+        print(f"[config] consultations_base_url={direct_config.get('consultations_base_url') or '-'}")
+        print(f"[config] files_base_url={direct_config.get('files_base_url') or '-'}")
+        print(f"[config] matter_base_url={direct_config.get('matter_base_url') or '-'}")
+        print(f"[config] direct_user_id={direct_config.get('direct_user_id') or '-'}")
+        print(f"[config] direct_org_id={direct_config.get('direct_org_id') or '-'}")
+    else:
+        print("[config] gateway_mode=true")
     print(f"[config] user={username}")
     print(f"[config] output_dir={out_dir}")
 
@@ -250,6 +312,12 @@ async def run(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run analysis workflow via consultations WS (real LLM).")
     parser.add_argument("--base-url", default="", help="Gateway base URL, e.g. http://host/api/v1")
+    parser.add_argument("--use-gateway", action="store_true", default=False, help="Use gateway mode instead of direct local/remote service URLs")
+    parser.add_argument("--consultations-base-url", default="", help="Direct consultations-service base URL")
+    parser.add_argument("--files-base-url", default="", help="Direct files-service base URL")
+    parser.add_argument("--matter-base-url", default="", help="Direct matter-service base URL")
+    parser.add_argument("--direct-user-id", default="", help="Direct service mode user id (default: 1)")
+    parser.add_argument("--direct-org-id", default="", help="Direct service mode organization id (default: 1)")
     parser.add_argument("--username", default="", help="Lawyer username")
     parser.add_argument("--password", default="", help="Lawyer password")
     parser.add_argument("--kickoff", default=DEFAULT_KICKOFF, help="Initial user query")

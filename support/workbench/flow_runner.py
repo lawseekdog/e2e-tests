@@ -453,13 +453,7 @@ def _parse_missing_fields(text: str) -> list[str]:
 def _infer_missing_fields_from_card(card: dict[str, Any]) -> list[str]:
     if not isinstance(card, dict) or not card:
         return []
-    merged = " ".join(
-        [
-            str(card.get("prompt") or ""),
-            str(card.get("message") or ""),
-            str(card.get("title") or ""),
-        ]
-    ).strip()
+    merged = _card_text_blob(card)
     if not merged:
         return []
     return _parse_missing_fields(merged)
@@ -508,7 +502,7 @@ def _is_doc_draft_recovery_card(card: dict[str, Any]) -> bool:
     if str(card.get("skill_id") or "").strip() != "skill-error-analysis":
         return False
     task_key = str(card.get("task_key") or "").strip().lower()
-    prompt = str(card.get("prompt") or "").strip().lower()
+    prompt = _card_text_blob(card).lower()
     return (
         "doc_draft" in task_key
         or "doc_generation" in task_key
@@ -518,7 +512,7 @@ def _is_doc_draft_recovery_card(card: dict[str, Any]) -> bool:
 
 
 def _extract_doc_draft_targets(card: dict[str, Any]) -> list[tuple[str, str]]:
-    prompt = str(card.get("prompt") or "")
+    prompt = _card_text_blob(card)
     prompt_lower = prompt.lower()
     task_key = str(card.get("task_key") or "").strip().lower()
     found: dict[str, str] = {}
@@ -1069,11 +1063,11 @@ def _compact_card_debug(card: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(card, dict):
         return {}
     out: dict[str, Any] = {}
-    for key in ("skill_id", "task_key", "review_type", "title"):
+    for key in ("skill_id", "task_key", "review_type"):
         value = str(card.get(key) or "").strip()
         if value:
             out[key] = value
-    prompt = str(card.get("prompt") or card.get("message") or "").strip()
+    prompt = _card_text_blob(card)
     if prompt:
         out["prompt"] = prompt[:300]
     questions = card.get("questions")
@@ -1102,14 +1096,7 @@ def _compact_sse_events(sse: dict[str, Any] | None) -> str:
 def _remediation_nudge_for_unanswerable_card(card: dict[str, Any]) -> str | None:
     if not isinstance(card, dict) or not card:
         return None
-    prompt = " ".join(
-        [
-            str(card.get("prompt") or ""),
-            str(card.get("message") or ""),
-            str(card.get("title") or ""),
-            str(card.get("task_key") or ""),
-        ]
-    )
+    prompt = _card_text_blob(card, include_task_key=True)
     s = prompt.strip()
     if not s:
         return None
@@ -1134,13 +1121,7 @@ def _remediation_nudge_for_unanswerable_card(card: dict[str, Any]) -> str | None
 
 
 def _remediation_nudge_for_reference_grounding(card: dict[str, Any]) -> str:
-    prompt = " ".join(
-        [
-            str(card.get("prompt") or ""),
-            str(card.get("message") or ""),
-            str(card.get("title") or ""),
-        ]
-    )
+    prompt = _card_text_blob(card)
     if any(token in prompt for token in ("工伤", "视同工伤", "赵丽珍")):
         return (
             "补充检索关键词：工伤认定、视同工伤、非因工死亡、宿舍猝死、劳动关系证明、赔偿责任。"

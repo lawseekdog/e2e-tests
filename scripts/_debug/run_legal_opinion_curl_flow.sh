@@ -166,7 +166,7 @@ jq -nc \
   --arg output_preview "$(json_get '.data.output' "$OUTPUT_DIR/chat-1.json" | cut -c 1-200)" \
   --arg card_id "$(json_get '.data.card.id' "$OUTPUT_DIR/chat-1.json")" \
   --arg card_skill_id "$(json_get '.data.card.skill_id' "$OUTPUT_DIR/chat-1.json")" \
-  --arg pending_card_id "$(json_get '.data.id // .data.card_id' "$OUTPUT_DIR/pending-1.json")" \
+  --arg pending_card_id "$(json_get '.data.id' "$OUTPUT_DIR/pending-1.json")" \
   --arg pending_skill_id "$(json_get '.data.skill_id' "$OUTPUT_DIR/pending-1.json")" \
   --arg pending_type "$(json_get '.data.type' "$OUTPUT_DIR/pending-1.json")" \
   --arg deliverable_count "$(jq -r '(.data.deliverables // []) | length' "$OUTPUT_DIR/deliverables-1.json")" \

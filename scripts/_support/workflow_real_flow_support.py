@@ -107,9 +107,9 @@ def configure_direct_service_mode(
     os.environ["E2E_KNOWLEDGE_BASE_URL"] = resolved_knowledge
     os.environ["E2E_TEMPLATES_BASE_URL"] = resolved_templates
 
-    uid = safe_str(direct_user_id) or safe_str(os.getenv("E2E_DIRECT_USER_ID"))
-    oid = safe_str(direct_org_id) or safe_str(os.getenv("E2E_DIRECT_ORG_ID"))
-    superuser = safe_str(direct_is_superuser) or safe_str(os.getenv("E2E_DIRECT_IS_SUPERUSER"))
+    uid = safe_str(direct_user_id) or safe_str(os.getenv("E2E_DIRECT_USER_ID")) or "2"
+    oid = safe_str(direct_org_id) or safe_str(os.getenv("E2E_DIRECT_ORG_ID")) or "1"
+    superuser = safe_str(direct_is_superuser) or safe_str(os.getenv("E2E_DIRECT_IS_SUPERUSER")) or "false"
     if uid:
         os.environ["E2E_DIRECT_USER_ID"] = uid
     else:

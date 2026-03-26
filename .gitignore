@@ -13,3 +13,6 @@ __pycache__/
 
 # Local E2E debug bundles
 output/
+
+# Local environment overrides
+.env

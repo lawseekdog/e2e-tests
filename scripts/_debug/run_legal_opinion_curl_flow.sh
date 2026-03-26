@@ -164,9 +164,9 @@ jq -nc \
   --arg chat_success "$(json_get '.data.success' "$OUTPUT_DIR/chat-1.json")" \
   --arg chat_error "$(json_get '.data.error' "$OUTPUT_DIR/chat-1.json")" \
   --arg output_preview "$(json_get '.data.output' "$OUTPUT_DIR/chat-1.json" | cut -c 1-200)" \
-  --arg card_id "$(json_get '.data.card.id' "$OUTPUT_DIR/chat-1.json")" \
+  --arg cardId "$(json_get '.data.card.id' "$OUTPUT_DIR/chat-1.json")" \
   --arg card_skill_id "$(json_get '.data.card.skill_id' "$OUTPUT_DIR/chat-1.json")" \
-  --arg pending_card_id "$(json_get '.data.id' "$OUTPUT_DIR/pending-1.json")" \
+  --arg pendingCardId "$(json_get '.data.id' "$OUTPUT_DIR/pending-1.json")" \
   --arg pending_skill_id "$(json_get '.data.skill_id' "$OUTPUT_DIR/pending-1.json")" \
   --arg pending_type "$(json_get '.data.type' "$OUTPUT_DIR/pending-1.json")" \
   --arg deliverable_count "$(jq -r '(.data.deliverables // []) | length' "$OUTPUT_DIR/deliverables-1.json")" \
@@ -179,9 +179,9 @@ jq -nc \
     chat_success: $chat_success,
     chat_error: $chat_error,
     output_preview: $output_preview,
-    card_id: $card_id,
+    cardId: $cardId,
     card_skill_id: $card_skill_id,
-    pending_card_id: $pending_card_id,
+    pendingCardId: $pendingCardId,
     pending_skill_id: $pending_skill_id,
     pending_type: $pending_type,
     deliverable_count: $deliverable_count,

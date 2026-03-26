@@ -706,9 +706,9 @@ class ApiClient:
         answers_or_payload: dict[str, Any] | list[dict[str, Any]],
         pending_card: dict[str, Any] | None = None,
         max_loops: int | None = None,
-        card_id: str | None = None,
+        cardId: str | None = None,
     ) -> dict[str, Any]:
-        resolved_card_id = str(card_id or "").strip() or _extract_pending_card_id(pending_card)
+        resolved_card_id = str(cardId or "").strip() or _extract_pending_card_id(pending_card)
         if not resolved_card_id:
             raise ValueError("resume requires pending card id (cardId)")
 

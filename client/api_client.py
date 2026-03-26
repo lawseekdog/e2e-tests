@@ -70,7 +70,7 @@ def _resolve_ws_protocol_ping_interval() -> float | None:
 def _extract_pending_card_id(card: dict[str, Any] | None) -> str:
     if not isinstance(card, dict):
         return ""
-    return str(card.get("id") or card.get("card_id") or "").strip()
+    return str(card.get("id") or "").strip()
 
 
 class ApiClient:

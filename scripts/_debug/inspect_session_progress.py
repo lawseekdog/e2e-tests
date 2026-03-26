@@ -117,7 +117,7 @@ async def main() -> None:
             "matter_id": matter_id,
             "current_phase": str(phase_timeline.get("current_phase") or phase_timeline.get("currentPhase") or ""),
             "pending_card": {
-                "id": str((pending_card or {}).get("id") or (pending_card or {}).get("card_id") or ""),
+                "id": str((pending_card or {}).get("id") or ""),
                 "skill_id": str((pending_card or {}).get("skill_id") or ""),
                 "task_key": str((pending_card or {}).get("task_key") or ""),
                 "review_type": str((pending_card or {}).get("review_type") or ""),

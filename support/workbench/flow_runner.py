@@ -146,12 +146,12 @@ def _snapshot_awaiting_user_input(snapshot: dict[str, Any] | None) -> bool | Non
 def _card_matches_pending_snapshot(card: dict[str, Any], pending_cards: list[Any]) -> bool:
     if not isinstance(card, dict):
         return False
-    card_id = str(card.get("id") or card.get("card_id") or "").strip()
+    card_id = str(card.get("id") or "").strip()
     skill_id = str(card.get("skill_id") or "").strip().lower()
     task_key = str(card.get("task_key") or "").strip().lower()
     for row in pending_cards:
         pending = _as_dict(row)
-        pending_id = str(pending.get("id") or pending.get("card_id") or "").strip()
+        pending_id = str(pending.get("id") or "").strip()
         pending_skill = str(pending.get("skill_id") or "").strip().lower()
         pending_task = str(pending.get("task_key") or "").strip().lower()
         if card_id and pending_id and card_id == pending_id:
@@ -1262,8 +1262,6 @@ class WorkbenchFlow:
     _repeat_card_signature: str | None = None
     _repeat_card_count: int = 0
     _last_step_used_nudge: bool = False
-    _pending_card_poll_unavailable: bool = False
-
     async def _get_workflow_snapshot(self) -> dict[str, Any] | None:
         if not self.matter_id or not hasattr(self.client, "get_workflow_snapshot"):
             return None
@@ -1408,7 +1406,6 @@ class WorkbenchFlow:
 
     async def get_pending_card(self) -> dict[str, Any] | None:
         if self.session_archived:
-            self._pending_card_poll_unavailable = False
             return None
         try:
             resp = await self.client.get_pending_card(self.session_id)
@@ -1420,63 +1417,24 @@ class WorkbenchFlow:
                     self.session_archived = True
                     self.session_status = "archived"
                     _debug("[flow] pending card blocked: session archived")
-                    self._pending_card_poll_unavailable = False
                     return None
             if code in {400, 404, 409, 429, 500, 502, 503, 504}:
                 _debug(f"[flow] pending card unavailable status={code}")
-                self._pending_card_poll_unavailable = True
                 return None
             raise
         except httpx.RequestError:
             _debug("[flow] pending card request error")
-            self._pending_card_poll_unavailable = True
             return None
         card = unwrap_api_response(resp)
-        self._pending_card_poll_unavailable = False
         if isinstance(card, dict) and card:
-            snapshot = await self._get_workflow_snapshot()
-            if _is_stale_pending_card(card, snapshot):
-                _debug(
-                    f"[flow] ignore stale pending card skill_id={card.get('skill_id')} "
-                    f"task_key={card.get('task_key')}"
-                )
-                return None
             _debug(
                 f"[flow] pending card skill_id={card.get('skill_id')} task_key={card.get('task_key')} review_type={card.get('review_type')}"
             )
         return card if isinstance(card, dict) and card else None
 
     async def actionable_card_from_sse(self, sse: dict[str, Any] | None) -> dict[str, Any] | None:
-        sse_card = extract_last_card_from_sse(sse if isinstance(sse, dict) else {})
-        if not isinstance(sse_card, dict) or not sse_card:
-            return None
-
-        snapshot = await self._get_workflow_snapshot()
-        if _is_stale_pending_card(sse_card, snapshot):
-            _debug(
-                f"[flow] ignore stale sse card skill_id={sse_card.get('skill_id')} "
-                f"task_key={sse_card.get('task_key')}"
-            )
-            return None
-
-        if self._pending_card_poll_unavailable:
-            return sse_card
-
-        pending_card = await self.get_pending_card()
-        if isinstance(pending_card, dict) and pending_card:
-            if _card_matches_pending_snapshot(sse_card, [pending_card]):
-                return pending_card
-            _debug(
-                f"[flow] ignore unmatched sse card after clean pending-card poll "
-                f"skill_id={sse_card.get('skill_id')} task_key={sse_card.get('task_key')}"
-            )
-            return None
-
-        _debug(
-            f"[flow] reuse sse card after clean pending-card poll returned empty "
-            f"skill_id={sse_card.get('skill_id')} task_key={sse_card.get('task_key')}"
-        )
-        return sse_card
+        _ = sse
+        return None
 
     async def resume_card(self, card: dict[str, Any], *, max_loops: int | None = None) -> dict[str, Any]:
         # Keep an audit trail for assertions/debugging.
@@ -1520,15 +1478,7 @@ class WorkbenchFlow:
             resume_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await resume_task
-            snapshot = await self._get_workflow_snapshot()
-            if _is_stale_pending_card(card, snapshot):
-                _debug(
-                    f"[flow] resume detached after timeout skill_id={card.get('skill_id')} "
-                    f"task_key={card.get('task_key')}"
-                )
-                sse = _resume_detached_sse(card, reason="state_advanced_past_card")
-            else:
-                raise
+            raise
         try:
             assert_has_user_message(sse)
         except AssertionError:
@@ -1588,42 +1538,6 @@ class WorkbenchFlow:
             return {"events": [{"event": "session_archived"}], "output": "session archived"}
         card = await self.get_pending_card()
         if card:
-            snapshot = await self._get_workflow_snapshot()
-            if _is_stale_pending_card(card, snapshot):
-                _debug(
-                    f"[flow] ignore stale pending card before resume skill_id={card.get('skill_id')} "
-                    f"task_key={card.get('task_key')}"
-                )
-                card = None
-            if not card:
-                self._repeat_card_signature = None
-                self._repeat_card_count = 0
-                self._repeat_unanswerable_signature = None
-                self._repeat_unanswerable_count = 0
-                self._last_step_used_nudge = False
-                if not allow_nudge:
-                    return None
-                if not _AUTO_NUDGE:
-                    return None
-                _debug(f"[flow] nudge {nudge_text!r}")
-                self._last_step_used_nudge = True
-                sse = await self.nudge(nudge_text, attachments=self.uploaded_file_ids, max_loops=8)
-                sse_card = await self.actionable_card_from_sse(sse if isinstance(sse, dict) else {})
-                if isinstance(sse_card, dict) and sse_card:
-                    if stop_on_pending_card is not None and stop_on_pending_card(sse_card):
-                        _debug(
-                            f"[flow] nudge produced interceptable card skill_id={sse_card.get('skill_id')} "
-                            f"task_key={sse_card.get('task_key')}"
-                        )
-                        if isinstance(sse, dict):
-                            sse["pending_card"] = sse_card
-                        return sse
-                    _debug(
-                        f"[flow] nudge produced card skill_id={sse_card.get('skill_id')} "
-                        f"task_key={sse_card.get('task_key')}; resume directly"
-                    )
-                    return await self.resume_card(sse_card)
-                return sse
             self._last_step_used_nudge = False
             sig = card_signature(card)
             if sig == self._repeat_card_signature:
@@ -1717,29 +1631,7 @@ class WorkbenchFlow:
             return None
         _debug(f"[flow] nudge {nudge_text!r}")
         self._last_step_used_nudge = True
-        sse = await self.nudge(nudge_text, attachments=self.uploaded_file_ids, max_loops=8)
-        # Some remote environments intermittently fail pending_card polling but still
-        # emit the actionable card in the nudge stream itself. Consume it immediately
-        # so the flow can continue without waiting for pending_card API consistency.
-        sse_card = await self.actionable_card_from_sse(sse if isinstance(sse, dict) else {})
-        if isinstance(sse_card, dict) and sse_card:
-            # If the same step reached the nudge path, pending_card polling has already
-            # returned empty. In that case the SSE-emitted card is the freshest truth,
-            # even when the poll endpoint itself responded 200 instead of an error.
-            if stop_on_pending_card is not None and stop_on_pending_card(sse_card):
-                _debug(
-                    f"[flow] nudge produced interceptable card skill_id={sse_card.get('skill_id')} "
-                    f"task_key={sse_card.get('task_key')}"
-                )
-                if isinstance(sse, dict):
-                    sse["pending_card"] = sse_card
-                return sse
-            _debug(
-                f"[flow] nudge produced card skill_id={sse_card.get('skill_id')} "
-                f"task_key={sse_card.get('task_key')}; resume directly"
-            )
-            return await self.resume_card(sse_card)
-        return sse
+        return await self.nudge(nudge_text, attachments=self.uploaded_file_ids, max_loops=8)
 
     async def run_until(
         self,

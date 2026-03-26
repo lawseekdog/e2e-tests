@@ -80,7 +80,7 @@ def _compact_pending_card(card: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(card, dict):
         return {}
     return {
-        "id": _safe_str(card.get("id") or card.get("card_id")),
+        "id": _safe_str(card.get("id")),
         "skill_id": _safe_str(card.get("skill_id")),
         "task_key": _safe_str(card.get("task_key")),
         "review_type": _safe_str(card.get("review_type")),

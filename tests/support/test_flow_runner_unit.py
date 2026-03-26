@@ -6,7 +6,6 @@ import pytest
 
 from support.workbench.flow_runner import (
     WorkbenchFlow,
-    _is_stale_pending_card,
     auto_answer_card,
     card_signature,
 )
@@ -60,25 +59,20 @@ async def test_step_intercepts_goal_completion_card_emitted_from_nudge() -> None
     async def _nudge(*args, **kwargs):  # type: ignore[no-untyped-def]
         return {"events": [{"event": "card", "data": goal_card}], "output": "合同审查已完成。"}
 
-    async def _resume_card(*args, **kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("resume_card should not run for nudge-intercepted goal-completion card")
-
     flow.refresh = _refresh  # type: ignore[method-assign]
     flow.get_pending_card = _get_pending_card  # type: ignore[method-assign]
     flow.nudge = _nudge  # type: ignore[method-assign]
-    flow.resume_card = _resume_card  # type: ignore[method-assign]
-    flow._pending_card_poll_unavailable = True
 
     result = await flow.step(
         stop_on_pending_card=lambda card: str(card.get("skill_id")) == "goal-completion",
     )
 
     assert isinstance(result, dict)
-    assert result.get("pending_card") == goal_card
+    assert result.get("output") == "合同审查已完成。"
 
 
 @pytest.mark.asyncio
-async def test_step_resumes_sse_card_even_when_pending_poll_returned_empty() -> None:
+async def test_step_does_not_resume_sse_card_when_pending_poll_returned_empty() -> None:
     review_card = {
         "skill_id": "civil-analysis-intake",
         "task_key": "intake_clarify",
@@ -95,19 +89,14 @@ async def test_step_resumes_sse_card_even_when_pending_poll_returned_empty() -> 
     async def _nudge(*args, **kwargs):  # type: ignore[no-untyped-def]
         return {"events": [{"event": "card", "data": review_card}], "output": "需要补充案件信息。"}
 
-    async def _resume_card(card, *args, **kwargs):  # type: ignore[no-untyped-def]
-        return {"pending_card": card, "events": [{"event": "user_message"}]}
-
     flow.refresh = _refresh  # type: ignore[method-assign]
     flow.get_pending_card = _get_pending_card  # type: ignore[method-assign]
     flow.nudge = _nudge  # type: ignore[method-assign]
-    flow.resume_card = _resume_card  # type: ignore[method-assign]
-    flow._pending_card_poll_unavailable = True
 
     result = await flow.step()
 
     assert isinstance(result, dict)
-    assert result.get("pending_card") == review_card
+    assert result.get("output") == "需要补充案件信息。"
 
 
 def test_auto_answer_card_covers_basic_card_input_types() -> None:
@@ -247,7 +236,7 @@ async def test_workflow_action_uses_websocket_actions_endpoint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_card_detaches_after_timeout_when_state_advanced_past_card(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_resume_card_raises_after_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Client:
         async def resume(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
             await asyncio.sleep(0.05)
@@ -275,15 +264,12 @@ async def test_resume_card_detaches_after_timeout_when_state_advanced_past_card(
         "questions": [{"field_key": "profile.background", "input_type": "text", "required": True}],
     }
 
-    sse = await flow.resume_card(card, max_loops=4)
-
-    assert isinstance(sse, dict)
-    assert sse.get("output")
-    assert "继续推进" in str(sse.get("output"))
+    with pytest.raises(asyncio.TimeoutError):
+        await flow.resume_card(card, max_loops=4)
 
 
 @pytest.mark.asyncio
-async def test_resume_card_detaches_after_timeout_when_snapshot_only_shows_pending_count_zero(
+async def test_resume_card_raises_after_timeout_even_when_snapshot_pending_count_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Client:
@@ -313,122 +299,12 @@ async def test_resume_card_detaches_after_timeout_when_snapshot_only_shows_pendi
         "questions": [{"field_key": "profile.claims", "input_type": "text", "required": True}],
     }
 
-    sse = await flow.resume_card(card, max_loops=4)
-
-    assert isinstance(sse, dict)
-    assert "继续推进" in str(sse.get("output"))
-
-
-def test_is_stale_pending_card_ignores_old_intake_card_after_runtime_leaves_intake() -> None:
-    card = {
-        "id": "card-1",
-        "skill_id": "legal_opinion-intake-gate",
-        "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
-    }
-    snapshot = {
-        "workbench_runtime": {
-            "current_task_id": "references",
-            "current_subgraph": "analysis",
-            "pending_cards": [],
-        }
-    }
-
-    assert _is_stale_pending_card(card, snapshot) is True
-
-
-def test_is_stale_pending_card_keeps_runtime_pending_card_match() -> None:
-    card = {
-        "id": "card-1",
-        "skill_id": "legal_opinion-intake-gate",
-        "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
-    }
-    snapshot = {
-        "workbench_runtime": {
-            "current_task_id": "references",
-            "current_subgraph": "analysis",
-            "pending_cards": [
-                {
-                    "id": "card-1",
-                    "skill_id": "legal_opinion-intake-gate",
-                    "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
-                }
-            ],
-        }
-    }
-
-    assert _is_stale_pending_card(card, snapshot) is False
-
-
-def test_is_stale_pending_card_ignores_old_skill_error_card_after_runtime_moves_on() -> None:
-    card = {
-        "id": "card-2",
-        "skill_id": "skill-error-analysis",
-        "task_key": "workflow_confirm_evidence_conflicts_skill-error-analysis",
-    }
-    snapshot = {
-        "workbench_runtime": {
-            "current_task_id": "references_finalize",
-            "current_subgraph": "analysis",
-            "pending_cards": None,
-        }
-    }
-
-    assert _is_stale_pending_card(card, snapshot) is True
-
-
-def test_is_stale_pending_card_keeps_current_skill_error_card() -> None:
-    card = {
-        "id": "card-3",
-        "skill_id": "skill-error-analysis",
-        "task_key": "workflow_confirm_evidence_conflicts_skill-error-analysis",
-    }
-    snapshot = {
-        "workbench_runtime": {
-            "current_task_id": "evidence_conflicts",
-            "current_subgraph": "analysis",
-            "pending_cards": None,
-        }
-    }
-
-    assert _is_stale_pending_card(card, snapshot) is False
-
-
-def test_is_stale_pending_card_ignores_generic_old_card_when_pending_task_count_is_zero() -> None:
-    card = {
-        "id": "card-4",
-        "skill_id": "civil-analysis-intake",
-        "task_key": "workflow_input_case_intake_civil-analysis-intake",
-    }
-    snapshot = {
-        "matter": {"pending_task_count": 0},
-        "analysis_state": {
-            "current_task_id": "evidence_file_analysis_parallel",
-            "current_subgraph": "analysis",
-        },
-    }
-
-    assert _is_stale_pending_card(card, snapshot) is True
-
-
-def test_is_stale_pending_card_keeps_generic_card_when_snapshot_still_has_pending_work() -> None:
-    card = {
-        "id": "card-5",
-        "skill_id": "cause-recommendation",
-        "task_key": "confirm_claim_path",
-    }
-    snapshot = {
-        "matter": {"pending_task_count": 1},
-        "analysis_state": {
-            "current_task_id": "case_cause",
-            "current_subgraph": "analysis",
-        },
-    }
-
-    assert _is_stale_pending_card(card, snapshot) is False
+    with pytest.raises(asyncio.TimeoutError):
+        await flow.resume_card(card, max_loops=4)
 
 
 @pytest.mark.asyncio
-async def test_get_pending_card_filters_stale_intake_card_using_workbench_snapshot() -> None:
+async def test_get_pending_card_returns_api_card_without_snapshot_filtering() -> None:
     card = {
         "id": "card-1",
         "skill_id": "legal_opinion-intake-gate",
@@ -438,85 +314,24 @@ async def test_get_pending_card_filters_stale_intake_card_using_workbench_snapsh
     class _Client:
         async def get_pending_card(self, _session_id: str):  # type: ignore[no-untyped-def]
             return {"code": 0, "data": card}
-
-        async def get_workflow_snapshot(self, _matter_id: str):  # type: ignore[no-untyped-def]
-            return {
-                "code": 0,
-                "data": {
-                    "workbench_runtime": {
-                        "current_task_id": "references",
-                        "current_subgraph": "analysis",
-                        "pending_cards": [],
-                    }
-                },
-            }
 
     flow = WorkbenchFlow(client=_Client(), session_id="session-5", matter_id="matter-5")
-
-    assert await flow.get_pending_card() is None
+    card = await flow.get_pending_card()
+    assert card == {
+        "id": "card-1",
+        "skill_id": "legal_opinion-intake-gate",
+        "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
+    }
 
 
 @pytest.mark.asyncio
-async def test_get_pending_card_filters_stale_skill_error_card_using_workbench_snapshot() -> None:
+async def test_actionable_card_from_sse_returns_none_without_pending_card_api_confirmation() -> None:
     card = {
         "id": "card-2",
         "skill_id": "skill-error-analysis",
         "task_key": "workflow_confirm_evidence_conflicts_skill-error-analysis",
     }
 
-    class _Client:
-        async def get_pending_card(self, _session_id: str):  # type: ignore[no-untyped-def]
-            return {"code": 0, "data": card}
-
-        async def get_workflow_snapshot(self, _matter_id: str):  # type: ignore[no-untyped-def]
-            return {
-                "code": 0,
-                "data": {
-                    "workbench_runtime": {
-                        "current_task_id": "references_finalize",
-                        "current_subgraph": "analysis",
-                        "pending_cards": None,
-                    }
-                },
-            }
-
-    flow = WorkbenchFlow(client=_Client(), session_id="session-6", matter_id="matter-6")
-
-    assert await flow.get_pending_card() is None
-
-
-@pytest.mark.asyncio
-async def test_actionable_card_from_sse_ignores_unconfirmed_card_after_clean_pending_poll() -> None:
-    stale_card = {
-        "id": "card-stale",
-        "skill_id": "legal_opinion-intake-gate",
-        "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
-    }
-
-    class _Client:
-        async def get_pending_card(self, _session_id: str):  # type: ignore[no-untyped-def]
-            return {"code": 0, "data": None}
-
-        async def get_workflow_snapshot(self, _matter_id: str):  # type: ignore[no-untyped-def]
-            return {
-                "code": 0,
-                "data": {
-                    "workbench_runtime": {
-                        "current_task_id": "evidence_sufficiency_seed",
-                        "current_subgraph": "analysis",
-                        "pending_cards": [],
-                    }
-                },
-            }
-
-    flow = WorkbenchFlow(client=_Client(), session_id="session-7", matter_id="matter-7")
-    sse = {"events": [{"event": "card", "data": stale_card}]}
-
-    assert await flow.actionable_card_from_sse(sse) is None
-
-
-@pytest.mark.asyncio
-async def test_actionable_card_from_sse_uses_matching_pending_card_when_available() -> None:
     sse_card = {
         "id": "card-live",
         "skill_id": "goal-completion",
@@ -527,31 +342,18 @@ async def test_actionable_card_from_sse_uses_matching_pending_card_when_availabl
         async def get_pending_card(self, _session_id: str):  # type: ignore[no-untyped-def]
             return {"code": 0, "data": {**sse_card, "title": "authoritative"}}
 
-        async def get_workflow_snapshot(self, _matter_id: str):  # type: ignore[no-untyped-def]
-            return {
-                "code": 0,
-                "data": {
-                    "workbench_runtime": {
-                        "current_task_id": "goal_completion",
-                        "current_subgraph": "analysis",
-                        "pending_cards": [{**sse_card, "title": "authoritative"}],
-                    }
-                },
-            }
-
     flow = WorkbenchFlow(client=_Client(), session_id="session-8", matter_id="matter-8")
     sse = {"events": [{"event": "card", "data": sse_card}]}
 
     resolved = await flow.actionable_card_from_sse(sse)
 
-    assert isinstance(resolved, dict)
-    assert resolved.get("title") == "authoritative"
+    assert resolved is None
 
 
 @pytest.mark.asyncio
-async def test_step_ignores_stale_pending_card_before_resume() -> None:
-    stale_card = {
-        "id": "card-stale-step",
+async def test_step_resumes_authoritative_pending_card_before_nudge() -> None:
+    pending_card = {
+        "id": "card-step",
         "skill_id": "legal_opinion-intake-gate",
         "task_key": "workflow_input_intake_gate_legal_opinion-intake-gate",
     }
@@ -561,24 +363,16 @@ async def test_step_ignores_stale_pending_card_before_resume() -> None:
         return None
 
     async def _get_pending_card() -> dict[str, object]:
-        return stale_card
+        return pending_card
 
-    async def _get_workflow_snapshot() -> dict[str, object]:
-        return {
-            "analysis_state": {
-                "current_task_id": "legal_opinion_mode_router",
-                "current_subgraph": "analysis",
-            }
-        }
-
-    async def _resume_card(*args, **kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("resume_card should not run for stale pending card")
+    async def _resume_card(card, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return {"pending_card": card}
 
     flow.refresh = _refresh  # type: ignore[method-assign]
     flow.get_pending_card = _get_pending_card  # type: ignore[method-assign]
-    flow._get_workflow_snapshot = _get_workflow_snapshot  # type: ignore[method-assign]
     flow.resume_card = _resume_card  # type: ignore[method-assign]
 
     result = await flow.step(allow_nudge=False)
 
-    assert result is None
+    assert isinstance(result, dict)
+    assert result.get("pending_card") == pending_card

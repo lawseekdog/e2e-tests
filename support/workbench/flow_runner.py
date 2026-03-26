@@ -143,77 +143,10 @@ def _snapshot_awaiting_user_input(snapshot: dict[str, Any] | None) -> bool | Non
     return None
 
 
-def _card_matches_pending_snapshot(card: dict[str, Any], pending_cards: list[Any]) -> bool:
-    if not isinstance(card, dict):
-        return False
-    card_id = str(card.get("id") or "").strip()
-    skill_id = str(card.get("skill_id") or "").strip().lower()
-    task_key = str(card.get("task_key") or "").strip().lower()
-    for row in pending_cards:
-        pending = _as_dict(row)
-        pending_id = str(pending.get("id") or "").strip()
-        pending_skill = str(pending.get("skill_id") or "").strip().lower()
-        pending_task = str(pending.get("task_key") or "").strip().lower()
-        if card_id and pending_id and card_id == pending_id:
-            return True
-        if skill_id and task_key and skill_id == pending_skill and task_key == pending_task:
-            return True
-    return False
-
-
-def _is_intake_like_card(card: dict[str, Any]) -> bool:
-    skill_id = str(card.get("skill_id") or "").strip().lower()
-    task_key = str(card.get("task_key") or "").strip().lower()
-    return (
-        "intake-gate" in skill_id
-        or "capability-gap" in skill_id
-        or "intake_gate" in task_key
-        or "capability_gap" in task_key
-    )
-
-
 def _is_goal_completion_card(card: dict[str, Any]) -> bool:
     skill_id = str(card.get("skill_id") or "").strip().lower()
     task_key = str(card.get("task_key") or "").strip().lower()
     return skill_id == "goal-completion" or task_key == "goal_completion"
-
-
-def _skill_error_target_task_id(card: dict[str, Any]) -> str:
-    skill_id = str(card.get("skill_id") or "").strip().lower()
-    if skill_id != "skill-error-analysis":
-        return ""
-    task_key = str(card.get("task_key") or "").strip().lower()
-    prefix = "workflow_confirm_"
-    suffix = "_skill-error-analysis"
-    if task_key.startswith(prefix) and task_key.endswith(suffix):
-        return task_key[len(prefix) : -len(suffix)].strip("_")
-    return ""
-
-
-def _is_stale_pending_card(card: dict[str, Any], snapshot: dict[str, Any] | None) -> bool:
-    runtime = _extract_runtime_snapshot(snapshot)
-    if not runtime:
-        return False
-
-    pending_cards = _as_list(runtime.get("pending_cards"))
-    if pending_cards:
-        return not _card_matches_pending_snapshot(card, pending_cards)
-
-    current_task_id = str(runtime.get("current_task_id") or "").strip().lower()
-    current_subgraph = str(runtime.get("current_subgraph") or "").strip().lower()
-    if _is_intake_like_card(card):
-        return current_task_id not in {"intake_gate", "legal_opinion_capability_gap"} and current_subgraph != "intake"
-    if _is_goal_completion_card(card):
-        return current_task_id != "goal_completion"
-    skill_error_target = _skill_error_target_task_id(card)
-    if skill_error_target:
-        return current_task_id not in {skill_error_target, ""}
-
-    pending_task_count = _snapshot_pending_task_count(snapshot)
-    awaiting_user_input = _snapshot_awaiting_user_input(snapshot)
-    if pending_task_count == 0 and awaiting_user_input is not True and (current_task_id or current_subgraph):
-        return True
-    return False
 
 
 def _pending_card_intercept_sse(card: dict[str, Any]) -> dict[str, Any]:
@@ -221,33 +154,6 @@ def _pending_card_intercept_sse(card: dict[str, Any]) -> dict[str, Any]:
         "events": [{"event": "card", "data": card}],
         "pending_card": card,
         "output": "pending card intercepted",
-    }
-
-
-def _resume_detached_sse(card: dict[str, Any], *, reason: str) -> dict[str, Any]:
-    task_key = str(card.get("task_key") or "").strip()
-    skill_id = str(card.get("skill_id") or "").strip()
-    content = "已提交当前卡片，流程已继续推进；旧卡回执未及时收尾，runner 改为按最新状态继续。"
-    return {
-        "events": [
-            {
-                "event": "user_message",
-                "data": {
-                    "role": "user",
-                    "content": content,
-                },
-            },
-            {
-                "event": "end",
-                "data": {
-                    "output": content,
-                    "reason": reason,
-                    "skill_id": skill_id,
-                    "task_key": task_key,
-                },
-            },
-        ],
-        "output": content,
     }
 
 

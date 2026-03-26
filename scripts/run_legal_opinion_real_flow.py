@@ -95,6 +95,32 @@ def _extract_analysis_state(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     return analysis if isinstance(analysis, dict) else {}
 
 
+def _extract_active_scope_state(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    analysis = _extract_analysis_state(snapshot)
+    goal_scopes = analysis.get("goal_scopes") if isinstance(analysis.get("goal_scopes"), dict) else {}
+    active_scope_id = _safe_str(
+        analysis.get("active_scope_id")
+        or (analysis.get("active_scope") or {}).get("scope_id")
+        if isinstance(analysis.get("active_scope"), dict)
+        else analysis.get("active_scope_id")
+    )
+    if active_scope_id:
+        scoped = goal_scopes.get(active_scope_id)
+        if isinstance(scoped, dict):
+            return scoped
+    if len(goal_scopes) == 1:
+        only_scope = next(iter(goal_scopes.values()))
+        if isinstance(only_scope, dict):
+            return only_scope
+    return {}
+
+
+def _extract_active_scope_group(snapshot: dict[str, Any] | None, group: str) -> dict[str, Any]:
+    scope_state = _extract_active_scope_state(snapshot)
+    value = scope_state.get(_safe_str(group))
+    return value if isinstance(value, dict) else {}
+
+
 def _extract_runtime_next_actions(
     snapshot: dict[str, Any] | None,
     legal_view: dict[str, Any] | None = None,
@@ -160,11 +186,9 @@ def _analysis_auto_review_card_target(action: dict[str, Any] | None) -> str:
 def _analysis_allows_auto_review_card(snapshot: dict[str, Any] | None) -> bool:
     analysis = _extract_analysis_state(snapshot)
     task_id = _safe_str(analysis.get("current_task_id")).lower()
-    evidence_readiness = (
-        analysis.get("evidence_readiness")
-        if isinstance(analysis.get("evidence_readiness"), dict)
-        else {}
-    )
+    scope_evidence = _extract_active_scope_group(snapshot, "evidence")
+    evidence_runtime = scope_evidence.get("runtime") if isinstance(scope_evidence.get("runtime"), dict) else {}
+    evidence_readiness = evidence_runtime.get("readiness") if isinstance(evidence_runtime.get("readiness"), dict) else {}
     evidence_status = _safe_str(evidence_readiness.get("status")).lower()
     evidence_next_route = _safe_str(evidence_readiness.get("next_route")).lower()
     evidence_handoff_ready = (
@@ -275,10 +299,11 @@ def _is_capability_gap_card(card: dict[str, Any] | None) -> bool:
 
 def _analysis_reference_refresh_hint(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     analysis = _extract_analysis_state(snapshot)
-    references_meta = analysis.get("references_meta") if isinstance(analysis.get("references_meta"), dict) else {}
-    retrieval = (
-        analysis.get("retrieval_diagnostics")
-        if isinstance(analysis.get("retrieval_diagnostics"), dict)
+    scope_references = _extract_active_scope_group(snapshot, "references")
+    reference_meta = scope_references.get("meta") if isinstance(scope_references.get("meta"), dict) else {}
+    diagnostics = (
+        analysis.get("references_diagnostics_summary")
+        if isinstance(analysis.get("references_diagnostics_summary"), dict)
         else {}
     )
     current_subgraph = _safe_str(
@@ -289,14 +314,14 @@ def _analysis_reference_refresh_hint(snapshot: dict[str, Any] | None) -> dict[st
     reason_codes = [
         _safe_str(code)
         for code in (
-            references_meta.get("reason_codes")
-            if isinstance(references_meta.get("reason_codes"), list)
+            reference_meta.get("reason_codes")
+            if isinstance(reference_meta.get("reason_codes"), list)
             else []
         )
         if _safe_str(code)
     ]
-    final_reason = _safe_str(retrieval.get("final_reason")).lower()
-    status = _safe_str(references_meta.get("status")).lower()
+    final_reason = _safe_str(diagnostics.get("final_reason") or diagnostics.get("dominant_reason_code")).lower()
+    status = _safe_str(reference_meta.get("status")).lower()
     refreshable_reasons = {
         "retrieval_no_hit",
         "retrieval_not_attempted",

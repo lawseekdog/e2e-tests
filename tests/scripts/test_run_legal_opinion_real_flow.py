@@ -124,8 +124,15 @@ def test_analysis_allows_reference_refresh_only_after_core_ready() -> None:
     snapshot = {
         "analysis_state": {
             "next_actions": [],
-            "references_meta": {"status": "blocked", "reason_codes": ["authority_pending"]},
-            "retrieval_diagnostics": {"final_reason": "authority_pending"},
+            "active_scope_id": "analysis:litigation",
+            "goal_scopes": {
+                "analysis:litigation": {
+                    "references": {
+                        "meta": {"status": "blocked", "reason_codes": ["authority_pending"]},
+                    }
+                }
+            },
+            "references_diagnostics_summary": {"final_reason": "authority_pending"},
         }
     }
     legal_view = {
@@ -142,11 +149,18 @@ def test_analysis_allows_reference_refresh_when_references_stage_is_explicitly_b
         "analysis_state": {
             "current_subgraph": "analysis",
             "current_task_id": "references_finalize",
-            "references_meta": {
-                "status": "blocked",
-                "reason_codes": ["references_grounding_law_rows_missing"],
+            "active_scope_id": "analysis:litigation",
+            "goal_scopes": {
+                "analysis:litigation": {
+                    "references": {
+                        "meta": {
+                            "status": "blocked",
+                            "reason_codes": ["references_grounding_law_rows_missing"],
+                        }
+                    }
+                }
             },
-            "retrieval_diagnostics": {
+            "references_diagnostics_summary": {
                 "final_reason": "retrieval_no_hit",
             },
         }
@@ -186,13 +200,22 @@ def test_analysis_auto_review_card_waits_while_evidence_pipeline_is_running() ->
 def test_analysis_auto_review_card_allows_stale_evidence_task_after_handoff_ready() -> None:
     snapshot = {
         "analysis_state": {
+            "active_scope_id": "analysis:litigation",
+            "goal_scopes": {
+                "analysis:litigation": {
+                    "evidence": {
+                        "runtime": {
+                            "readiness": {
+                                "status": "ready",
+                                "next_route": "finish",
+                                "phase_terminal": False,
+                            }
+                        }
+                    }
+                }
+            },
             "current_task_id": "evidence_list_seed",
             "current_subgraph": "analysis",
-            "evidence_readiness": {
-                "status": "ready",
-                "next_route": "finish",
-                "phase_terminal": False,
-            },
         }
     }
 

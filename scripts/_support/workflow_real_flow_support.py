@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +45,45 @@ def event_counts(sse: dict[str, Any]) -> dict[str, int]:
 def load_real_flow_env(*, repo_root: Path, e2e_root: Path) -> None:
     load_dotenv(repo_root / ".env", override=False)
     load_dotenv(e2e_root / ".env", override=False)
+
+
+def terminate_stale_script_runs(*, script_name: str, current_pid: int | None = None, grace_seconds: float = 1.0) -> list[int]:
+    token = safe_str(script_name)
+    if not token:
+        return []
+    current = int(current_pid or os.getpid())
+    try:
+        raw = subprocess.check_output(["pgrep", "-af", token], text=True)
+    except Exception:
+        return []
+    victims: list[int] = []
+    for line in raw.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if not parts:
+            continue
+        try:
+            pid = int(parts[0])
+        except Exception:
+            continue
+        if pid == current:
+            continue
+        cmd = parts[1] if len(parts) > 1 else ""
+        if token not in cmd:
+            continue
+        victims.append(pid)
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+    if victims and grace_seconds > 0:
+        time.sleep(max(0.1, float(grace_seconds)))
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+    return victims
 
 
 def api_url(host: str, port: int) -> str:
@@ -320,6 +362,7 @@ __all__ = [
     "load_real_flow_env",
     "resolve_output_dir",
     "safe_str",
+    "terminate_stale_script_runs",
     "upload_consultation_files",
     "write_json",
 ]

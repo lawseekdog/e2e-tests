@@ -43,7 +43,7 @@ from scripts._support.template_draft_real_flow_support import (
     _normalize_stop_node,
 )
 from scripts._support.flow_score_support import build_template_flow_scores
-from scripts._support.workflow_real_flow_support import collect_ai_debug_refs, configure_direct_service_mode, load_real_flow_env
+from scripts._support.workflow_real_flow_support import collect_ai_debug_refs, configure_direct_service_mode, load_real_flow_env, terminate_stale_script_runs
 
 
 DEFAULT_FACTS = DEFAULT_LEGAL_OPINION_FACTS
@@ -694,6 +694,7 @@ class StopAfterNodeReached(RuntimeError):
 
 async def run(args: argparse.Namespace) -> int:
     load_real_flow_env(repo_root=REPO_ROOT, e2e_root=E2E_ROOT)
+    terminate_stale_script_runs(script_name="run_template_draft_real_flow.py")
 
     direct_mode = bool(args.direct_local) or not bool(args.use_gateway)
     direct_config: dict[str, str] = {}

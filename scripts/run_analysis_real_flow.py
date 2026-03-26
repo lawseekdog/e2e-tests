@@ -28,6 +28,7 @@ from scripts._support.workflow_real_flow_support import (
     load_real_flow_env,
     resolve_output_dir,
     safe_str as _safe_str,
+    terminate_stale_script_runs,
     upload_consultation_files,
     write_json,
 )
@@ -86,6 +87,7 @@ def _extract_pricing_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
 
 async def run(args: argparse.Namespace) -> int:
     load_real_flow_env(repo_root=REPO_ROOT, e2e_root=E2E_ROOT)
+    terminate_stale_script_runs(script_name="run_analysis_real_flow.py")
 
     direct_mode = not bool(args.use_gateway)
     direct_config: dict[str, str] = {}

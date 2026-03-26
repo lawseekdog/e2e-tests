@@ -42,6 +42,7 @@ from scripts._support.workflow_real_flow_support import (
     load_real_flow_env,
     resolve_output_dir,
     safe_str as _safe_str,
+    terminate_stale_script_runs,
     upload_consultation_files,
     write_json,
 )
@@ -533,6 +534,7 @@ async def _persist_action_sse(out_dir: Path, round_no: int, label: str, sse: dic
 
 async def run(args: argparse.Namespace) -> int:
     load_real_flow_env(repo_root=REPO_ROOT, e2e_root=E2E_ROOT)
+    terminate_stale_script_runs(script_name="run_legal_opinion_real_flow.py")
 
     direct_mode = not bool(args.use_gateway)
     direct_config: dict[str, str] = {}

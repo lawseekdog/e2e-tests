@@ -35,6 +35,7 @@ from scripts._support.workflow_real_flow_support import (
     load_real_flow_env,
     resolve_output_dir,
     upload_consultation_files,
+    terminate_stale_script_runs,
     write_json,
 )
 from scripts._support.flow_score_support import build_flow_scores, collect_flow_observability
@@ -200,6 +201,7 @@ def _latest_assistant_message(rows: list[dict[str, Any]]) -> str:
 
 async def run(args: argparse.Namespace) -> int:
     load_real_flow_env(repo_root=REPO_ROOT, e2e_root=E2E_ROOT)
+    terminate_stale_script_runs(script_name="run_contract_review_real_flow.py")
 
     direct_mode = not bool(args.use_gateway)
     direct_config: dict[str, str] = {}

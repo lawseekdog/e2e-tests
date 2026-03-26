@@ -216,6 +216,7 @@ class ApiClient:
         *,
         max_attempts: int | None = None,
         open_timeout_s: float | None = None,
+        settle_mode: str = "full",
     ) -> dict[str, Any]:
         """Connect to WebSocket, authenticate, send message, and collect events until 'end'."""
         route_path = str(ws_path or "")
@@ -269,6 +270,18 @@ class ApiClient:
                     stream_started = asyncio.get_running_loop().time()
                     # 文书起草链路在真实大模型下可持续数分钟，默认 180s 会提前切断会话并触发假性 busy。
                     max_stream_s = float(os.getenv("E2E_WS_STREAM_MAX_S", "1800") or 1800)
+                    early_settle_events = {
+                        "progress",
+                        "task_start",
+                        "card",
+                        "result",
+                        "error",
+                        "end",
+                        "complete",
+                    }
+                    fire_and_poll_timeout_s = float(
+                        os.getenv("E2E_WS_FIRE_AND_POLL_ACK_TIMEOUT_S", "8") or 8
+                    )
                     while True:
                         now = asyncio.get_running_loop().time()
                         if max_stream_s > 0 and (now - stream_started) > max_stream_s:
@@ -285,6 +298,8 @@ class ApiClient:
                             break
                         try:
                             ws_event_timeout_s = float(os.getenv("E2E_WS_EVENT_TIMEOUT_S", "120") or 120)
+                            if settle_mode == "fire_and_poll" and not events:
+                                ws_event_timeout_s = max(1.0, fire_and_poll_timeout_s)
                             raw = await asyncio.wait_for(ws.recv(), timeout=ws_event_timeout_s)
                             payload = json.loads(raw)
                             evt = payload.get("event")
@@ -316,12 +331,28 @@ class ApiClient:
 
                             events.append({"event": evt, "data": evt_data})
 
+                            if settle_mode in {"first_event", "fire_and_poll"} and evt in early_settle_events:
+                                break
+
                             if evt == "card" and _WS_BREAK_ON_CARD:
                                 break
 
                             if evt in {"end", "complete"}:
                                 break
                         except asyncio.TimeoutError:
+                            if settle_mode == "fire_and_poll" and not events:
+                                return {
+                                    "events": [
+                                        {
+                                            "event": "resume_submitted",
+                                            "data": {
+                                                "partial": True,
+                                                "settle_mode": "fire_and_poll",
+                                            },
+                                        }
+                                    ],
+                                    "output": "resume submitted",
+                                }
                             events.append(
                                 {
                                     "event": "error",
@@ -709,6 +740,7 @@ class ApiClient:
         pending_card: dict[str, Any] | None = None,
         max_loops: int | None = None,
         cardId: str | None = None,
+        settle_mode: str = "full",
     ) -> dict[str, Any]:
         resolved_card_id = str(cardId or "").strip() or _extract_pending_card_id(pending_card)
         if not resolved_card_id:
@@ -733,7 +765,13 @@ class ApiClient:
             data["max_loops"] = int(max_loops)
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
         open_timeout_s = float(os.getenv("E2E_WS_OPEN_TIMEOUT_S", "20") or 20)
-        return await self._post_ws(ws_path, "resume", data, open_timeout_s=open_timeout_s)
+        return await self._post_ws(
+            ws_path,
+            "resume",
+            data,
+            open_timeout_s=open_timeout_s,
+            settle_mode=settle_mode,
+        )
 
     async def workflow_action(
         self,

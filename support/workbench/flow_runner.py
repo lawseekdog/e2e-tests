@@ -196,6 +196,38 @@ def is_session_busy_sse(sse: dict[str, Any] | None) -> bool:
     )
 
 
+def _is_effective_resume_sse(sse: dict[str, Any] | None) -> bool:
+    if not isinstance(sse, dict):
+        return False
+    raw_events = sse.get("events")
+    events: list[Any] = list(raw_events) if isinstance(raw_events, list) else []
+    for it in events:
+        if not isinstance(it, dict):
+            continue
+        event_name = str(it.get("event") or "").strip()
+        if event_name in {
+            "resume_submitted",
+            "progress",
+            "task_start",
+            "card",
+            "result",
+            "error",
+            "end",
+            "complete",
+        }:
+            return True
+    return False
+
+
+def _is_skill_error_confirm_card(card: dict[str, Any] | None) -> bool:
+    if not isinstance(card, dict):
+        return False
+    return (
+        str(card.get("skill_id") or "").strip() == "skill-error-analysis"
+        and str(card.get("review_type") or "").strip().lower() == "confirm"
+    )
+
+
 def _pick_recommended_or_first(options: list[Any]) -> Any | None:
     if not isinstance(options, list) or not options:
         return None
@@ -1366,12 +1398,14 @@ class WorkbenchFlow:
             f"payload={answer_payload}"
         )
         resolved_max_loops = _RESUME_MAX_LOOPS if max_loops is None else max(1, int(max_loops))
+        settle_mode = "fire_and_poll" if _is_skill_error_confirm_card(card) else "first_event"
         resume_task = asyncio.create_task(
             self.client.resume(
                 self.session_id,
                 answer_payload,
                 pending_card=card,
                 max_loops=resolved_max_loops,
+                settle_mode=settle_mode,
             )
         )
         try:
@@ -1384,15 +1418,23 @@ class WorkbenchFlow:
             with contextlib.suppress(asyncio.CancelledError):
                 await resume_task
             raise
-        try:
-            assert_has_user_message(sse)
-        except AssertionError:
-            if not is_session_busy_sse(sse if isinstance(sse, dict) else {}):
-                raise
+        if settle_mode == "full":
+            try:
+                assert_has_user_message(sse)
+            except AssertionError:
+                if not is_session_busy_sse(sse if isinstance(sse, dict) else {}):
+                    raise
+        else:
+            if not _is_effective_resume_sse(sse if isinstance(sse, dict) else {}):
+                try:
+                    assert_has_user_message(sse)
+                except AssertionError:
+                    if not is_session_busy_sse(sse if isinstance(sse, dict) else {}):
+                        raise
         if isinstance(sse, dict):
             self.last_sse = sse
             self.seen_sse.append(sse)
-        await self._emit_progress(label="resume", card=card, sse=sse)
+        await self._emit_progress(label=f"resume:{settle_mode}", card=card, sse=sse)
         return sse
 
     async def nudge(self, text: str, *, attachments: list[str] | None = None, max_loops: int = 8) -> dict[str, Any]:

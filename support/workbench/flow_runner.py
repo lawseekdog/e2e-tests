@@ -459,6 +459,26 @@ def _infer_missing_fields_from_card(card: dict[str, Any]) -> list[str]:
     return _parse_missing_fields(merged)
 
 
+def _card_text_blob(card: dict[str, Any], *, include_task_key: bool = False) -> str:
+    if not isinstance(card, dict) or not card:
+        return ""
+    parts: list[str] = []
+    if include_task_key:
+        task_key = str(card.get("task_key") or "").strip()
+        if task_key:
+            parts.append(task_key)
+    raw_questions = card.get("questions")
+    questions: list[Any] = list(raw_questions) if isinstance(raw_questions, list) else []
+    for row in questions:
+        if not isinstance(row, dict):
+            continue
+        for key in ("question", "label", "placeholder", "field_key"):
+            token = str(row.get(key) or "").strip()
+            if token:
+                parts.append(token)
+    return " ".join(parts).strip()
+
+
 def _fallback_answer_for_missing_field(field_key: str, uploaded_file_ids: list[str]) -> Any | None:
     fk = str(field_key or "").strip()
     if not fk:
@@ -798,7 +818,7 @@ def auto_answer_card(
     overrides: dict[str, Any] | None = None,
     uploaded_file_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Build a resume.user_response from a card by applying overrides + safe defaults."""
+    """Build a resume.answers payload from a card by applying overrides + safe defaults."""
     overrides = overrides or {}
     uploaded_file_ids = [str(x).strip() for x in (uploaded_file_ids or []) if str(x).strip()]
 
@@ -1342,16 +1362,16 @@ class WorkbenchFlow:
                 f"[flow] card detail skill={card.get('skill_id')} task={card.get('task_key')} "
                 f"fields={fields}"
             )
-        user_response = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
+        answer_payload = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
         _debug(
-            f"[flow] resume card {card.get('skill_id')} answers={len(user_response.get('answers') or [])} "
-            f"payload={user_response}"
+            f"[flow] resume card {card.get('skill_id')} answers={len(answer_payload.get('answers') or [])} "
+            f"payload={answer_payload}"
         )
         resolved_max_loops = _RESUME_MAX_LOOPS if max_loops is None else max(1, int(max_loops))
         resume_task = asyncio.create_task(
             self.client.resume(
                 self.session_id,
-                user_response,
+                answer_payload,
                 pending_card=card,
                 max_loops=resolved_max_loops,
             )

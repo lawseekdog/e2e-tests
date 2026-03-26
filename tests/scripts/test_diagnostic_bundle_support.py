@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 
 import pytest
 
+import scripts._support.diagnostic_bundle_support as diagnostic_bundle_support
 from scripts._support.diagnostic_bundle_support import export_failure_bundle, format_first_bad_line
 
 
@@ -29,22 +29,39 @@ def test_export_failure_bundle_requires_failure_summary_reason_code(
     tmp_path: Path,
 ) -> None:
     repo_root = Path("/Users/xiangxiansenzhangxiaojie/workspaces/lawseekdog")
-    for path in (repo_root / "ai-engine", repo_root / "shared-libs"):
-        token = str(path)
-        if token not in sys.path:
-            sys.path.insert(0, token)
-    import src.infrastructure.debug.runtime_debug as runtime_debug
-
     bundle_path = tmp_path / "bundle"
     bundle_path.mkdir(parents=True)
     (bundle_path / "failure_summary.json").write_text("{}", encoding="utf-8")
 
-    monkeypatch.setattr(runtime_debug, "export_debug_bundle", lambda **kwargs: str(bundle_path))
+    monkeypatch.setattr(
+        diagnostic_bundle_support,
+        "_export_bundle_via_ai_engine_runtime",
+        lambda **kwargs: str(bundle_path),
+    )
 
     with pytest.raises(RuntimeError, match="observability_contract_missing_reason_code"):
         export_failure_bundle(
             repo_root=repo_root,
             session_id="session:1",
             matter_id="1",
+            reason="unit_test",
+        )
+
+
+def test_export_failure_bundle_requires_ai_engine_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        diagnostic_bundle_support,
+        "_resolve_ai_engine_python",
+        lambda _repo_root: (_ for _ in ()).throw(RuntimeError("diagnostic_export_runtime_missing")),
+    )
+
+    with pytest.raises(RuntimeError, match="diagnostic_export_runtime_missing"):
+        export_failure_bundle(
+            repo_root=repo_root,
+            session_id="session:2",
+            matter_id="2",
             reason="unit_test",
         )

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-import sys
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -10,11 +11,90 @@ def _safe_str(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _bootstrap_ai_engine_imports(repo_root: Path) -> None:
-    for path in ((repo_root / "ai-engine").resolve(), (repo_root / "shared-libs").resolve()):
-        token = str(path)
-        if path.exists() and token not in sys.path:
-            sys.path.insert(0, token)
+def _resolve_ai_engine_python(repo_root: Path) -> Path:
+    candidates = (
+        repo_root / "ai-engine" / ".venv312" / "bin" / "python",
+        repo_root / "ai-engine" / ".venv" / "bin" / "python",
+    )
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return path
+    raise RuntimeError("diagnostic_export_runtime_missing")
+
+
+def _resolve_ai_engine_env_file(repo_root: Path) -> Path:
+    path = repo_root / "ai-engine" / ".local" / "local-ai-engine-stack.env"
+    if path.exists() and path.is_file():
+        return path
+    raise RuntimeError("diagnostic_export_env_missing")
+
+
+def _load_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = str(raw_line or "").strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        token = _safe_str(key)
+        if token:
+            out[token] = value.strip()
+    return out
+
+
+def _thread_id_from_session(session_id: str) -> str:
+    token = _safe_str(session_id)
+    if not token:
+        return ""
+    if token.startswith("session:"):
+        return token
+    return f"session:{token}"
+
+
+def _export_bundle_via_ai_engine_runtime(
+    *,
+    repo_root: Path,
+    session_id: str,
+    matter_id: str,
+    reason: str,
+) -> str:
+    python_bin = _resolve_ai_engine_python(repo_root)
+    env_file = _resolve_ai_engine_env_file(repo_root)
+    script_path = repo_root / "ai-engine" / "scripts" / "_debug" / "export_debug_bundle.py"
+    if not script_path.exists():
+        raise RuntimeError("diagnostic_export_script_missing")
+    command = [
+        str(python_bin),
+        str(script_path),
+        "--reason",
+        _safe_str(reason) or "e2e_failure",
+    ]
+    thread_id = _thread_id_from_session(session_id)
+    if thread_id:
+        command.extend(["--thread-id", thread_id])
+    if _safe_str(session_id):
+        command.extend(["--session-id", _safe_str(session_id)])
+    if _safe_str(matter_id):
+        command.extend(["--matter-id", _safe_str(matter_id)])
+    env = os.environ.copy()
+    env.update(_load_env_file(env_file))
+    env["AI_ENGINE_ENV_FILE"] = str(env_file)
+    result = subprocess.run(
+        command,
+        cwd=repo_root / "ai-engine",
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    if result.returncode != 0:
+        detail = _safe_str(result.stderr) or _safe_str(result.stdout) or f"exit={result.returncode}"
+        raise RuntimeError(f"diagnostic_export_runtime_failed:{detail}")
+    bundle_dir = _safe_str(result.stdout).splitlines()
+    bundle_path = _safe_str(bundle_dir[-1] if bundle_dir else "")
+    if not bundle_path:
+        raise RuntimeError("diagnostic_export_runtime_failed:missing_bundle_dir")
+    return bundle_path
 
 
 def export_failure_bundle(
@@ -25,14 +105,12 @@ def export_failure_bundle(
     reason: str,
     current_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    _bootstrap_ai_engine_imports(repo_root)
-    from src.infrastructure.debug.runtime_debug import export_debug_bundle
-
-    bundle_dir = export_debug_bundle(
-        thread_id=_safe_str(session_id) or None,
-        session_id=_safe_str(session_id) or None,
-        matter_id=_safe_str(matter_id) or None,
-        current_state=current_state if isinstance(current_state, dict) else None,
+    if current_state:
+        raise RuntimeError("diagnostic_export_inline_state_unsupported")
+    bundle_dir = _export_bundle_via_ai_engine_runtime(
+        repo_root=repo_root,
+        session_id=_safe_str(session_id),
+        matter_id=_safe_str(matter_id),
         reason=_safe_str(reason) or "e2e_failure",
     )
     summary_path = Path(bundle_dir) / "failure_summary.json"

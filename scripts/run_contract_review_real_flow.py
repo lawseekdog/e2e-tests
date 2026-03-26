@@ -38,7 +38,9 @@ from scripts._support.workflow_real_flow_support import (
     terminate_stale_script_runs,
     write_json,
 )
+from scripts._support.diagnostic_bundle_support import export_failure_bundle, export_observability_bundle
 from scripts._support.flow_score_support import build_flow_scores, collect_flow_observability
+from scripts._support.quality_policy_support import build_bundle_quality_reports
 
 
 REQUIRED_DOC_OUTPUT_KEYS = (
@@ -345,6 +347,22 @@ async def run(args: argparse.Namespace) -> int:
             write_json(out_dir / "deliverables.failure.json", fail_deliverables)
             if isinstance(fail_snapshot, dict) and fail_snapshot:
                 write_json(out_dir / "snapshot.failure.json", fail_snapshot)
+            bundle = export_failure_bundle(
+                repo_root=REPO_ROOT,
+                session_id=session_id,
+                matter_id=fail_matter_id,
+                reason="contract_review_real_flow_failed",
+            )
+            bundle_quality = build_bundle_quality_reports(
+                repo_root=REPO_ROOT,
+                bundle_dir=bundle["bundle_dir"],
+                flow_id="contract_review",
+                snapshot=fail_snapshot if isinstance(fail_snapshot, dict) else {},
+                current_view=_extract_contract_view(fail_snapshot if isinstance(fail_snapshot, dict) else {}),
+                goal_completion_mode="none",
+            )
+            write_json(out_dir / "failure_summary.json", bundle["summary"])
+            write_json(out_dir / "bundle_quality.failure.json", bundle_quality)
             raise
 
         await flow.refresh()
@@ -398,13 +416,33 @@ async def run(args: argparse.Namespace) -> int:
             "runtime_images_end": end_images,
             "runtime_images_stable": (start_images == end_images) if start_images and end_images else None,
         }
+        bundle_export = export_observability_bundle(
+            repo_root=REPO_ROOT,
+            session_id=session_id,
+            matter_id=final_matter_id,
+            reason="contract_review_real_flow_success",
+        )
         observability = await collect_flow_observability(client, matter_id=final_matter_id, session_id=session_id)
+        bundle_quality = build_bundle_quality_reports(
+            repo_root=REPO_ROOT,
+            bundle_dir=bundle_export["bundle_dir"],
+            flow_id="contract_review",
+            snapshot=snapshot,
+            current_view=contract_view,
+            goal_completion_mode="card" if _safe_str((pending_card or {}).get("skill_id")).lower() == "goal-completion" else "none",
+        )
         debug_refs = await collect_ai_debug_refs(
             client,
             repo_root=REPO_ROOT,
             session_id=session_id,
             matter_id=final_matter_id,
         )
+        quality_summary_ref = str((bundle_quality.get("refs") or {}).get("summary") or "").strip()
+        if quality_summary_ref:
+            bundle_refs = debug_refs.get("bundle_refs") if isinstance(debug_refs.get("bundle_refs"), list) else []
+            if quality_summary_ref not in bundle_refs:
+                bundle_refs.append(quality_summary_ref)
+                debug_refs["bundle_refs"] = bundle_refs
         flow_scores = build_flow_scores(
             flow_id="contract_review",
             seen_cards=flow.seen_cards,
@@ -418,15 +456,18 @@ async def run(args: argparse.Namespace) -> int:
             gold_text=_safe_str(contract_review_expectations.get("gold_text")),
             contract_review_expectations=cast(dict[str, Any], contract_review_expectations),
             observability=observability,
+            bundle_quality_summary=bundle_quality,
             goal_completion_mode="card" if _safe_str((pending_card or {}).get("skill_id")).lower() == "goal-completion" else "none",
         )
         summary["flow_scores"] = flow_scores
         summary["debug_refs"] = debug_refs
+        summary["bundle_quality"] = bundle_quality
 
         if start_images and end_images and start_images != end_images and str(os.getenv("E2E_ALLOW_DEPLOYMENT_DRIFT", "") or "").strip() not in {"1", "true", "yes"}:
             raise RuntimeError(f"deployment_image_drift_detected: start={start_images} end={end_images}")
 
         write_json(out_dir / "summary.json", summary)
+        write_json(out_dir / "bundle_quality.json", bundle_quality)
         write_json(out_dir / "flow_scores.json", flow_scores)
         write_json(out_dir / "deliverables.json", deliverables)
         write_json(out_dir / "snapshot.json", snapshot)

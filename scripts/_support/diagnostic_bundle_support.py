@@ -122,6 +122,24 @@ def export_failure_bundle(
     return {"bundle_dir": bundle_dir, "summary": summary}
 
 
+def export_observability_bundle(
+    *,
+    repo_root: Path,
+    session_id: str = "",
+    matter_id: str = "",
+    reason: str,
+) -> dict[str, Any]:
+    bundle_dir = _export_bundle_via_ai_engine_runtime(
+        repo_root=repo_root,
+        session_id=_safe_str(session_id),
+        matter_id=_safe_str(matter_id),
+        reason=_safe_str(reason) or "e2e_observability",
+    )
+    summary_path = Path(bundle_dir) / "failure_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+    return {"bundle_dir": bundle_dir, "summary": summary if isinstance(summary, dict) else {}}
+
+
 def format_first_bad_line(summary: dict[str, Any]) -> str:
     return (
         "FIRST_BAD "

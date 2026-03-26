@@ -277,6 +277,7 @@ def score_node_path(
     *,
     flow_id: str,
     observability: dict[str, Any] | None,
+    bundle_quality_summary: dict[str, Any] | None = None,
     goal_completion_mode: str = "",
 ) -> dict[str, Any]:
     tokens, trace_count, phase_count, produced_keys = _collect_node_tokens(observability)
@@ -304,6 +305,10 @@ def score_node_path(
         "matched_hints": matched_hints,
         "missing_hints": missing_hints,
         "produced_output_keys": sorted(produced_keys),
+        "quality_summary_ref": _as_dict(_as_dict(bundle_quality_summary).get("refs")).get("summary"),
+        "worst_node": _as_dict(bundle_quality_summary).get("worst_node") if isinstance(_as_dict(bundle_quality_summary).get("worst_node"), dict) else {},
+        "worst_skill": _as_dict(bundle_quality_summary).get("worst_skill") if isinstance(_as_dict(bundle_quality_summary).get("worst_skill"), dict) else {},
+        "worst_lane": _as_dict(bundle_quality_summary).get("worst_lane") if isinstance(_as_dict(bundle_quality_summary).get("worst_lane"), dict) else {},
         "collection_errors": _as_dict(observability).get("errors") if isinstance(_as_dict(observability).get("errors"), dict) else {},
     }
 
@@ -738,10 +743,16 @@ def build_flow_scores(
     gold_text: str = "",
     contract_review_expectations: dict[str, Any] | None = None,
     observability: dict[str, Any] | None = None,
+    bundle_quality_summary: dict[str, Any] | None = None,
     goal_completion_mode: str = "",
 ) -> dict[str, Any]:
     unexpected = score_unexpected_cards(flow_id=flow_id, seen_cards=seen_cards, pending_card=pending_card)
-    node_path = score_node_path(flow_id=flow_id, observability=observability, goal_completion_mode=goal_completion_mode)
+    node_path = score_node_path(
+        flow_id=flow_id,
+        observability=observability,
+        bundle_quality_summary=bundle_quality_summary,
+        goal_completion_mode=goal_completion_mode,
+    )
     snapshot_progress = score_snapshot_progress(
         flow_id=flow_id,
         snapshot=snapshot,
@@ -774,6 +785,9 @@ def build_flow_scores(
                 overall_failures.extend([f"{name}:{_safe_str(item)}" for item in block_failures if _safe_str(item)])
             else:
                 overall_failures.append(f"{name}:failed")
+    quality_hard_failures = [item for item in _as_list(_as_dict(bundle_quality_summary).get("hard_fail_reasons")) if _safe_str(item)]
+    if quality_hard_failures:
+        overall_failures.extend([f"quality:{_safe_str(item)}" for item in quality_hard_failures if _safe_str(item)])
 
     return {
         "unexpected_card_score": unexpected,
@@ -782,7 +796,7 @@ def build_flow_scores(
         "deliverable_quality_score": deliverable_quality,
         "overall_e2e_score": {
             "score": overall_score,
-            "passed": bool(unexpected.get("passed")) and bool(node_path.get("passed")) and bool(snapshot_progress.get("passed")) and bool(deliverable_quality.get("passed")),
+            "passed": bool(unexpected.get("passed")) and bool(node_path.get("passed")) and bool(snapshot_progress.get("passed")) and bool(deliverable_quality.get("passed")) and not quality_hard_failures,
             "failures": [item for item in overall_failures if _safe_str(item)],
         },
     }
@@ -797,6 +811,7 @@ def build_template_flow_scores(
     last_docgen_snapshot: dict[str, Any] | None,
     dialogue_quality: dict[str, Any] | None,
     document_quality: dict[str, Any] | None,
+    bundle_quality_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     unexpected = score_unexpected_cards(flow_id="template_draft", seen_cards=cards, pending_card=pending_card)
     rows = [row for row in (node_timeline or []) if isinstance(row, dict)]
@@ -812,6 +827,10 @@ def build_template_flow_scores(
         "distinct_node_token_count": len(node_set),
         "phase_count": 0,
         "produced_output_keys": [],
+        "quality_summary_ref": _as_dict(_as_dict(bundle_quality_summary).get("refs")).get("summary"),
+        "worst_node": _as_dict(bundle_quality_summary).get("worst_node") if isinstance(_as_dict(bundle_quality_summary).get("worst_node"), dict) else {},
+        "worst_skill": _as_dict(bundle_quality_summary).get("worst_skill") if isinstance(_as_dict(bundle_quality_summary).get("worst_skill"), dict) else {},
+        "worst_lane": _as_dict(bundle_quality_summary).get("worst_lane") if isinstance(_as_dict(bundle_quality_summary).get("worst_lane"), dict) else {},
         "collection_errors": {},
     }
     snapshot_obj = last_docgen_snapshot if isinstance(last_docgen_snapshot, dict) else {}
@@ -870,6 +889,7 @@ def build_template_flow_scores(
         *(deliverable_failures),
         *(snapshot_failures),
         *[",".join(_as_list(row.get("reasons"))) for row in _as_list(unexpected.get("unexpected_cards")) if isinstance(row, dict)],
+        *[f"quality:{_safe_str(item)}" for item in _as_list(_as_dict(bundle_quality_summary).get("hard_fail_reasons")) if _safe_str(item)],
     ]
     return {
         "unexpected_card_score": unexpected,
@@ -878,7 +898,7 @@ def build_template_flow_scores(
         "deliverable_quality_score": deliverable_quality,
         "overall_e2e_score": {
             "score": overall_score,
-            "passed": bool(unexpected.get("passed")) and bool(node_path_score.get("passed")) and bool(snapshot_progress.get("passed")) and bool(deliverable_quality.get("passed")),
+            "passed": bool(unexpected.get("passed")) and bool(node_path_score.get("passed")) and bool(snapshot_progress.get("passed")) and bool(deliverable_quality.get("passed")) and not _as_list(_as_dict(bundle_quality_summary).get("hard_fail_reasons")),
             "failures": [item for item in overall_failures if _safe_str(item)],
         },
     }

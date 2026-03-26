@@ -43,6 +43,8 @@ from scripts._support.template_draft_real_flow_support import (
     _normalize_stop_node,
 )
 from scripts._support.flow_score_support import build_template_flow_scores
+from scripts._support.diagnostic_bundle_support import export_observability_bundle
+from scripts._support.quality_policy_support import build_bundle_quality_reports
 from scripts._support.workflow_real_flow_support import collect_ai_debug_refs, configure_direct_service_mode, load_real_flow_env, terminate_stale_script_runs
 
 
@@ -1564,6 +1566,20 @@ async def run(args: argparse.Namespace) -> int:
                     "deliverable_status": status,
                 }
             )
+            bundle_export = export_observability_bundle(
+                repo_root=REPO_ROOT,
+                session_id=_safe_str(summary.get("session_id")),
+                matter_id=_safe_str(summary.get("matter_id")),
+                reason="template_draft_passed",
+            )
+            bundle_quality = build_bundle_quality_reports(
+                repo_root=REPO_ROOT,
+                bundle_dir=bundle_export["bundle_dir"],
+                flow_id="template_draft",
+                snapshot={},
+                current_view={},
+                goal_completion_mode="none",
+            )
             flow_scores = build_template_flow_scores(
                 cards=cards_seen,
                 pending_card=last_pending if isinstance(last_pending, dict) else {},
@@ -1572,19 +1588,28 @@ async def run(args: argparse.Namespace) -> int:
                 last_docgen_snapshot=last_docgen_snapshot,
                 dialogue_quality=dialogue_quality,
                 document_quality=document_quality,
+                bundle_quality_summary=bundle_quality,
             )
             summary["flow_scores"] = flow_scores
+            summary["bundle_quality"] = bundle_quality
             summary["debug_refs"] = await collect_ai_debug_refs(
                 client,
                 repo_root=REPO_ROOT,
                 session_id=_safe_str(summary.get("session_id")),
                 matter_id=_safe_str(summary.get("matter_id")),
             )
+            quality_summary_ref = str((bundle_quality.get("refs") or {}).get("summary") or "").strip()
+            if quality_summary_ref:
+                bundle_refs = summary["debug_refs"].get("bundle_refs") if isinstance(summary.get("debug_refs"), dict) and isinstance(summary["debug_refs"].get("bundle_refs"), list) else []
+                if quality_summary_ref not in bundle_refs:
+                    bundle_refs.append(quality_summary_ref)
+                    summary["debug_refs"]["bundle_refs"] = bundle_refs
 
             _write_json(out_dir / "deliverables.json", {"deliverables": rows})
             _write_json(out_dir / "cards.json", cards_seen)
             _write_events_ndjson(out_dir / "events.ndjson", event_rows)
             _write_json(out_dir / "node_timeline.json", node_timeline)
+            _write_json(out_dir / "bundle_quality.json", bundle_quality)
             _write_json(out_dir / "flow_scores.json", flow_scores)
             _write_json(out_dir / "debug_refs.json", summary.get("debug_refs") if isinstance(summary.get("debug_refs"), dict) else {})
             _write_json(out_dir / "summary.json", summary)
@@ -1672,6 +1697,20 @@ async def run(args: argparse.Namespace) -> int:
                     "deliverable_status": stop_deliverable_status,
                 }
             )
+            bundle_export = export_observability_bundle(
+                repo_root=REPO_ROOT,
+                session_id=_safe_str(summary.get("session_id")),
+                matter_id=_safe_str(summary.get("matter_id")),
+                reason="template_draft_stopped_after_node",
+            )
+            bundle_quality = build_bundle_quality_reports(
+                repo_root=REPO_ROOT,
+                bundle_dir=bundle_export["bundle_dir"],
+                flow_id="template_draft",
+                snapshot={},
+                current_view={},
+                goal_completion_mode="none",
+            )
             flow_scores = build_template_flow_scores(
                 cards=cards_seen,
                 pending_card=last_pending if isinstance(last_pending, dict) else {},
@@ -1680,20 +1719,29 @@ async def run(args: argparse.Namespace) -> int:
                 last_docgen_snapshot=stop_exc.snapshot if isinstance(stop_exc.snapshot, dict) else last_docgen_snapshot,
                 dialogue_quality=dialogue_quality,
                 document_quality=document_quality,
+                bundle_quality_summary=bundle_quality,
             )
             summary["flow_scores"] = flow_scores
+            summary["bundle_quality"] = bundle_quality
             summary["debug_refs"] = await collect_ai_debug_refs(
                 client,
                 repo_root=REPO_ROOT,
                 session_id=_safe_str(summary.get("session_id")),
                 matter_id=_safe_str(summary.get("matter_id")),
             )
+            quality_summary_ref = str((bundle_quality.get("refs") or {}).get("summary") or "").strip()
+            if quality_summary_ref:
+                bundle_refs = summary["debug_refs"].get("bundle_refs") if isinstance(summary.get("debug_refs"), dict) and isinstance(summary["debug_refs"].get("bundle_refs"), list) else []
+                if quality_summary_ref not in bundle_refs:
+                    bundle_refs.append(quality_summary_ref)
+                    summary["debug_refs"]["bundle_refs"] = bundle_refs
 
             _write_events_ndjson(out_dir / "events.ndjson", event_rows)
             _write_json(out_dir / "cards.json", cards_seen)
             _write_json(out_dir / "dialogue_quality.json", dialogue_quality)
             _write_json(out_dir / "document_quality.json", document_quality)
             _write_json(out_dir / "node_timeline.json", node_timeline)
+            _write_json(out_dir / "bundle_quality.json", bundle_quality)
             _write_json(out_dir / "flow_scores.json", flow_scores)
             _write_json(out_dir / "debug_refs.json", summary.get("debug_refs") if isinstance(summary.get("debug_refs"), dict) else {})
             _write_json(out_dir / "summary.json", summary)
@@ -1740,6 +1788,20 @@ async def run(args: argparse.Namespace) -> int:
                     "latest_docgen_node": _safe_str(last_docgen_snapshot.get("docgen_node")),
                 }
             )
+            bundle_export = export_observability_bundle(
+                repo_root=REPO_ROOT,
+                session_id=_safe_str(summary.get("session_id")),
+                matter_id=_safe_str(summary.get("matter_id")),
+                reason="template_draft_failed",
+            )
+            bundle_quality = build_bundle_quality_reports(
+                repo_root=REPO_ROOT,
+                bundle_dir=bundle_export["bundle_dir"],
+                flow_id="template_draft",
+                snapshot={},
+                current_view={},
+                goal_completion_mode="none",
+            )
             flow_scores = build_template_flow_scores(
                 cards=cards_seen,
                 pending_card=last_pending if isinstance(last_pending, dict) else {},
@@ -1748,14 +1810,22 @@ async def run(args: argparse.Namespace) -> int:
                 last_docgen_snapshot=last_docgen_snapshot,
                 dialogue_quality=dialogue_quality,
                 document_quality=document_quality,
+                bundle_quality_summary=bundle_quality,
             )
             summary["flow_scores"] = flow_scores
+            summary["bundle_quality"] = bundle_quality
             summary["debug_refs"] = await collect_ai_debug_refs(
                 client,
                 repo_root=REPO_ROOT,
                 session_id=_safe_str(summary.get("session_id")),
                 matter_id=_safe_str(summary.get("matter_id")),
             )
+            quality_summary_ref = str((bundle_quality.get("refs") or {}).get("summary") or "").strip()
+            if quality_summary_ref:
+                bundle_refs = summary["debug_refs"].get("bundle_refs") if isinstance(summary.get("debug_refs"), dict) and isinstance(summary["debug_refs"].get("bundle_refs"), list) else []
+                if quality_summary_ref not in bundle_refs:
+                    bundle_refs.append(quality_summary_ref)
+                    summary["debug_refs"]["bundle_refs"] = bundle_refs
 
             matter_id = _safe_str(summary.get("matter_id"))
             session_id = _safe_str(summary.get("session_id"))
@@ -1793,6 +1863,7 @@ async def run(args: argparse.Namespace) -> int:
             _write_json(out_dir / "document_quality.json", document_quality)
             _write_json(out_dir / "node_timeline.json", node_timeline)
             _write_json(out_dir / "failure_diagnostics.json", failure_diag)
+            _write_json(out_dir / "bundle_quality.json", bundle_quality)
             _write_json(out_dir / "flow_scores.json", flow_scores)
             _write_json(out_dir / "debug_refs.json", summary.get("debug_refs") if isinstance(summary.get("debug_refs"), dict) else {})
             _write_json(out_dir / "summary.json", summary)

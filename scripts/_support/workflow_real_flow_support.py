@@ -47,7 +47,7 @@ def load_real_flow_env(*, repo_root: Path, e2e_root: Path) -> None:
     load_dotenv(e2e_root / ".env", override=False)
 
 
-def terminate_stale_script_runs(*, script_name: str, current_pid: int | None = None, grace_seconds: float = 1.0) -> list[int]:
+def _find_script_run_matches(*, script_name: str, current_pid: int | None = None) -> list[tuple[int, str]]:
     token = safe_str(script_name)
     if not token:
         return []
@@ -56,7 +56,7 @@ def terminate_stale_script_runs(*, script_name: str, current_pid: int | None = N
         raw = subprocess.check_output(["pgrep", "-af", token], text=True)
     except Exception:
         return []
-    victims: list[int] = []
+    matches: list[tuple[int, str]] = []
     for line in raw.splitlines():
         parts = line.strip().split(maxsplit=1)
         if not parts:
@@ -70,7 +70,18 @@ def terminate_stale_script_runs(*, script_name: str, current_pid: int | None = N
         cmd = parts[1] if len(parts) > 1 else ""
         if token not in cmd:
             continue
-        victims.append(pid)
+        matches.append((pid, cmd))
+    return matches
+
+
+def terminate_stale_script_runs(*, script_name: str, current_pid: int | None = None, grace_seconds: float = 1.0) -> list[int]:
+    matches = _find_script_run_matches(script_name=script_name, current_pid=current_pid)
+    victims = [pid for pid, _cmd in matches]
+    if victims:
+        print(
+            f"[cleanup] stale {script_name} pids={victims}",
+            flush=True,
+        )
     for pid in victims:
         try:
             os.kill(pid, signal.SIGTERM)
@@ -83,6 +94,22 @@ def terminate_stale_script_runs(*, script_name: str, current_pid: int | None = N
             os.kill(pid, signal.SIGKILL)
         except Exception:
             pass
+    survivors = _find_script_run_matches(script_name=script_name, current_pid=current_pid)
+    if survivors:
+        survivor_pids = [pid for pid, _cmd in survivors]
+        survivor_cmds = [cmd for _pid, cmd in survivors]
+        print(
+            f"[cleanup] stale {script_name} survivors={survivor_pids}",
+            flush=True,
+        )
+        raise RuntimeError(
+            f"残留脚本未清干净: {script_name} pids={survivor_pids} cmds={survivor_cmds}"
+        )
+    if victims:
+        print(
+            f"[cleanup] cleared {script_name} pids={victims}",
+            flush=True,
+        )
     return victims
 
 
@@ -336,6 +363,12 @@ async def collect_ai_debug_refs(
             target_dir = bundle_dir / rel_dir
             if target_dir.exists():
                 bundle_refs.append(str(target_dir))
+        quality_summary = bundle_dir / "quality" / "reports" / "summary.json"
+        if quality_summary.exists():
+            bundle_refs.append(str(quality_summary))
+        quality_dir = bundle_dir / "quality"
+        if quality_dir.exists():
+            bundle_refs.append(str(quality_dir))
 
     return {
         "thread_id": thread_id,

@@ -29,7 +29,8 @@ from scripts._support.template_draft_real_flow_support import (
     DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE,
     DEFAULT_LEGAL_OPINION_FACTS,
 )
-from scripts._support.diagnostic_bundle_support import export_failure_bundle, format_first_bad_line
+from scripts._support.diagnostic_bundle_support import export_failure_bundle, export_observability_bundle, format_first_bad_line
+from scripts._support.quality_policy_support import build_bundle_quality_reports, merge_bundle_quality_report
 from scripts._support.workflow_real_flow_support import (
     bootstrap_flow,
     collect_ai_debug_refs,
@@ -466,20 +467,44 @@ async def _collect_round_state(
         out_dir=out_dir,
         leaf_name=f"{round_no:02d}.{round_label}.legal_opinion.txt",
     )
-    observability = await collect_flow_observability(client, matter_id=matter_id, session_id=session_id)
-    debug_refs = await collect_ai_debug_refs(
-        client,
+    bundle_export = export_observability_bundle(
         repo_root=REPO_ROOT,
         session_id=session_id,
         matter_id=matter_id,
+        reason=f"legal_opinion_{round_label}",
     )
-    bundle_quality = _bundle_quality_report(
+    observability = await collect_flow_observability(client, matter_id=matter_id, session_id=session_id)
+    base_bundle_quality = _bundle_quality_report(
         legal_view=legal_view,
         docgen_view=docgen_view,
         deliverables=deliverables,
         deliverable_text=deliverable_text,
         deliverable_status=deliverable_status,
     )
+    quality_summary = build_bundle_quality_reports(
+        repo_root=REPO_ROOT,
+        bundle_dir=bundle_export["bundle_dir"],
+        flow_id="legal_opinion",
+        snapshot=snapshot,
+        current_view=legal_view,
+        goal_completion_mode=goal_completion_mode,
+    )
+    bundle_quality = merge_bundle_quality_report(
+        base_report=base_bundle_quality,
+        quality_summary=quality_summary,
+    )
+    debug_refs = await collect_ai_debug_refs(
+        client,
+        repo_root=REPO_ROOT,
+        session_id=session_id,
+        matter_id=matter_id,
+    )
+    quality_summary_ref = str((quality_summary.get("refs") or {}).get("summary") or "").strip()
+    if quality_summary_ref:
+        bundle_refs = debug_refs.get("bundle_refs") if isinstance(debug_refs.get("bundle_refs"), list) else []
+        if quality_summary_ref not in bundle_refs:
+            bundle_refs.append(quality_summary_ref)
+            debug_refs["bundle_refs"] = bundle_refs
     flow_scores = build_flow_scores(
         flow_id="legal_opinion",
         seen_cards=flow.seen_cards,
@@ -491,6 +516,7 @@ async def _collect_round_state(
         deliverable_text=deliverable_text,
         deliverable_status=deliverable_status,
         observability=observability,
+        bundle_quality_summary=quality_summary,
         goal_completion_mode=goal_completion_mode,
     )
     prefix = f"{round_no:02d}.{round_label}"
@@ -744,7 +770,16 @@ async def run(args: argparse.Namespace) -> int:
                 matter_id=_safe_str(flow.matter_id),
                 reason="legal_opinion_analysis_not_ready",
             )
+            bundle_quality = build_bundle_quality_reports(
+                repo_root=REPO_ROOT,
+                bundle_dir=bundle["bundle_dir"],
+                flow_id="legal_opinion",
+                snapshot=await fetch_workbench_snapshot(client, _safe_str(flow.matter_id)) if _safe_str(flow.matter_id) else {},
+                current_view={},
+                goal_completion_mode="none",
+            )
             write_json(out_dir / "failure_summary.json", bundle["summary"])
+            write_json(out_dir / "bundle_quality.failure.json", bundle_quality)
             print(format_first_bad_line(bundle["summary"]))
             raise AssertionError(
                 f"Failed to reach legal opinion analysis ready after {int(args.max_steps)} steps "
@@ -920,7 +955,16 @@ async def run(args: argparse.Namespace) -> int:
             matter_id=_safe_str(final_round["matter_id"]),
             reason="legal_opinion_real_flow_stable_hard_block",
         )
+        bundle_quality = build_bundle_quality_reports(
+            repo_root=REPO_ROOT,
+            bundle_dir=bundle["bundle_dir"],
+            flow_id="legal_opinion",
+            snapshot=final_round["snapshot"] if isinstance(final_round.get("snapshot"), dict) else {},
+            current_view=final_round["legal_view"] if isinstance(final_round.get("legal_view"), dict) else {},
+            goal_completion_mode="workflow_action",
+        )
         write_json(out_dir / "failure_summary.json", bundle["summary"])
+        write_json(out_dir / "bundle_quality.failure.json", bundle_quality)
         print(format_first_bad_line(bundle["summary"]))
         print("[result] stable_hard_block")
         return 2

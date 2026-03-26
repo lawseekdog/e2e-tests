@@ -32,8 +32,9 @@ from scripts._support.workflow_real_flow_support import (
     upload_consultation_files,
     write_json,
 )
-from scripts._support.diagnostic_bundle_support import export_failure_bundle, format_first_bad_line
+from scripts._support.diagnostic_bundle_support import export_failure_bundle, export_observability_bundle, format_first_bad_line
 from scripts._support.flow_score_support import build_flow_scores, collect_flow_observability
+from scripts._support.quality_policy_support import build_bundle_quality_reports
 
 
 DEFAULT_KICKOFF = (
@@ -219,7 +220,16 @@ async def run(args: argparse.Namespace) -> int:
                 matter_id=_safe_str(flow.matter_id),
                 reason="analysis_real_flow_failed",
             )
+            bundle_quality = build_bundle_quality_reports(
+                repo_root=REPO_ROOT,
+                bundle_dir=bundle["bundle_dir"],
+                flow_id="analysis",
+                snapshot=fail_snapshot if isinstance(fail_snapshot, dict) else {},
+                current_view=_extract_analysis_view(fail_snapshot if isinstance(fail_snapshot, dict) else {}),
+                goal_completion_mode="none",
+            )
             write_json(out_dir / "failure_summary.json", bundle["summary"])
+            write_json(out_dir / "bundle_quality.failure.json", bundle_quality)
             print(format_first_bad_line(bundle["summary"]))
             raise
 
@@ -235,13 +245,33 @@ async def run(args: argparse.Namespace) -> int:
         key_risks = risk_assessment.get("key_risks") if isinstance(risk_assessment.get("key_risks"), list) else []
         pending_card = await flow.get_pending_card()
         messages = await list_session_messages(client, session_id)
+        bundle_export = export_observability_bundle(
+            repo_root=REPO_ROOT,
+            session_id=session_id,
+            matter_id=final_matter_id,
+            reason="analysis_real_flow_success",
+        )
         observability = await collect_flow_observability(client, matter_id=final_matter_id, session_id=session_id)
+        bundle_quality = build_bundle_quality_reports(
+            repo_root=REPO_ROOT,
+            bundle_dir=bundle_export["bundle_dir"],
+            flow_id="analysis",
+            snapshot=snapshot,
+            current_view=analysis_view,
+            goal_completion_mode="card" if is_goal_completion_card(pending_card) else "none",
+        )
         debug_refs = await collect_ai_debug_refs(
             client,
             repo_root=REPO_ROOT,
             session_id=session_id,
             matter_id=final_matter_id,
         )
+        quality_summary_ref = str((bundle_quality.get("refs") or {}).get("summary") or "").strip()
+        if quality_summary_ref:
+            bundle_refs = debug_refs.get("bundle_refs") if isinstance(debug_refs.get("bundle_refs"), list) else []
+            if quality_summary_ref not in bundle_refs:
+                bundle_refs.append(quality_summary_ref)
+                debug_refs["bundle_refs"] = bundle_refs
         flow_scores = build_flow_scores(
             flow_id="analysis",
             seen_cards=flow.seen_cards,
@@ -253,6 +283,7 @@ async def run(args: argparse.Namespace) -> int:
             deliverable_text="",
             deliverable_status=_safe_str(pricing_view.get("status")),
             observability=observability,
+            bundle_quality_summary=bundle_quality,
             goal_completion_mode="card" if is_goal_completion_card(pending_card) else "none",
         )
 
@@ -282,10 +313,12 @@ async def run(args: argparse.Namespace) -> int:
             "seen_sse_rounds": len(flow.seen_sse),
             "recent_messages_count": len(messages),
             "debug_refs": debug_refs,
+            "bundle_quality": bundle_quality,
             "flow_scores": flow_scores,
         }
 
         write_json(out_dir / "summary.json", summary)
+        write_json(out_dir / "bundle_quality.json", bundle_quality)
         write_json(out_dir / "flow_scores.json", flow_scores)
         write_json(out_dir / "snapshot.json", snapshot)
         write_json(out_dir / "analysis_view.json", analysis_view)

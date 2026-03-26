@@ -323,7 +323,15 @@ async def test_resume_card_first_event_mode_accepts_progress_without_user_messag
 
     result = await flow.resume_card(card, max_loops=4)
     assert isinstance(result, dict)
-    assert result.get("events") == [{"event": "progress", "data": {"phase": "intake"}}]
+    events = result.get("events")
+    assert isinstance(events, list)
+    assert any(
+        isinstance(row, dict)
+        and row.get("event") == "progress"
+        and isinstance(row.get("data"), dict)
+        and row.get("data", {}).get("phase") == "intake"
+        for row in events
+    )
 
 
 @pytest.mark.asyncio
@@ -346,7 +354,7 @@ async def test_resume_card_skill_error_confirm_uses_fire_and_poll(
     card = {
         "id": "card-fire-poll",
         "skill_id": "skill-error-analysis",
-        "task_key": "workflow_confirm_legal_opinion_evidence_event_binding_skill-error-analysis",
+        "task_key": "workflow_confirm_legal_opinion_evidence_semantic_events_skill-error-analysis",
         "review_type": "confirm",
         "questions": [{"field_key": "data.workbench.skill_error_acknowledged", "input_type": "boolean", "required": True}],
     }

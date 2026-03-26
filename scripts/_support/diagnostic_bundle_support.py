@@ -141,11 +141,17 @@ def export_observability_bundle(
 
 
 def format_first_bad_line(summary: dict[str, Any]) -> str:
+    regressions = [
+        _safe_str(item)
+        for item in (summary.get("focus_regressions") if isinstance(summary.get("focus_regressions"), list) else [])
+        if _safe_str(item)
+    ]
     return (
         "FIRST_BAD "
-        f"skill={_safe_str(summary.get('first_bad_skill')) or '-'} "
-        f"stage={_safe_str(summary.get('first_bad_stage')) or '-'} "
+        f"node={_safe_str(summary.get('first_bad_node')) or '-'} "
+        f"focus_node={_safe_str(summary.get('first_bad_focus_node')) or '-'} "
         f"class={_safe_str(summary.get('failure_class')) or '-'} "
         f"reason={_safe_str(summary.get('primary_reason_code')) or '-'} "
+        f"regressions={','.join(regressions) or '-'} "
         f"bundle={_safe_str(summary.get('bundle_dir')) or '-'}"
     )

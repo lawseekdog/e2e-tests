@@ -11,16 +11,18 @@ from scripts._support.diagnostic_bundle_support import export_failure_bundle, fo
 def test_format_first_bad_line_renders_compact_summary() -> None:
     line = format_first_bad_line(
         {
-            "first_bad_skill": "analysis-evidence-semantic-events",
-            "first_bad_stage": "validate_raw",
+            "first_bad_node": "skill:analysis-evidence-semantic-events",
+            "first_bad_focus_node": "merge_scoped_skill_runtime",
             "failure_class": "contract_mismatch",
             "primary_reason_code": "fact_graph_draft_event_roles_missing",
+            "focus_regressions": ["files:3->0"],
             "bundle_dir": "/tmp/bundle",
         }
     )
 
     assert "FIRST_BAD" in line
-    assert "skill=analysis-evidence-semantic-events" in line
+    assert "node=skill:analysis-evidence-semantic-events" in line
+    assert "focus_node=merge_scoped_skill_runtime" in line
     assert "reason=fact_graph_draft_event_roles_missing" in line
 
 

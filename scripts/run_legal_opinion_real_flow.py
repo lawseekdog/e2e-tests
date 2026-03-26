@@ -304,7 +304,7 @@ def _analysis_reference_refresh_hint(snapshot: dict[str, Any] | None) -> dict[st
         "authority_pending",
     }
     refreshable_codes = {
-        "reference_meta_finalize_missing_split_outputs",
+        "references_grounding_law_rows_missing",
         "authority_pending",
         "retrieval_no_hit",
     }

@@ -144,7 +144,7 @@ def test_analysis_allows_reference_refresh_when_references_stage_is_explicitly_b
             "current_task_id": "references_finalize",
             "references_meta": {
                 "status": "blocked",
-                "reason_codes": ["reference_meta_finalize_missing_split_outputs"],
+                "reason_codes": ["references_grounding_law_rows_missing"],
             },
             "retrieval_diagnostics": {
                 "final_reason": "retrieval_no_hit",

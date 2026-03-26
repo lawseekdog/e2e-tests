@@ -703,7 +703,7 @@ class ApiClient:
     async def resume(
         self,
         session_id: str,
-        user_response: dict[str, Any],
+        user_response: dict[str, Any] | list[dict[str, Any]],
         pending_card: dict[str, Any] | None = None,
         max_loops: int | None = None,
         card_id: str | None = None,
@@ -712,8 +712,18 @@ class ApiClient:
         if not resolved_card_id:
             raise ValueError("resume requires pending card id (card_id)")
 
+        if isinstance(user_response, dict):
+            raw_answers = user_response.get("answers")
+            if not isinstance(raw_answers, list) or not raw_answers:
+                raise ValueError("resume requires answers")
+            answers = raw_answers
+        elif isinstance(user_response, list) and user_response:
+            answers = user_response
+        else:
+            raise ValueError("resume requires answers")
+
         data: dict[str, Any] = {
-            "user_response": user_response,
+            "answers": answers,
             "card_id": resolved_card_id,
         }
         _ = pending_card

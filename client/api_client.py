@@ -627,7 +627,9 @@ class ApiClient:
         if not sid:
             raise ValueError("session_id is required")
 
-        url = f"{self.base_url}{CONSULTATIONS}/consultations/sessions/{sid}/attachments"
+        route_path = f"{CONSULTATIONS}/consultations/sessions/{sid}/attachments"
+        base_url, stripped_path = self._resolve_base_for_path(route_path)
+        url = f"{base_url}{stripped_path}"
         headers = dict(self.headers)
         headers.pop("Content-Type", None)  # Let httpx set multipart boundary.
 

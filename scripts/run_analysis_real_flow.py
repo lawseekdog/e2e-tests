@@ -19,6 +19,7 @@ sys.path.insert(0, str(E2E_ROOT))
 from client.api_client import ApiClient
 from scripts._support.workflow_real_flow_support import (
     bootstrap_flow,
+    configure_direct_service_mode,
     event_counts,
     fetch_workbench_snapshot,
     is_goal_completion_card,
@@ -54,54 +55,6 @@ FLOW_OVERRIDES = {
     "profile.legal_issue": "借贷关系成立、本金返还、逾期利息支持。",
 }
 
-_DEFAULT_REMOTE_STACK_HOST = "100.116.203.71"
-_DEFAULT_LOCAL_CONSULTATIONS_BASE_URL = "http://127.0.0.1:18021/api/v1"
-_DEFAULT_REMOTE_FILES_PORT = 18104
-_DEFAULT_REMOTE_MATTER_PORT = 18107
-
-
-def _api_url(host: str, port: int) -> str:
-    return f"http://{host}:{int(port)}/api/v1"
-
-
-def _configure_direct_service_mode(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
-    remote_stack_host = (
-        _safe_str(os.getenv("LAWSEEKDOG_REMOTE_STACK_HOST"))
-        or _safe_str(os.getenv("REMOTE_STACK_HOST"))
-        or _DEFAULT_REMOTE_STACK_HOST
-    )
-    consultations_base_url = (
-        _safe_str(args.consultations_base_url)
-        or _safe_str(os.getenv("E2E_CONSULTATIONS_BASE_URL"))
-        or _DEFAULT_LOCAL_CONSULTATIONS_BASE_URL
-    )
-    files_base_url = (
-        _safe_str(args.files_base_url)
-        or _safe_str(os.getenv("E2E_FILES_BASE_URL"))
-        or _api_url(remote_stack_host, _DEFAULT_REMOTE_FILES_PORT)
-    )
-    matter_base_url = (
-        _safe_str(args.matter_base_url)
-        or _safe_str(os.getenv("E2E_MATTER_BASE_URL"))
-        or _api_url(remote_stack_host, _DEFAULT_REMOTE_MATTER_PORT)
-    )
-
-    os.environ["E2E_CONSULTATIONS_BASE_URL"] = consultations_base_url
-    os.environ["E2E_FILES_BASE_URL"] = files_base_url
-    os.environ["E2E_MATTER_BASE_URL"] = matter_base_url
-    os.environ["E2E_DIRECT_USER_ID"] = _safe_str(args.direct_user_id) or _safe_str(os.getenv("E2E_DIRECT_USER_ID")) or "1"
-    os.environ["E2E_DIRECT_ORG_ID"] = _safe_str(args.direct_org_id) or _safe_str(os.getenv("E2E_DIRECT_ORG_ID")) or "1"
-    os.environ["E2E_DIRECT_IS_SUPERUSER"] = str(os.getenv("E2E_DIRECT_IS_SUPERUSER") or "false")
-
-    return consultations_base_url, {
-        "consultations_base_url": consultations_base_url,
-        "files_base_url": files_base_url,
-        "matter_base_url": matter_base_url,
-        "direct_user_id": os.environ["E2E_DIRECT_USER_ID"],
-        "direct_org_id": os.environ["E2E_DIRECT_ORG_ID"],
-        "remote_stack_host": remote_stack_host,
-    }
-
 def _extract_analysis_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
@@ -136,7 +89,17 @@ async def run(args: argparse.Namespace) -> int:
     direct_mode = not bool(args.use_gateway)
     direct_config: dict[str, str] = {}
     if direct_mode:
-        base_url, direct_config = _configure_direct_service_mode(args)
+        base_url, direct_config = configure_direct_service_mode(
+            remote_stack_host=_safe_str(args.remote_stack_host),
+            consultations_base_url=_safe_str(args.consultations_base_url),
+            matter_base_url=_safe_str(args.matter_base_url),
+            files_base_url=_safe_str(args.files_base_url),
+            local_consultations=True,
+            local_matter=True,
+            direct_user_id=_safe_str(args.direct_user_id),
+            direct_org_id=_safe_str(args.direct_org_id),
+            direct_is_superuser=_safe_str(args.direct_is_superuser),
+        )
     else:
         base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
     username = _safe_str(args.username) or _safe_str(os.getenv("LAWYER_USERNAME")) or "lawyer1"
@@ -325,8 +288,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--consultations-base-url", default="", help="Direct consultations-service base URL")
     parser.add_argument("--files-base-url", default="", help="Direct files-service base URL")
     parser.add_argument("--matter-base-url", default="", help="Direct matter-service base URL")
-    parser.add_argument("--direct-user-id", default="", help="Direct service mode user id (default: 1)")
-    parser.add_argument("--direct-org-id", default="", help="Direct service mode organization id (default: 1)")
+    parser.add_argument("--remote-stack-host", default="", help="Remote stack host for direct non-local services")
+    parser.add_argument("--direct-user-id", default="", help="Optional direct service mode user id (skip auth only when set)")
+    parser.add_argument("--direct-org-id", default="", help="Optional direct service mode organization id (skip auth only when set)")
+    parser.add_argument("--direct-is-superuser", default="", help="Optional direct service mode superuser flag")
     parser.add_argument("--username", default="", help="Lawyer username")
     parser.add_argument("--password", default="", help="Lawyer password")
     parser.add_argument("--kickoff", default=DEFAULT_KICKOFF, help="Initial user query")

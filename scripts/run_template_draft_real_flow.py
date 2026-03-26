@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from dotenv import load_dotenv
 
 E2E_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = E2E_ROOT.parent
@@ -44,6 +43,7 @@ from scripts._support.template_draft_real_flow_support import (
     _normalize_stop_node,
 )
 from scripts._support.flow_score_support import build_template_flow_scores
+from scripts._support.workflow_real_flow_support import configure_direct_service_mode, load_real_flow_env
 
 
 DEFAULT_FACTS = DEFAULT_LEGAL_OPINION_FACTS
@@ -693,25 +693,24 @@ class StopAfterNodeReached(RuntimeError):
 
 
 async def run(args: argparse.Namespace) -> int:
-    load_dotenv(REPO_ROOT / ".env", override=False)
-    load_dotenv(E2E_ROOT / ".env", override=False)
-    remote_stack_host = _safe_str(os.getenv("LAWSEEKDOG_REMOTE_STACK_HOST"))
+    load_real_flow_env(repo_root=REPO_ROOT, e2e_root=E2E_ROOT)
 
-    if bool(args.direct_local):
-        os.environ["E2E_CONSULTATIONS_BASE_URL"] = "http://127.0.0.1:18021/api/v1"
-        os.environ["E2E_MATTER_BASE_URL"] = "http://127.0.0.1:18020/api/v1"
-        os.environ["E2E_TEMPLATES_BASE_URL"] = "http://127.0.0.1:18022/api/v1"
-        os.environ["E2E_FILES_BASE_URL"] = (
-            f"http://{remote_stack_host}:18104/api/v1"
-            if remote_stack_host
-            else "http://127.0.0.1:18011/api/v1"
+    direct_mode = bool(args.direct_local) or not bool(args.use_gateway)
+    direct_config: dict[str, str] = {}
+    if direct_mode:
+        base_url, direct_config = configure_direct_service_mode(
+            remote_stack_host=_safe_str(args.remote_stack_host),
+            consultations_base_url=_safe_str(args.consultations_base_url),
+            matter_base_url=_safe_str(args.matter_base_url),
+            files_base_url=_safe_str(args.files_base_url),
+            templates_base_url=_safe_str(args.templates_base_url),
+            local_consultations=True,
+            local_matter=True,
+            local_templates=True,
+            direct_user_id=_safe_str(args.direct_user_id),
+            direct_org_id=_safe_str(args.direct_org_id),
+            direct_is_superuser="false",
         )
-        os.environ["E2E_DIRECT_USER_ID"] = _safe_str(args.direct_user_id) or "2"
-        os.environ["E2E_DIRECT_ORG_ID"] = _safe_str(args.direct_org_id) or "1"
-        os.environ["E2E_DIRECT_IS_SUPERUSER"] = "false"
-
-    if bool(args.direct_local):
-        base_url = _safe_str(args.base_url) or "http://127.0.0.1:18021/api/v1"
     else:
         base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
     username = _safe_str(args.username) or _safe_str(os.getenv("LAWYER_USERNAME")) or "lawyer1"
@@ -755,10 +754,18 @@ async def run(args: argparse.Namespace) -> int:
     print(f"[config] template_id={template_id}")
     print(f"[config] output_key={output_key}")
     print(f"[config] output_dir={out_dir}")
-    if bool(args.direct_local):
-        print("[config] direct_local=true")
-        print(f"[config] direct_user_id={os.getenv('E2E_DIRECT_USER_ID')}")
-        print(f"[config] direct_org_id={os.getenv('E2E_DIRECT_ORG_ID')}")
+    print(f"[config] direct_service_mode={direct_mode}")
+    if direct_mode:
+        print(f"[config] auth_base_url={direct_config.get('auth_base_url') or '-'}")
+        print(f"[config] consultations_base_url={direct_config.get('consultations_base_url') or '-'}")
+        print(f"[config] matter_base_url={direct_config.get('matter_base_url') or '-'}")
+        print(f"[config] files_base_url={direct_config.get('files_base_url') or '-'}")
+        print(f"[config] templates_base_url={direct_config.get('templates_base_url') or '-'}")
+        if _safe_str(os.getenv('E2E_DIRECT_USER_ID')):
+            print(f"[config] direct_user_id={os.getenv('E2E_DIRECT_USER_ID')}")
+            print(f"[config] direct_org_id={os.getenv('E2E_DIRECT_ORG_ID')}")
+    else:
+        print("[config] gateway_mode=true")
 
     rounds: list[dict[str, Any]] = []
     cards_seen: list[dict[str, Any]] = []
@@ -1795,9 +1802,15 @@ async def run(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run smart-template drafting workflow via consultations WS (real LLM).")
     parser.add_argument("--base-url", default="", help="Gateway base URL, e.g. http://host/api/v1")
-    parser.add_argument("--direct-local", action="store_true", help="Use local direct service URLs and direct identity injection without auth-service")
-    parser.add_argument("--direct-user-id", default="", help="Direct local mode user id (default: 2)")
-    parser.add_argument("--direct-org-id", default="", help="Direct local mode organization id (default: 1)")
+    parser.add_argument("--use-gateway", action="store_true", default=False, help="Use gateway mode instead of direct service URLs")
+    parser.add_argument("--direct-local", action="store_true", help="Deprecated alias for direct service mode")
+    parser.add_argument("--consultations-base-url", default="", help="Direct consultations-service base URL")
+    parser.add_argument("--files-base-url", default="", help="Direct files-service base URL")
+    parser.add_argument("--matter-base-url", default="", help="Direct matter-service base URL")
+    parser.add_argument("--templates-base-url", default="", help="Direct templates-service base URL")
+    parser.add_argument("--remote-stack-host", default="", help="Remote stack host for direct non-local services")
+    parser.add_argument("--direct-user-id", default="", help="Optional direct service mode user id (skip auth only when set)")
+    parser.add_argument("--direct-org-id", default="", help="Optional direct service mode organization id (skip auth only when set)")
     parser.add_argument("--username", default="", help="Lawyer username")
     parser.add_argument("--password", default="", help="Lawyer password")
     parser.add_argument("--service-type-id", default=DEFAULT_SERVICE_TYPE_ID, help="Matter service_type_id")

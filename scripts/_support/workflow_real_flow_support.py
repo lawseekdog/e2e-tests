@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,18 @@ from dotenv import load_dotenv
 from client.api_client import ApiClient
 from support.workbench.flow_runner import WorkbenchFlow
 from support.workbench.utils import unwrap_api_response
+
+_DEFAULT_REMOTE_STACK_HOST = "100.116.203.71"
+_REMOTE_SERVICE_PORTS: dict[str, int] = {
+    "auth": 18101,
+    "user": 18113,
+    "organization": 18110,
+    "consultations": 18103,
+    "files": 18104,
+    "knowledge": 18106,
+    "matter": 18107,
+    "templates": 18112,
+}
 
 
 def safe_str(value: Any) -> str:
@@ -29,6 +42,101 @@ def event_counts(sse: dict[str, Any]) -> dict[str, int]:
 def load_real_flow_env(*, repo_root: Path, e2e_root: Path) -> None:
     load_dotenv(repo_root / ".env", override=False)
     load_dotenv(e2e_root / ".env", override=False)
+
+
+def api_url(host: str, port: int) -> str:
+    return f"http://{host}:{int(port)}/api/v1"
+
+
+def configure_direct_service_mode(
+    *,
+    remote_stack_host: str = "",
+    consultations_base_url: str = "",
+    matter_base_url: str = "",
+    files_base_url: str = "",
+    templates_base_url: str = "",
+    auth_base_url: str = "",
+    user_base_url: str = "",
+    organization_base_url: str = "",
+    knowledge_base_url: str = "",
+    local_consultations: bool = True,
+    local_matter: bool = True,
+    local_templates: bool = False,
+    direct_user_id: str = "",
+    direct_org_id: str = "",
+    direct_is_superuser: str = "",
+) -> tuple[str, dict[str, str]]:
+    host = (
+        safe_str(remote_stack_host)
+        or safe_str(os.getenv("LAWSEEKDOG_REMOTE_STACK_HOST"))
+        or safe_str(os.getenv("REMOTE_STACK_HOST"))
+        or _DEFAULT_REMOTE_STACK_HOST
+    )
+
+    resolved_auth = safe_str(auth_base_url) or safe_str(os.getenv("E2E_AUTH_BASE_URL")) or api_url(host, _REMOTE_SERVICE_PORTS["auth"])
+    resolved_user = safe_str(user_base_url) or safe_str(os.getenv("E2E_USER_BASE_URL")) or api_url(host, _REMOTE_SERVICE_PORTS["user"])
+    resolved_org = safe_str(organization_base_url) or safe_str(os.getenv("E2E_ORG_BASE_URL")) or api_url(host, _REMOTE_SERVICE_PORTS["organization"])
+    resolved_consultations = (
+        safe_str(consultations_base_url)
+        or safe_str(os.getenv("E2E_CONSULTATIONS_BASE_URL"))
+        or api_url("127.0.0.1", 18021)
+        if local_consultations
+        else api_url(host, _REMOTE_SERVICE_PORTS["consultations"])
+    )
+    resolved_matter = (
+        safe_str(matter_base_url)
+        or safe_str(os.getenv("E2E_MATTER_BASE_URL"))
+        or api_url("127.0.0.1", 18020)
+        if local_matter
+        else api_url(host, _REMOTE_SERVICE_PORTS["matter"])
+    )
+    resolved_files = safe_str(files_base_url) or safe_str(os.getenv("E2E_FILES_BASE_URL")) or api_url(host, _REMOTE_SERVICE_PORTS["files"])
+    resolved_knowledge = safe_str(knowledge_base_url) or safe_str(os.getenv("E2E_KNOWLEDGE_BASE_URL")) or api_url(host, _REMOTE_SERVICE_PORTS["knowledge"])
+    resolved_templates = (
+        safe_str(templates_base_url)
+        or safe_str(os.getenv("E2E_TEMPLATES_BASE_URL"))
+        or (api_url("127.0.0.1", 18022) if local_templates else api_url(host, _REMOTE_SERVICE_PORTS["templates"]))
+    )
+
+    os.environ["E2E_AUTH_BASE_URL"] = resolved_auth
+    os.environ["E2E_USER_BASE_URL"] = resolved_user
+    os.environ["E2E_ORG_BASE_URL"] = resolved_org
+    os.environ["E2E_CONSULTATIONS_BASE_URL"] = resolved_consultations
+    os.environ["E2E_MATTER_BASE_URL"] = resolved_matter
+    os.environ["E2E_FILES_BASE_URL"] = resolved_files
+    os.environ["E2E_KNOWLEDGE_BASE_URL"] = resolved_knowledge
+    os.environ["E2E_TEMPLATES_BASE_URL"] = resolved_templates
+
+    uid = safe_str(direct_user_id) or safe_str(os.getenv("E2E_DIRECT_USER_ID"))
+    oid = safe_str(direct_org_id) or safe_str(os.getenv("E2E_DIRECT_ORG_ID"))
+    superuser = safe_str(direct_is_superuser) or safe_str(os.getenv("E2E_DIRECT_IS_SUPERUSER"))
+    if uid:
+        os.environ["E2E_DIRECT_USER_ID"] = uid
+    else:
+        os.environ.pop("E2E_DIRECT_USER_ID", None)
+    if oid:
+        os.environ["E2E_DIRECT_ORG_ID"] = oid
+    else:
+        os.environ.pop("E2E_DIRECT_ORG_ID", None)
+    if superuser:
+        os.environ["E2E_DIRECT_IS_SUPERUSER"] = superuser
+    else:
+        os.environ.pop("E2E_DIRECT_IS_SUPERUSER", None)
+
+    config = {
+        "remote_stack_host": host,
+        "auth_base_url": resolved_auth,
+        "user_base_url": resolved_user,
+        "organization_base_url": resolved_org,
+        "consultations_base_url": resolved_consultations,
+        "matter_base_url": resolved_matter,
+        "files_base_url": resolved_files,
+        "knowledge_base_url": resolved_knowledge,
+        "templates_base_url": resolved_templates,
+        "direct_user_id": uid,
+        "direct_org_id": oid,
+    }
+    return resolved_consultations, config
 
 
 def resolve_output_dir(*, repo_root: Path, output_dir: str, default_leaf: str) -> Path:
@@ -137,7 +245,9 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 __all__ = [
+    "api_url",
     "bootstrap_flow",
+    "configure_direct_service_mode",
     "event_counts",
     "fetch_workbench_snapshot",
     "is_goal_completion_card",

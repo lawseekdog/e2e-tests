@@ -26,6 +26,7 @@ from support.workbench.docx import (
 from support.workbench.flow_runner import WorkbenchFlow
 from scripts._support.workflow_real_flow_support import (
     bootstrap_flow,
+    configure_direct_service_mode,
     event_counts as _shared_event_counts,
     fetch_workbench_snapshot as _shared_fetch_workbench_snapshot,
     list_deliverables as _shared_list_deliverables,
@@ -199,7 +200,22 @@ def _latest_assistant_message(rows: list[dict[str, Any]]) -> str:
 async def run(args: argparse.Namespace) -> int:
     load_real_flow_env(repo_root=REPO_ROOT, e2e_root=E2E_ROOT)
 
-    base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
+    direct_mode = not bool(args.use_gateway)
+    direct_config: dict[str, str] = {}
+    if direct_mode:
+        base_url, direct_config = configure_direct_service_mode(
+            remote_stack_host=_safe_str(args.remote_stack_host),
+            consultations_base_url=_safe_str(args.consultations_base_url),
+            matter_base_url=_safe_str(args.matter_base_url),
+            files_base_url=_safe_str(args.files_base_url),
+            local_consultations=True,
+            local_matter=True,
+            direct_user_id=_safe_str(args.direct_user_id),
+            direct_org_id=_safe_str(args.direct_org_id),
+            direct_is_superuser=_safe_str(args.direct_is_superuser),
+        )
+    else:
+        base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
     username = _safe_str(args.username) or _safe_str(os.getenv("LAWYER_USERNAME")) or "lawyer1"
     password = _safe_str(args.password) or _safe_str(os.getenv("LAWYER_PASSWORD")) or "lawyer123456"
     kickoff = _safe_str(args.kickoff) or DEFAULT_KICKOFF
@@ -224,6 +240,14 @@ async def run(args: argparse.Namespace) -> int:
     )
 
     print(f"[config] base_url={base_url}")
+    print(f"[config] direct_service_mode={direct_mode}")
+    if direct_mode:
+        print(f"[config] auth_base_url={direct_config.get('auth_base_url') or '-'}")
+        print(f"[config] consultations_base_url={direct_config.get('consultations_base_url') or '-'}")
+        print(f"[config] matter_base_url={direct_config.get('matter_base_url') or '-'}")
+        print(f"[config] files_base_url={direct_config.get('files_base_url') or '-'}")
+    else:
+        print("[config] gateway_mode=true")
     print(f"[config] user={username}")
     print(f"[config] contract_file={contract_file}")
     print(f"[config] output_dir={out_dir}")
@@ -401,6 +425,14 @@ async def run(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run contract review workflow via consultations WS (real LLM).")
     parser.add_argument("--base-url", default="", help="Gateway base URL, e.g. http://host/api/v1")
+    parser.add_argument("--use-gateway", action="store_true", default=False, help="Use gateway mode instead of direct service URLs")
+    parser.add_argument("--consultations-base-url", default="", help="Direct consultations-service base URL")
+    parser.add_argument("--files-base-url", default="", help="Direct files-service base URL")
+    parser.add_argument("--matter-base-url", default="", help="Direct matter-service base URL")
+    parser.add_argument("--remote-stack-host", default="", help="Remote stack host for direct non-local services")
+    parser.add_argument("--direct-user-id", default="", help="Optional direct service mode user id (skip auth only when set)")
+    parser.add_argument("--direct-org-id", default="", help="Optional direct service mode organization id (skip auth only when set)")
+    parser.add_argument("--direct-is-superuser", default="", help="Optional direct service mode superuser flag")
     parser.add_argument("--username", default="", help="Lawyer username")
     parser.add_argument("--password", default="", help="Lawyer password")
     parser.add_argument("--contract-file", default="", help="Contract file path (.docx/.txt)")

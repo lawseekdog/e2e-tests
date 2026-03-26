@@ -29,6 +29,7 @@ from scripts._support.template_draft_real_flow_support import (
     DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE,
     DEFAULT_LEGAL_OPINION_FACTS,
 )
+from scripts._support.diagnostic_bundle_support import export_failure_bundle, format_first_bad_line
 from scripts._support.workflow_real_flow_support import (
     bootstrap_flow,
     event_counts,
@@ -733,6 +734,14 @@ async def run(args: argparse.Namespace) -> int:
                 await _persist_action_sse(out_dir, step_no, "analysis_step", sse)
             await asyncio.sleep(float(args.step_sleep_s))
         else:
+            bundle = export_failure_bundle(
+                repo_root=REPO_ROOT,
+                session_id=session_id,
+                matter_id=_safe_str(flow.matter_id),
+                reason="legal_opinion_analysis_not_ready",
+            )
+            write_json(out_dir / "failure_summary.json", bundle["summary"])
+            print(format_first_bad_line(bundle["summary"]))
             raise AssertionError(
                 f"Failed to reach legal opinion analysis ready after {int(args.max_steps)} steps "
                 f"(session_id={session_id}, matter_id={flow.matter_id})"
@@ -904,6 +913,14 @@ async def run(args: argparse.Namespace) -> int:
     print("[done] legal opinion workflow completed")
     print(f"[artifacts] {out_dir}")
     if not success and hard_block_summary:
+        bundle = export_failure_bundle(
+            repo_root=REPO_ROOT,
+            session_id=session_id,
+            matter_id=_safe_str(final_round["matter_id"]),
+            reason="legal_opinion_real_flow_stable_hard_block",
+        )
+        write_json(out_dir / "failure_summary.json", bundle["summary"])
+        print(format_first_bad_line(bundle["summary"]))
         print("[result] stable_hard_block")
         return 2
     return 0

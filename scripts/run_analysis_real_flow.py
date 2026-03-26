@@ -29,6 +29,7 @@ from scripts._support.workflow_real_flow_support import (
     upload_consultation_files,
     write_json,
 )
+from scripts._support.diagnostic_bundle_support import export_failure_bundle, format_first_bad_line
 from scripts._support.flow_score_support import build_flow_scores, collect_flow_observability
 
 
@@ -240,6 +241,14 @@ async def run(args: argparse.Namespace) -> int:
             )
             if isinstance(fail_snapshot, dict) and fail_snapshot:
                 write_json(out_dir / "snapshot.failure.json", fail_snapshot)
+            bundle = export_failure_bundle(
+                repo_root=REPO_ROOT,
+                session_id=session_id,
+                matter_id=_safe_str(flow.matter_id),
+                reason="analysis_real_flow_failed",
+            )
+            write_json(out_dir / "failure_summary.json", bundle["summary"])
+            print(format_first_bad_line(bundle["summary"]))
             raise
 
         await flow.refresh()

@@ -19,6 +19,7 @@ sys.path.insert(0, str(E2E_ROOT))
 from client.api_client import ApiClient
 from scripts._support.workflow_real_flow_support import (
     bootstrap_flow,
+    collect_ai_debug_refs,
     configure_direct_service_mode,
     event_counts,
     fetch_workbench_snapshot,
@@ -178,12 +179,17 @@ async def run(args: argparse.Namespace) -> int:
                 _analysis_ready,
                 max_steps=max(1, int(args.max_steps)),
                 description="analysis view + pricing plan ready",
-                allow_nudge=bool(args.allow_nudge),
             )
         except Exception as exc:
             await flow.refresh()
             fail_snapshot = await fetch_workbench_snapshot(client, _safe_str(flow.matter_id)) if flow.matter_id else {}
             fail_messages = await list_session_messages(client, session_id)
+            debug_refs = await collect_ai_debug_refs(
+                client,
+                repo_root=REPO_ROOT,
+                session_id=session_id,
+                matter_id=_safe_str(flow.matter_id),
+            )
             write_json(
                 out_dir / "failure_diagnostics.json",
                 {
@@ -200,6 +206,7 @@ async def run(args: argparse.Namespace) -> int:
                         ),
                         "",
                     ),
+                    "debug_refs": debug_refs,
                 },
             )
             if isinstance(fail_snapshot, dict) and fail_snapshot:
@@ -227,6 +234,12 @@ async def run(args: argparse.Namespace) -> int:
         pending_card = await flow.get_pending_card()
         messages = await list_session_messages(client, session_id)
         observability = await collect_flow_observability(client, matter_id=final_matter_id, session_id=session_id)
+        debug_refs = await collect_ai_debug_refs(
+            client,
+            repo_root=REPO_ROOT,
+            session_id=session_id,
+            matter_id=final_matter_id,
+        )
         flow_scores = build_flow_scores(
             flow_id="analysis",
             seen_cards=flow.seen_cards,
@@ -266,6 +279,7 @@ async def run(args: argparse.Namespace) -> int:
             "seen_cards": len(flow.seen_cards),
             "seen_sse_rounds": len(flow.seen_sse),
             "recent_messages_count": len(messages),
+            "debug_refs": debug_refs,
             "flow_scores": flow_scores,
         }
 
@@ -275,6 +289,9 @@ async def run(args: argparse.Namespace) -> int:
         write_json(out_dir / "analysis_view.json", analysis_view)
         write_json(out_dir / "pricing_plan_view.json", pricing_view)
         write_json(out_dir / "messages.json", {"messages": messages})
+        write_json(out_dir / "diagnostics_summary.json", debug_refs.get("diagnostics_summary") if isinstance(debug_refs.get("diagnostics_summary"), dict) else {})
+        write_json(out_dir / "diagnostics_events.json", {"events": debug_refs.get("diagnostics_events") if isinstance(debug_refs.get("diagnostics_events"), list) else []})
+        write_json(out_dir / "debug_refs.json", debug_refs)
 
     print("[done] analysis workflow completed")
     print(f"[artifacts] {out_dir}")
@@ -298,7 +315,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kickoff-max-loops", type=int, default=24, help="kickoff max_loops")
     parser.add_argument("--max-steps", type=int, default=220, help="run_until max steps")
     parser.add_argument("--cards-only", action="store_true", default=False, help="Kickoff once, then only poll and answer cards")
-    parser.add_argument("--allow-nudge", dest="allow_nudge", action="store_true", default=False, help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", default="", help="Artifacts output directory")
     return parser.parse_args()
 

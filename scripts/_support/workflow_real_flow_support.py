@@ -244,9 +244,73 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+async def collect_ai_debug_refs(
+    client: ApiClient,
+    *,
+    repo_root: Path,
+    session_id: str,
+    matter_id: str = "",
+) -> dict[str, Any]:
+    session_token = safe_str(session_id)
+    matter_token = safe_str(matter_id)
+    thread_id = session_token if session_token.startswith("session:") else (f"session:{session_token}" if session_token else "")
+    internal_api_key = safe_str(os.getenv("INTERNAL_API_KEY"))
+    summary: dict[str, Any] = {}
+    events: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
+
+    if thread_id and internal_api_key:
+        headers = {**client.headers, "X-Internal-Api-Key": internal_api_key}
+        try:
+            resp = await client.get(
+                "/ai-platform-service/internal/ai/diagnostics/summary",
+                params={"thread_id": thread_id},
+                headers=headers,
+            )
+            payload = unwrap_api_response(resp)
+            summary = payload.get("summary") if isinstance(payload, dict) and isinstance(payload.get("summary"), dict) else {}
+        except Exception as exc:  # noqa: BLE001
+            errors["diagnostics_summary"] = str(exc)
+        try:
+            resp = await client.get(
+                "/ai-platform-service/internal/ai/diagnostics/events",
+                params={"thread_id": thread_id, "limit": 20},
+                headers=headers,
+            )
+            payload = unwrap_api_response(resp)
+            rows = payload.get("events") if isinstance(payload, dict) else None
+            events = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        except Exception as exc:  # noqa: BLE001
+            errors["diagnostics_events"] = str(exc)
+
+    bundle_dir = (repo_root / "output" / "ai-debug-bundles" / thread_id).resolve() if thread_id else None
+    bundle_refs: list[str] = []
+    if bundle_dir and bundle_dir.exists():
+        for rel in ("failure_summary.json", "execution_traces.json", "timeline.json", "node_trace_timeline.json"):
+            target = bundle_dir / rel
+            if target.exists():
+                bundle_refs.append(str(target))
+        for rel_dir in ("skill_stages", "contract_diffs", "llm_calls", "states"):
+            target_dir = bundle_dir / rel_dir
+            if target_dir.exists():
+                bundle_refs.append(str(target_dir))
+
+    return {
+        "thread_id": thread_id,
+        "session_id": session_token or None,
+        "matter_id": matter_token or None,
+        "diagnostics_summary": summary,
+        "diagnostics_events": events,
+        "bundle_dir": str(bundle_dir) if bundle_dir else "",
+        "bundle_refs": bundle_refs,
+        "errors": errors,
+    }
+
+
 __all__ = [
     "api_url",
     "bootstrap_flow",
+    "collect_ai_debug_refs",
     "configure_direct_service_mode",
     "event_counts",
     "fetch_workbench_snapshot",

@@ -32,6 +32,7 @@ from scripts._support.template_draft_real_flow_support import (
 from scripts._support.diagnostic_bundle_support import export_failure_bundle, format_first_bad_line
 from scripts._support.workflow_real_flow_support import (
     bootstrap_flow,
+    collect_ai_debug_refs,
     configure_direct_service_mode,
     event_counts,
     fetch_workbench_snapshot,
@@ -49,9 +50,6 @@ from scripts._support.workflow_real_flow_support import (
 DEFAULT_KICKOFF = "请基于已上传材料形成一份结构化法律意见分析，输出结论、风险与行动建议。"
 _GOAL_DOCGEN = "document_generation"
 _SUCCESS_STATUSES = {"completed", "archived", "done"}
-_ANALYSIS_AUTO_NUDGE = (
-    "请继续生成法律意见分析结果，补齐争议焦点、结论、风险、行动建议，并明确依据与缺口。"
-)
 
 FLOW_OVERRIDES = {
     "profile.service_type_id": "legal_opinion",
@@ -261,24 +259,6 @@ def _analysis_should_refresh_references(
     return True
 
 
-def _analysis_nudge_text(
-    snapshot: dict[str, Any] | None,
-    legal_view: dict[str, Any] | None = None,
-) -> str:
-    action = _pick_analysis_auto_action(snapshot, legal_view)
-    if not action:
-        return _ANALYSIS_AUTO_NUDGE
-    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
-    target = _safe_str(payload.get("target")).lower()
-    if target == "intake_gate":
-        return "请继续补齐法律意见受理门槛字段，并保持当前法律意见服务类型。"
-    if target == "intake":
-        return "请继续补齐法律意见受理信息，并进入法律意见分析。"
-    if target == "legal_opinion_analyze":
-        return _ANALYSIS_AUTO_NUDGE
-    return _ANALYSIS_AUTO_NUDGE
-
-
 def _json_fingerprint(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -486,6 +466,12 @@ async def _collect_round_state(
         leaf_name=f"{round_no:02d}.{round_label}.legal_opinion.txt",
     )
     observability = await collect_flow_observability(client, matter_id=matter_id, session_id=session_id)
+    debug_refs = await collect_ai_debug_refs(
+        client,
+        repo_root=REPO_ROOT,
+        session_id=session_id,
+        matter_id=matter_id,
+    )
     bundle_quality = _bundle_quality_report(
         legal_view=legal_view,
         docgen_view=docgen_view,
@@ -512,6 +498,15 @@ async def _collect_round_state(
     write_json(out_dir / f"{prefix}.document_generation_view.json", docgen_view)
     write_json(out_dir / f"{prefix}.deliverables.json", deliverables)
     write_json(out_dir / f"{prefix}.messages.json", {"messages": messages})
+    write_json(
+        out_dir / f"{prefix}.diagnostics_summary.json",
+        debug_refs.get("diagnostics_summary") if isinstance(debug_refs.get("diagnostics_summary"), dict) else {},
+    )
+    write_json(
+        out_dir / f"{prefix}.diagnostics_events.json",
+        {"events": debug_refs.get("diagnostics_events") if isinstance(debug_refs.get("diagnostics_events"), list) else []},
+    )
+    write_json(out_dir / f"{prefix}.debug_refs.json", debug_refs)
     write_json(out_dir / f"{prefix}.bundle_quality.json", bundle_quality)
     write_json(out_dir / f"{prefix}.flow_scores.json", flow_scores)
     if pending_card:
@@ -526,6 +521,7 @@ async def _collect_round_state(
         "deliverable_text": deliverable_text,
         "deliverable_status": deliverable_status,
         "messages": messages,
+        "debug_refs": debug_refs,
         "bundle_quality": bundle_quality,
         "flow_scores": flow_scores,
     }
@@ -582,7 +578,6 @@ async def run(args: argparse.Namespace) -> int:
     else:
         print("[config] gateway_mode=true")
     print(f"[config] user={username}")
-    print(f"[config] allow_nudge={bool(args.allow_nudge)}")
     print(f"[config] output_dir={out_dir}")
 
     async with ApiClient(base_url) as client:
@@ -695,10 +690,7 @@ async def run(args: argparse.Namespace) -> int:
                         continue
                 target = _analysis_auto_review_card_target(auto_action)
                 if target:
-                    sse = await flow.step(
-                        nudge_text=_analysis_nudge_text(analysis_snapshot, analysis_legal_view),
-                        allow_nudge=True,
-                    )
+                    sse = await flow.step()
                     if isinstance(sse, dict):
                         await _persist_action_sse(out_dir, step_no, f"analysis_auto_{target}", sse)
                         if is_session_busy_sse(sse):
@@ -739,10 +731,7 @@ async def run(args: argparse.Namespace) -> int:
                 analysis_reference_refresh_attempts += 1
                 await asyncio.sleep(float(args.step_sleep_s))
                 continue
-            sse = await flow.step(
-                nudge_text=_analysis_nudge_text(analysis_snapshot, analysis_legal_view),
-                allow_nudge=bool(args.allow_nudge),
-            )
+            sse = await flow.step()
             if isinstance(sse, dict):
                 await _persist_action_sse(out_dir, step_no, "analysis_step", sse)
             await asyncio.sleep(float(args.step_sleep_s))
@@ -883,10 +872,7 @@ async def run(args: argparse.Namespace) -> int:
                     write_json(out_dir / "hard_block_summary.json", hard_block_summary)
                     break
 
-            sse = await flow.step(
-                allow_nudge=bool(args.allow_nudge),
-                stop_on_pending_card=is_goal_completion_card,
-            )
+            sse = await flow.step(stop_on_pending_card=is_goal_completion_card)
             if isinstance(sse, dict):
                 await _persist_action_sse(out_dir, round_no, "step", sse)
             await asyncio.sleep(float(args.step_sleep_s))
@@ -961,13 +947,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stable-block-repeats", type=int, default=3, help="Stable hard-block fingerprint threshold")
     parser.add_argument("--step-sleep-s", type=float, default=1.0, help="Sleep between document_generation rounds")
     parser.add_argument("--cards-only", action="store_true", default=False, help="Reserved compatibility flag")
-    parser.add_argument(
-        "--allow-nudge",
-        dest="allow_nudge",
-        action="store_true",
-        default=False,
-        help="Allow fallback chat nudges while waiting. Disabled by default for legal_opinion flows.",
-    )
     parser.add_argument("--output-dir", default="", help="Artifacts output directory")
     return parser.parse_args()
 

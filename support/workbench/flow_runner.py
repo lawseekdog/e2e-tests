@@ -23,9 +23,7 @@ from .sse import assert_has_user_message
 
 PendingCardStopFn = Callable[[dict[str, Any]], bool]
 
-_NUDGE_TEXT = "继续"
 _DEBUG = str(os.getenv("E2E_FLOW_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
-_AUTO_NUDGE = str(os.getenv("E2E_AUTO_NUDGE", "1") or "").strip().lower() in {"1", "true", "yes"}
 _PROGRESS = str(os.getenv("E2E_FLOW_PROGRESS", "1") or "").strip().lower() in {"1", "true", "yes"}
 _STRICT_CARD_DRIVEN_DEFAULT = str(os.getenv("E2E_STRICT_CARD_DRIVEN", "1") or "").strip().lower() in {"1", "true", "yes"}
 
@@ -1397,7 +1395,7 @@ class WorkbenchFlow:
         await self._emit_progress(label="resume", card=card, sse=sse)
         return sse
 
-    async def nudge(self, text: str = _NUDGE_TEXT, *, attachments: list[str] | None = None, max_loops: int = 8) -> dict[str, Any]:
+    async def nudge(self, text: str, *, attachments: list[str] | None = None, max_loops: int = 8) -> dict[str, Any]:
         _debug(f"[flow] nudge text={text!r} attachments={len(attachments or [])} max_loops={max_loops}")
         sse = await self.client.chat(self.session_id, text, attachments=attachments or [], max_loops=max_loops)
         if isinstance(sse, dict):
@@ -1434,11 +1432,9 @@ class WorkbenchFlow:
     async def step(
         self,
         *,
-        nudge_text: str = _NUDGE_TEXT,
-        allow_nudge: bool = True,
         stop_on_pending_card: PendingCardStopFn | None = None,
     ) -> dict[str, Any] | None:
-        """Process one pending card if exists; optionally send a small nudge chat."""
+        """Process one pending card if exists; otherwise wait passively."""
         await self.refresh()
         if self.session_archived:
             # Avoid any chat/resume operations once the session is archived; keep run_until polling only.
@@ -1472,29 +1468,6 @@ class WorkbenchFlow:
                 return _pending_card_intercept_sse(card)
 
             skill_id = str(card.get("skill_id") or "").strip()
-            task_key = str(card.get("task_key") or "").strip()
-            if skill_id == "skill-error-analysis" and self._repeat_card_count >= 2:
-                remediation = _remediation_nudge_for_unanswerable_card(card)
-                if remediation and not self.strict_card_driven:
-                    _debug(
-                        "[flow] skill-error-analysis remediation nudge "
-                        f"repeat={self._repeat_card_count} task={task_key}"
-                    )
-                    self._last_step_used_nudge = True
-                    return await self.nudge(remediation, attachments=self.uploaded_file_ids, max_loops=12)
-
-            if skill_id == "intent-route-v3" and ("doc_draft" in task_key) and self._repeat_card_count >= 3:
-                if not self.strict_card_driven:
-                    _debug(
-                        "[flow] intent-route doc_draft remediation nudge "
-                        f"repeat={self._repeat_card_count} task={task_key}"
-                    )
-                    self._last_step_used_nudge = True
-                    return await self.nudge(
-                        "角色已确认：申请人。审查范围：全面审查。请不要重复追问，直接继续合同审查并生成交付物。",
-                        attachments=self.uploaded_file_ids,
-                        max_loops=12,
-                    )
 
             if skill_id == "reference-grounding" and self._repeat_card_count >= 3:
                 if not self.strict_card_driven:
@@ -1508,14 +1481,6 @@ class WorkbenchFlow:
                 else:
                     self._repeat_unanswerable_signature = sig
                     self._repeat_unanswerable_count = 1
-                remediation = _remediation_nudge_for_unanswerable_card(card)
-                if remediation and self._repeat_unanswerable_count >= 2 and not self.strict_card_driven:
-                    _debug(
-                        "[flow] unanswerable card remediation nudge "
-                        f"repeat={self._repeat_unanswerable_count} task={card.get('task_key')}"
-                    )
-                    self._last_step_used_nudge = True
-                    return await self.nudge(remediation, attachments=self.uploaded_file_ids, max_loops=12)
                 if self._repeat_unanswerable_count >= _UNANSWERABLE_CARD_MAX_REPEATS:
                     debug_card = _compact_card_debug(card)
                     raise AssertionError(
@@ -1532,30 +1497,20 @@ class WorkbenchFlow:
         self._repeat_unanswerable_signature = None
         self._repeat_unanswerable_count = 0
         self._last_step_used_nudge = False
-        if not allow_nudge:
-            return None
-        if not _AUTO_NUDGE:
-            return None
-        _debug(f"[flow] nudge {nudge_text!r}")
-        self._last_step_used_nudge = True
-        return await self.nudge(nudge_text, attachments=self.uploaded_file_ids, max_loops=8)
+        return None
 
     async def run_until(
         self,
         predicate: Callable[["WorkbenchFlow"], Any],
         *,
         max_steps: int = 40,
-        nudge_text: str = _NUDGE_TEXT,
         step_sleep_s: float = 0.0,
         description: str = "target condition",
         stop_on_pending_card: PendingCardStopFn | None = None,
-        allow_nudge: bool = True,
     ) -> None:
         """Advance the workflow until predicate(flow) is truthy (sync/async)."""
         step_no = 0
         busy_retries = 0
-        suppress_nudge_rounds = 0
-        nudge_cooldown = 0
         while step_no < max_steps:
             ok = predicate(self)
             if asyncio.iscoroutine(ok):
@@ -1568,33 +1523,21 @@ class WorkbenchFlow:
             step_no += 1
             await self._emit_progress(label=f"waiting:{description}", step_no=step_no, max_steps=max_steps)
             _debug(f"[flow] step {step_no}/{max_steps} waiting for {description} (session_id={self.session_id}, matter_id={self.matter_id})")
-            step_allow_nudge = bool(allow_nudge) and (suppress_nudge_rounds <= 0) and (nudge_cooldown <= 0)
             sse = await self.step(
-                nudge_text=nudge_text,
-                allow_nudge=step_allow_nudge,
                 stop_on_pending_card=stop_on_pending_card,
             )
-            if self._last_step_used_nudge:
-                nudge_cooldown = max(nudge_cooldown, 8)
-            else:
-                nudge_cooldown = max(0, nudge_cooldown - 1)
             if sse is None:
-                if not step_allow_nudge:
-                    suppress_nudge_rounds = max(0, suppress_nudge_rounds - 1)
                 await asyncio.sleep(max(_SESSION_BUSY_BACKOFF_S, 0.8))
                 continue
             if is_session_busy_sse(sse):
                 busy_retries += 1
                 if busy_retries <= _SESSION_BUSY_EXTRA_RETRIES:
                     step_no -= 1
-                    # After repeated session_busy responses, avoid extra nudges and prefer passive polling.
-                    suppress_nudge_rounds = min(30, max(suppress_nudge_rounds, 5 + busy_retries // 2))
                     _debug(f"[flow] session busy; backoff {max(_SESSION_BUSY_BACKOFF_S, 0.5):.1f}s retry={busy_retries}")
                     await asyncio.sleep(max(_SESSION_BUSY_BACKOFF_S, 0.5))
                     continue
             else:
                 busy_retries = 0
-                suppress_nudge_rounds = 0
             if step_sleep_s:
                 await asyncio.sleep(step_sleep_s)
 

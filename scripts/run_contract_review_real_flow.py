@@ -26,6 +26,7 @@ from support.workbench.docx import (
 from support.workbench.flow_runner import WorkbenchFlow
 from scripts._support.workflow_real_flow_support import (
     bootstrap_flow,
+    collect_ai_debug_refs,
     configure_direct_service_mode,
     event_counts as _shared_event_counts,
     fetch_workbench_snapshot as _shared_fetch_workbench_snapshot,
@@ -302,7 +303,6 @@ async def run(args: argparse.Namespace) -> int:
                 _deliverables_ready,
                 max_steps=max(1, int(args.max_steps)),
                 description="contract review deliverables ready",
-                allow_nudge=bool(args.allow_nudge),
             )
         except Exception as e:
             await flow.refresh()
@@ -310,6 +310,12 @@ async def run(args: argparse.Namespace) -> int:
             fail_snapshot = await _fetch_snapshot(client, fail_matter_id) if fail_matter_id else {}
             fail_deliverables = await _list_deliverables(client, fail_matter_id) if fail_matter_id else {}
             fail_messages = await _list_session_messages(client, session_id)
+            debug_refs = await collect_ai_debug_refs(
+                client,
+                repo_root=REPO_ROOT,
+                session_id=session_id,
+                matter_id=fail_matter_id,
+            )
             fail_contract_view = _extract_contract_view(fail_snapshot if isinstance(fail_snapshot, dict) else {})
             fail_analysis = (
                 fail_snapshot.get("analysis_state")
@@ -331,6 +337,7 @@ async def run(args: argparse.Namespace) -> int:
                 "messages_tail": fail_messages[-20:],
                 "seen_cards": len(flow.seen_cards),
                 "seen_sse_rounds": len(flow.seen_sse),
+                "debug_refs": debug_refs,
             }
             write_json(out_dir / "failure_diagnostics.json", failure_diag)
             write_json(out_dir / "deliverables.failure.json", fail_deliverables)
@@ -390,6 +397,12 @@ async def run(args: argparse.Namespace) -> int:
             "runtime_images_stable": (start_images == end_images) if start_images and end_images else None,
         }
         observability = await collect_flow_observability(client, matter_id=final_matter_id, session_id=session_id)
+        debug_refs = await collect_ai_debug_refs(
+            client,
+            repo_root=REPO_ROOT,
+            session_id=session_id,
+            matter_id=final_matter_id,
+        )
         flow_scores = build_flow_scores(
             flow_id="contract_review",
             seen_cards=flow.seen_cards,
@@ -406,6 +419,7 @@ async def run(args: argparse.Namespace) -> int:
             goal_completion_mode="card" if _safe_str((pending_card or {}).get("skill_id")).lower() == "goal-completion" else "none",
         )
         summary["flow_scores"] = flow_scores
+        summary["debug_refs"] = debug_refs
 
         if start_images and end_images and start_images != end_images and str(os.getenv("E2E_ALLOW_DEPLOYMENT_DRIFT", "") or "").strip() not in {"1", "true", "yes"}:
             raise RuntimeError(f"deployment_image_drift_detected: start={start_images} end={end_images}")
@@ -414,6 +428,9 @@ async def run(args: argparse.Namespace) -> int:
         write_json(out_dir / "flow_scores.json", flow_scores)
         write_json(out_dir / "deliverables.json", deliverables)
         write_json(out_dir / "snapshot.json", snapshot)
+        write_json(out_dir / "diagnostics_summary.json", debug_refs.get("diagnostics_summary") if isinstance(debug_refs.get("diagnostics_summary"), dict) else {})
+        write_json(out_dir / "diagnostics_events.json", {"events": debug_refs.get("diagnostics_events") if isinstance(debug_refs.get("diagnostics_events"), list) else []})
+        write_json(out_dir / "debug_refs.json", debug_refs)
         if report_text:
             (out_dir / "contract_review_report.txt").write_text(report_text, encoding="utf-8")
 
@@ -441,7 +458,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kickoff-max-loops", type=int, default=24, help="kickoff max_loops")
     parser.add_argument("--max-steps", type=int, default=220, help="run_until max steps")
     parser.add_argument("--cards-only", action="store_true", default=False, help="Kickoff once, then only poll and answer cards")
-    parser.add_argument("--allow-nudge", dest="allow_nudge", action="store_true", default=False, help=argparse.SUPPRESS)
     parser.add_argument(
         "--assert-docx",
         action="store_true",

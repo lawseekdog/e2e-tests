@@ -43,7 +43,7 @@ from scripts._support.template_draft_real_flow_support import (
     _normalize_stop_node,
 )
 from scripts._support.flow_score_support import build_template_flow_scores
-from scripts._support.workflow_real_flow_support import configure_direct_service_mode, load_real_flow_env
+from scripts._support.workflow_real_flow_support import collect_ai_debug_refs, configure_direct_service_mode, load_real_flow_env
 
 
 DEFAULT_FACTS = DEFAULT_LEGAL_OPINION_FACTS
@@ -1440,26 +1440,6 @@ async def run(args: argparse.Namespace) -> int:
                         sse={},
                         enforce_visibility=False,
                     )
-                    if bool(args.allow_nudge) and stall_rounds >= 2:
-                        nudge_sse = await flow.nudge(
-                            "继续",
-                            attachments=[],
-                            max_loops=max(1, int(args.max_loops)),
-                        )
-                        await _record_round(
-                            action="chat.optional_nudge",
-                            payload={
-                                "text": "继续",
-                                "stall_rounds": stall_rounds,
-                                "current_phase": _safe_str(last_docgen_snapshot.get("current_phase")),
-                                "current_task_id": _safe_str(last_docgen_snapshot.get("current_task_id")),
-                                "docgen_node": _safe_str(last_docgen_snapshot.get("docgen_node")),
-                            },
-                            sse=nudge_sse if isinstance(nudge_sse, dict) else {},
-                            enforce_visibility=False,
-                        )
-                        stall_rounds = 0
-                        continue
                     await asyncio.sleep(max(0.5, float(args.poll_interval_s)))
                     continue
 
@@ -1593,12 +1573,19 @@ async def run(args: argparse.Namespace) -> int:
                 document_quality=document_quality,
             )
             summary["flow_scores"] = flow_scores
+            summary["debug_refs"] = await collect_ai_debug_refs(
+                client,
+                repo_root=REPO_ROOT,
+                session_id=_safe_str(summary.get("session_id")),
+                matter_id=_safe_str(summary.get("matter_id")),
+            )
 
             _write_json(out_dir / "deliverables.json", {"deliverables": rows})
             _write_json(out_dir / "cards.json", cards_seen)
             _write_events_ndjson(out_dir / "events.ndjson", event_rows)
             _write_json(out_dir / "node_timeline.json", node_timeline)
             _write_json(out_dir / "flow_scores.json", flow_scores)
+            _write_json(out_dir / "debug_refs.json", summary.get("debug_refs") if isinstance(summary.get("debug_refs"), dict) else {})
             _write_json(out_dir / "summary.json", summary)
 
             print("[done] template draft workflow completed")
@@ -1694,6 +1681,12 @@ async def run(args: argparse.Namespace) -> int:
                 document_quality=document_quality,
             )
             summary["flow_scores"] = flow_scores
+            summary["debug_refs"] = await collect_ai_debug_refs(
+                client,
+                repo_root=REPO_ROOT,
+                session_id=_safe_str(summary.get("session_id")),
+                matter_id=_safe_str(summary.get("matter_id")),
+            )
 
             _write_events_ndjson(out_dir / "events.ndjson", event_rows)
             _write_json(out_dir / "cards.json", cards_seen)
@@ -1701,6 +1694,7 @@ async def run(args: argparse.Namespace) -> int:
             _write_json(out_dir / "document_quality.json", document_quality)
             _write_json(out_dir / "node_timeline.json", node_timeline)
             _write_json(out_dir / "flow_scores.json", flow_scores)
+            _write_json(out_dir / "debug_refs.json", summary.get("debug_refs") if isinstance(summary.get("debug_refs"), dict) else {})
             _write_json(out_dir / "summary.json", summary)
 
             print(f"[stopped] stop_after_node={stop_exc.target_node} reached")
@@ -1755,6 +1749,12 @@ async def run(args: argparse.Namespace) -> int:
                 document_quality=document_quality,
             )
             summary["flow_scores"] = flow_scores
+            summary["debug_refs"] = await collect_ai_debug_refs(
+                client,
+                repo_root=REPO_ROOT,
+                session_id=_safe_str(summary.get("session_id")),
+                matter_id=_safe_str(summary.get("matter_id")),
+            )
 
             matter_id = _safe_str(summary.get("matter_id"))
             session_id = _safe_str(summary.get("session_id"))
@@ -1793,6 +1793,7 @@ async def run(args: argparse.Namespace) -> int:
             _write_json(out_dir / "node_timeline.json", node_timeline)
             _write_json(out_dir / "failure_diagnostics.json", failure_diag)
             _write_json(out_dir / "flow_scores.json", flow_scores)
+            _write_json(out_dir / "debug_refs.json", summary.get("debug_refs") if isinstance(summary.get("debug_refs"), dict) else {})
             _write_json(out_dir / "summary.json", summary)
             print(f"[failed] {e}")
             print(f"[artifacts] {out_dir}")
@@ -1828,7 +1829,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-loops", type=int, default=12, help="WS max_loops per call")
     parser.add_argument("--poll-interval-s", type=float, default=2.0, help="Polling interval between state snapshots")
     parser.add_argument("--cards-only", action="store_true", default=False, help="Kickoff/start once, then only poll and answer cards")
-    parser.add_argument("--allow-nudge", dest="allow_nudge", action="store_true", default=False, help=argparse.SUPPRESS)
     parser.add_argument("--stop-after-node", default="", help=f"Stop successfully after node reached: {', '.join(DOCGEN_STOP_NODES)}")
     parser.add_argument("--debug-json", action="store_true", help="Include raw API payloads in state snapshots")
     parser.add_argument("--max-low-signal-streak", type=int, default=4, help="Dialogue low-signal streak threshold")

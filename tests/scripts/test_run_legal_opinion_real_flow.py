@@ -6,7 +6,6 @@ from pathlib import Path
 from scripts.run_legal_opinion_real_flow import (
     _analysis_allows_auto_review_card,
     _analysis_auto_review_card_target,
-    _analysis_nudge_text,
     _analysis_should_refresh_references,
     _capability_gap_card_matches_overrides,
     _pick_analysis_auto_action,
@@ -86,12 +85,12 @@ def test_resolve_fixture_paths_falls_back_to_e2e_root() -> None:
     assert resolved[0].name == "legal_opinion_supply_contract.txt"
 
 
-def test_parse_args_disables_auto_nudge_by_default(monkeypatch) -> None:
+def test_parse_args_no_longer_exposes_allow_nudge(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["run_legal_opinion_real_flow.py"])
 
     args = parse_args()
 
-    assert args.allow_nudge is False
+    assert not hasattr(args, "allow_nudge")
 
 
 def test_analysis_auto_action_prefers_legal_opinion_core_missing() -> None:
@@ -116,7 +115,6 @@ def test_analysis_auto_action_prefers_legal_opinion_core_missing() -> None:
     assert action
     assert action["payload"]["target"] == "legal_opinion_analyze"
     assert _analysis_should_refresh_references(snapshot={}, legal_view=legal_view) is False
-    assert "法律意见分析结果" in _analysis_nudge_text({}, legal_view)
     assert _analysis_auto_review_card_target(action) == "legal_opinion_analyze"
 
 

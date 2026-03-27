@@ -370,6 +370,7 @@ def _select_skill_profile(policy: dict[str, Any], row: dict[str, Any]) -> tuple[
 def _score_skill(row: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
     weights = _as_dict(profile.get("phase_weights"))
     score_caps = _as_dict(profile.get("score_caps"))
+    penalties = _as_dict(profile.get("penalties"))
     weighted_score = 0.0
     used_weight = 0.0
     for phase_name, weight in weights.items():
@@ -388,14 +389,35 @@ def _score_skill(row: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]
         score = min(score, _safe_int(score_caps.get("parser_or_validator_error_max"), 79))
     if _safe_str(row.get("final_action")) == "ask_user":
         score = min(score, _safe_int(score_caps.get("ask_user_valid_max"), 75))
+    if _safe_str(row.get("final_reason_code")).startswith("llm_admission_"):
+        score = min(score, _safe_int(score_caps.get("llm_admission_blocked_max"), 59))
     retry_count = _safe_int(row.get("retry_count"))
     if retry_count > 0 and _safe_str(row.get("final_action")) in {"continue", "ask_user"}:
         score = max(0, score - (retry_count * 5))
     reasons: list[str] = []
+    critical_failed = 0
     for field in _as_list(profile.get("critical_checks")):
         token = _safe_str(field)
         if token and row.get(token) in (False, "", None, [], {}):
             reasons.append(f"critical_check_failed:{token}")
+            critical_failed += 1
+    if critical_failed:
+        score = max(0, score - (critical_failed * _safe_int(penalties.get("critical_check_failed"), 15)))
+    if bool(row.get("prompt_ack_only_context")):
+        score = max(0, score - _safe_int(penalties.get("prompt_ack_only_context"), 35))
+        reasons.append("prompt_ack_only_context")
+    if bool(row.get("prompt_material_context_fileid_only")):
+        score = max(0, score - _safe_int(penalties.get("prompt_material_context_fileid_only"), 25))
+        reasons.append("prompt_material_context_fileid_only")
+    if _safe_int(row.get("placeholder_profile_count")) > 0:
+        score = max(0, score - _safe_int(penalties.get("placeholder_profile_output"), 25))
+        reasons.append(
+            "placeholder_profile_output:"
+            + ",".join(_as_list(row.get("placeholder_profile_fields"))[:6])
+        )
+    if _safe_str(row.get("final_reason_code")).startswith("llm_admission_"):
+        score = max(0, score - _safe_int(penalties.get("llm_admission_blocked"), 35))
+        reasons.append(f"llm_admission_blocked:{_safe_str(row.get('final_reason_code'))}")
     if _safe_str(row.get("parser_error")):
         reasons.append("parser_error")
     if _safe_int(row.get("validator_error_count")) > 0:
@@ -509,9 +531,12 @@ def build_bundle_quality_reports(
     skill_rows = _read_jsonl(raw_dir / "skills.jsonl")
     lane_rows = _read_jsonl(raw_dir / "lanes.jsonl")
 
-    node_reports = [_score_node(row, _select_node_profile(policy, row)[1]) for row in node_rows]
-    skill_reports = [_score_skill(row, _select_skill_profile(policy, row)[1]) for row in skill_rows]
-    lane_reports = [_score_lane(row, node_reports, skill_reports, _select_lane_profile(policy, row)[1]) for row in lane_rows]
+    node_profile_matches = [_select_node_profile(policy, row) for row in node_rows]
+    skill_profile_matches = [_select_skill_profile(policy, row) for row in skill_rows]
+    node_reports = [_score_node(row, profile) for row, (_, profile) in zip(node_rows, node_profile_matches)]
+    skill_reports = [_score_skill(row, profile) for row, (_, profile) in zip(skill_rows, skill_profile_matches)]
+    lane_profile_matches = [_select_lane_profile(policy, row) for row in lane_rows]
+    lane_reports = [_score_lane(row, node_reports, skill_reports, profile) for row, (_, profile) in zip(lane_rows, lane_profile_matches)]
 
     node_reports.sort(key=lambda row: (_safe_int(row.get("score"), 100), _safe_int(row.get("sequence"), 0), _safe_str(row.get("trace_id"))))
     skill_reports.sort(key=lambda row: (_safe_int(row.get("score"), 100), _safe_str(row.get("skill_name")), _safe_str(row.get("attempt_id"))))
@@ -531,6 +556,33 @@ def build_bundle_quality_reports(
     if failure_summary and (_safe_str(failure_summary.get("first_bad_node")) or _safe_str(failure_summary.get("trace_id"))):
         if not _safe_str(failure_summary.get("primary_reason_code")) or not _safe_str(failure_summary.get("failure_class")):
             hard_fail_reasons.append("observability_contract_missing_reason_code")
+    hard_fail_reasons.extend(
+        [
+            f"unknown_node_profile:{_safe_str(row.get('node_id'))}"
+            for row, (profile_name, _) in zip(node_rows, node_profile_matches)
+            if not _safe_str(profile_name) and _safe_str(row.get("node_id"))
+        ][:20]
+    )
+    hard_fail_reasons.extend(
+        [
+            f"unknown_skill_profile:{_safe_str(row.get('skill_name'))}"
+            for row, (profile_name, _) in zip(skill_rows, skill_profile_matches)
+            if not _safe_str(profile_name) and _safe_str(row.get("skill_name"))
+        ][:20]
+    )
+    hard_fail_reasons.extend(
+        [
+            f"unknown_lane_profile:{_safe_str(row.get('lane_id'))}"
+            for row, (profile_name, _) in zip(lane_rows, lane_profile_matches)
+            if not _safe_str(profile_name) and _safe_str(row.get("lane_id"))
+        ][:20]
+    )
+    failed_nodes = [row for row in node_reports if _safe_str(row.get("severity")) == "fail"]
+    failed_skills = [row for row in skill_reports if _safe_str(row.get("severity")) == "fail"]
+    failed_lanes = [row for row in lane_reports if _safe_str(row.get("severity")) == "fail"]
+    hard_fail_reasons.extend([f"node_quality_failed:{_safe_str(row.get('node_id'))}" for row in failed_nodes[:5] if _safe_str(row.get("node_id"))])
+    hard_fail_reasons.extend([f"skill_quality_failed:{_safe_str(row.get('skill_name'))}" for row in failed_skills[:5] if _safe_str(row.get("skill_name"))])
+    hard_fail_reasons.extend([f"lane_quality_failed:{_safe_str(row.get('lane_id'))}" for row in failed_lanes[:5] if _safe_str(row.get("lane_id"))])
 
     warnings: list[str] = []
     for collection in (node_reports, skill_reports, lane_reports):

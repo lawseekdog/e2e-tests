@@ -14,7 +14,7 @@ from client.api_client import ApiClient
 from support.workbench.flow_runner import WorkbenchFlow
 from support.workbench.utils import unwrap_api_response
 
-_DEFAULT_REMOTE_STACK_HOST = "100.116.203.71"
+_DEFAULT_REMOTE_STACK_HOST = "8.148.207.157"
 _REMOTE_SERVICE_PORTS: dict[str, int] = {
     "auth": 18101,
     "user": 18113,

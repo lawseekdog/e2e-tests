@@ -166,10 +166,11 @@ async def collect_flow_observability(
 
 
 def _card_field_issues(*, flow_id: str, card: dict[str, Any]) -> list[str]:
+    payload = _as_dict(card.get("card")) if isinstance(card.get("card"), dict) else card
     policy = _FLOW_CARD_POLICY.get(flow_id, {})
     allowed_groups = set(policy.get("allowed_data_groups") or set())
     issues: list[str] = []
-    questions = card.get("questions") if isinstance(card.get("questions"), list) else []
+    questions = payload.get("questions") if isinstance(payload.get("questions"), list) else []
     if not questions:
         return ["empty_questions"]
 

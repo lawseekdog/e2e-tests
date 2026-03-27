@@ -26,6 +26,31 @@ def test_score_unexpected_cards_flags_forbidden_skill_and_data_group() -> None:
     assert "forbidden_skill:skill-error-analysis" in score["unexpected_cards"][0]["reasons"]
 
 
+def test_score_unexpected_cards_reads_nested_card_questions() -> None:
+    score = score_unexpected_cards(
+        flow_id="template_draft",
+        seen_cards=[
+            {
+                "skill_id": "document-intake",
+                "task_key": "workflow_input_document_drafting_intake_document-intake",
+                "review_type": "clarify",
+                "card": {
+                    "questions": [
+                        {
+                            "field_key": "profile.parties",
+                            "input_type": "textarea",
+                            "required": True,
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+
+    assert score["passed"] is True
+    assert score["unexpected_count"] == 0
+
+
 def test_build_flow_scores_produces_all_four_scores_for_analysis() -> None:
     snapshot = {"analysis_state": {"current_node": "goal_completion", "current_phase": "analysis"}}
     analysis_view = {

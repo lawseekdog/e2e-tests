@@ -824,6 +824,9 @@ async def run(args: argparse.Namespace) -> int:
         output_text = _safe_str(sse.get("output"))
         event_count = _event_counts(sse)
         cards_in_sse = _extract_last_cards(sse)
+        events_obj = sse.get("events")
+        events: list[Any] = events_obj if isinstance(events_obj, list) else []
+        has_stream_events = any(isinstance(evt, dict) for evt in events)
 
         visible_ok = True
         visible_error = ""
@@ -839,7 +842,19 @@ async def run(args: argparse.Namespace) -> int:
 
         prev_streak = int(rounds[-1].get("low_signal_streak") or 0) if rounds else 0
         low_signal_streak = 0
-        if (not busy) and (not cards_in_sse) and _is_low_signal_output(output_text):
+        resume_ack_only = (
+            str(action or "").startswith("resume")
+            and visible_ok
+            and _sse_has_user_message_event(sse)
+            and not cards_in_sse
+        )
+        if (
+            (not busy)
+            and has_stream_events
+            and (not cards_in_sse)
+            and (not resume_ack_only)
+            and _is_low_signal_output(output_text)
+        ):
             low_signal_streak = prev_streak + 1
 
         row = {
@@ -876,8 +891,6 @@ async def run(args: argparse.Namespace) -> int:
                 }
             )
 
-        events_obj = sse.get("events")
-        events: list[Any] = events_obj if isinstance(events_obj, list) else []
         for idx, evt in enumerate(events):
             if not isinstance(evt, dict):
                 continue

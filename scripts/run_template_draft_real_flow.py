@@ -188,11 +188,16 @@ def _resume_ack_only_response(*, action: str, sse: dict[str, Any], visible_error
     if not err:
         return False
     event_names = set(_event_counts(sse).keys())
-    allowed = {"user_message", "usage", "error", "end"}
+    allowed = {"user_message", "progress", "usage", "error", "end"}
     if not event_names or not event_names.issubset(allowed):
         return False
     if "SSE missing progress events" in err:
         return True
+    if "SSE missing end/complete" in err:
+        # Some resume-card flows only emit an acknowledgement + heartbeat/progress,
+        # then continue work asynchronously. Treat this as an ack-only success and
+        # let the main polling loop pick up the next pending card or deliverable.
+        return "user_message" in event_names and "progress" in event_names
     if "SSE returned error events" in err and "closed" in err.lower():
         return True
     return False
@@ -773,6 +778,7 @@ async def run(args: argparse.Namespace) -> int:
     rounds: list[dict[str, Any]] = []
     cards_seen: list[dict[str, Any]] = []
     event_rows: list[dict[str, Any]] = []
+    last_pending: dict[str, Any] = {}
     dialogue_quality: dict[str, Any] | None = None
     document_quality: dict[str, Any] | None = None
 

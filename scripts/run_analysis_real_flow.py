@@ -6,7 +6,7 @@ import argparse
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +86,122 @@ def _extract_pricing_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     view = goal_views.get("pricing_plan_view") if isinstance(goal_views.get("pricing_plan_view"), dict) else {}
     return view if isinstance(view, dict) else {}
 
+
+def _extract_runtime_progress(snapshot: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(snapshot, dict):
+        return {"current_task_id": "", "current_node": "", "current_phase": ""}
+    analysis = snapshot.get("analysis_state") if isinstance(snapshot.get("analysis_state"), dict) else {}
+    identity = analysis.get("identity") if isinstance(analysis.get("identity"), dict) else {}
+    runtime = analysis.get("workbench_runtime") if isinstance(analysis.get("workbench_runtime"), dict) else {}
+    return {
+        "current_task_id": _safe_str(identity.get("current_task_id")),
+        "current_node": _safe_str(analysis.get("current_node") or runtime.get("current_node")),
+        "current_phase": _safe_str(analysis.get("current_phase") or snapshot.get("current_phase") or runtime.get("current_phase")),
+    }
+
+
+def _compact_pending_card(card: dict[str, Any] | None) -> dict[str, Any]:
+    pending = card if isinstance(card, dict) else {}
+    questions = pending.get("questions") if isinstance(pending.get("questions"), list) else []
+    return {
+        "id": _safe_str(pending.get("id")),
+        "skill_id": _safe_str(pending.get("skill_id")),
+        "task_key": _safe_str(pending.get("task_key")),
+        "review_type": _safe_str(pending.get("review_type")),
+        "question_count": len(questions),
+        "questions": questions,
+    }
+
+
+def _analysis_readiness(analysis_view: dict[str, Any], pricing_view: dict[str, Any]) -> dict[str, Any]:
+    checks = {
+        "summary_ready": bool(_safe_str(analysis_view.get("summary"))),
+        "issues_ready": bool(isinstance(analysis_view.get("issues"), list) and analysis_view.get("issues")),
+        "strategy_options_ready": bool(
+            isinstance(analysis_view.get("strategy_options"), list) and analysis_view.get("strategy_options")
+        ),
+        "pricing_ready": _safe_str(pricing_view.get("status")).lower() in {"ready", "review_pending"},
+    }
+    missing = [name for name, passed in checks.items() if not passed]
+    return {"checks": checks, "missing_requirements": missing, "ready": not missing}
+
+
+def _write_live_status(
+    out_dir: Path,
+    *,
+    state: str,
+    session_id: str,
+    matter_id: str,
+    wait_round: int,
+    snapshot: dict[str, Any] | None,
+    pending_card: dict[str, Any] | None,
+    analysis_view: dict[str, Any] | None,
+    pricing_view: dict[str, Any] | None,
+    seen_cards: int,
+    seen_sse_rounds: int,
+    error: str = "",
+    kickoff_output: str = "",
+) -> None:
+    snapshot_obj = snapshot if isinstance(snapshot, dict) else {}
+    analysis_obj = analysis_view if isinstance(analysis_view, dict) else {}
+    pricing_obj = pricing_view if isinstance(pricing_view, dict) else {}
+    runtime = _extract_runtime_progress(snapshot_obj)
+    readiness = _analysis_readiness(analysis_obj, pricing_obj)
+    payload = {
+        "contract_version": "analysis_live_status.v1",
+        "state": _safe_str(state),
+        "session_id": _safe_str(session_id),
+        "matter_id": _safe_str(matter_id),
+        "wait_round": int(wait_round),
+        "current_task_id": runtime["current_task_id"],
+        "current_node": runtime["current_node"],
+        "current_phase": runtime["current_phase"],
+        "pending_card": _compact_pending_card(pending_card),
+        "analysis_view": {
+            "summary_len": len(_safe_str(analysis_obj.get("summary"))),
+            "issues_count": len(analysis_obj.get("issues")) if isinstance(analysis_obj.get("issues"), list) else 0,
+            "strategy_options_count": len(analysis_obj.get("strategy_options")) if isinstance(analysis_obj.get("strategy_options"), list) else 0,
+        },
+        "pricing_plan_view": {
+            "status": _safe_str(pricing_obj.get("status")),
+            "reviewed": bool(pricing_obj.get("reviewed")),
+            "pricing_mode": _safe_str(pricing_obj.get("pricing_mode")),
+        },
+        "readiness": readiness,
+        "seen_cards": int(seen_cards),
+        "seen_sse_rounds": int(seen_sse_rounds),
+        "error": _safe_str(error),
+        "kickoff_output": _safe_str(kickoff_output),
+    }
+    write_json(out_dir / "live_status.json", payload)
+    write_json(out_dir / "snapshot.latest.json", snapshot_obj)
+    write_json(out_dir / "analysis_view.latest.json", analysis_obj)
+    write_json(out_dir / "pricing_plan_view.latest.json", pricing_obj)
+    write_json(out_dir / "pending_card.latest.json", _compact_pending_card(pending_card))
+
+
+def _fallback_failure_summary(
+    *,
+    session_id: str,
+    matter_id: str,
+    snapshot: dict[str, Any] | None,
+    error: Exception,
+) -> dict[str, Any]:
+    runtime = _extract_runtime_progress(snapshot if isinstance(snapshot, dict) else {})
+    message = _safe_str(error)
+    reason_code = "analysis_view_not_ready" if "analysis view + pricing plan ready" in message else error.__class__.__name__.lower()
+    return {
+        "contract_version": "failure_summary.v1",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "bundle_dir": "",
+        "first_bad_node": runtime.get("current_node") or runtime.get("current_task_id") or "",
+        "first_bad_stage": runtime.get("current_phase") or "",
+        "failure_class": "workflow_run_failed",
+        "primary_reason_code": reason_code,
+        "reason_code_chain": [reason_code],
+        "retry_prompt": message,
+    }
+
 async def run(args: argparse.Namespace) -> int:
     load_real_flow_env(repo_root=REPO_ROOT, e2e_root=E2E_ROOT)
     terminate_stale_script_runs(script_name="run_analysis_real_flow.py")
@@ -157,18 +273,64 @@ async def run(args: argparse.Namespace) -> int:
         kickoff_sse = await flow.nudge(kickoff, attachments=uploaded_file_ids, max_loops=max(1, int(args.kickoff_max_loops)))
         kickoff_counts = event_counts(kickoff_sse if isinstance(kickoff_sse, dict) else {})
         write_json(out_dir / "kickoff.sse.json", kickoff_sse if isinstance(kickoff_sse, dict) else {})
+        kickoff_output = _safe_str((kickoff_sse if isinstance(kickoff_sse, dict) else {}).get("output"))
+        wait_round = 0
+        _write_live_status(
+            out_dir,
+            state="kickoff_completed",
+            session_id=session_id,
+            matter_id=_safe_str(flow.matter_id),
+            wait_round=wait_round,
+            snapshot={},
+            pending_card=None,
+            analysis_view={},
+            pricing_view={},
+            seen_cards=len(flow.seen_cards),
+            seen_sse_rounds=len(flow.seen_sse),
+            kickoff_output=kickoff_output,
+        )
 
         async def _analysis_ready(f: WorkbenchFlow) -> bool:
+            nonlocal wait_round
+            wait_round += 1
             await f.refresh()
             if not f.matter_id:
+                _write_live_status(
+                    out_dir,
+                    state="waiting_for_matter",
+                    session_id=session_id,
+                    matter_id="",
+                    wait_round=wait_round,
+                    snapshot={},
+                    pending_card=None,
+                    analysis_view={},
+                    pricing_view={},
+                    seen_cards=len(f.seen_cards),
+                    seen_sse_rounds=len(f.seen_sse),
+                    kickoff_output=kickoff_output,
+                )
                 return False
             pending = await f.get_pending_card()
-            if is_goal_completion_card(pending):
-                return True
             snapshot = await fetch_workbench_snapshot(client, f.matter_id)
             analysis_view = _extract_analysis_view(snapshot)
             pricing_view = _extract_pricing_view(snapshot)
-            return bool(
+            if is_goal_completion_card(pending):
+                _write_live_status(
+                    out_dir,
+                    state="goal_completion_pending",
+                    session_id=session_id,
+                    matter_id=_safe_str(f.matter_id),
+                    wait_round=wait_round,
+                    snapshot=snapshot,
+                    pending_card=pending,
+                    analysis_view=analysis_view,
+                    pricing_view=pricing_view,
+                    seen_cards=len(f.seen_cards),
+                    seen_sse_rounds=len(f.seen_sse),
+                    kickoff_output=kickoff_output,
+                )
+                return True
+            ready = bool(
                 _safe_str(analysis_view.get("summary"))
                 and isinstance(analysis_view.get("issues"), list)
                 and analysis_view.get("issues")
@@ -176,6 +338,21 @@ async def run(args: argparse.Namespace) -> int:
                 and analysis_view.get("strategy_options")
                 and _safe_str(pricing_view.get("status")).lower() in {"ready", "review_pending"}
             )
+            _write_live_status(
+                out_dir,
+                state="ready" if ready else "waiting_for_views",
+                session_id=session_id,
+                matter_id=_safe_str(f.matter_id),
+                wait_round=wait_round,
+                snapshot=snapshot,
+                pending_card=pending,
+                analysis_view=analysis_view,
+                pricing_view=pricing_view,
+                seen_cards=len(f.seen_cards),
+                seen_sse_rounds=len(f.seen_sse),
+                kickoff_output=kickoff_output,
+            )
+            return ready
 
         try:
             await flow.run_until(
@@ -193,44 +370,68 @@ async def run(args: argparse.Namespace) -> int:
                 session_id=session_id,
                 matter_id=_safe_str(flow.matter_id),
             )
-            write_json(
-                out_dir / "failure_diagnostics.json",
-                {
-                    "error": str(exc),
-                    "session_id": session_id,
-                    "matter_id": _safe_str(flow.matter_id),
-                    "seen_cards": len(flow.seen_cards),
-                    "seen_sse_rounds": len(flow.seen_sse),
-                    "latest_assistant_message": next(
-                        (
-                            _safe_str(row.get("content"))
-                            for row in reversed(fail_messages)
-                            if _safe_str(row.get("role")).lower() == "assistant" and _safe_str(row.get("content"))
-                        ),
-                        "",
+            failure_diag = {
+                "error": str(exc),
+                "session_id": session_id,
+                "matter_id": _safe_str(flow.matter_id),
+                "seen_cards": len(flow.seen_cards),
+                "seen_sse_rounds": len(flow.seen_sse),
+                "latest_assistant_message": next(
+                    (
+                        _safe_str(row.get("content"))
+                        for row in reversed(fail_messages)
+                        if _safe_str(row.get("role")).lower() == "assistant" and _safe_str(row.get("content"))
                     ),
-                    "debug_refs": debug_refs,
-                },
+                    "",
+                ),
+                "debug_refs": debug_refs,
+            }
+            _write_live_status(
+                out_dir,
+                state="failed",
+                session_id=session_id,
+                matter_id=_safe_str(flow.matter_id),
+                wait_round=wait_round,
+                snapshot=fail_snapshot if isinstance(fail_snapshot, dict) else {},
+                pending_card=await flow.get_pending_card(),
+                analysis_view=_extract_analysis_view(fail_snapshot if isinstance(fail_snapshot, dict) else {}),
+                pricing_view=_extract_pricing_view(fail_snapshot if isinstance(fail_snapshot, dict) else {}),
+                seen_cards=len(flow.seen_cards),
+                seen_sse_rounds=len(flow.seen_sse),
+                error=str(exc),
+                kickoff_output=kickoff_output,
+            )
+            fallback_summary = _fallback_failure_summary(
+                session_id=session_id,
+                matter_id=_safe_str(flow.matter_id),
+                snapshot=fail_snapshot if isinstance(fail_snapshot, dict) else {},
+                error=exc,
             )
             if isinstance(fail_snapshot, dict) and fail_snapshot:
                 write_json(out_dir / "snapshot.failure.json", fail_snapshot)
-            bundle = export_failure_bundle(
-                repo_root=REPO_ROOT,
-                session_id=session_id,
-                matter_id=_safe_str(flow.matter_id),
-                reason="analysis_real_flow_failed",
-            )
-            bundle_quality = build_bundle_quality_reports(
-                repo_root=REPO_ROOT,
-                bundle_dir=bundle["bundle_dir"],
-                flow_id="analysis",
-                snapshot=fail_snapshot if isinstance(fail_snapshot, dict) else {},
-                current_view=_extract_analysis_view(fail_snapshot if isinstance(fail_snapshot, dict) else {}),
-                goal_completion_mode="none",
-            )
-            write_json(out_dir / "failure_summary.json", bundle["summary"])
-            write_json(out_dir / "bundle_quality.failure.json", bundle_quality)
-            print(format_first_bad_line(bundle["summary"]))
+            try:
+                bundle = export_failure_bundle(
+                    repo_root=REPO_ROOT,
+                    session_id=session_id,
+                    matter_id=_safe_str(flow.matter_id),
+                    reason="analysis_real_flow_failed",
+                )
+                bundle_quality = build_bundle_quality_reports(
+                    repo_root=REPO_ROOT,
+                    bundle_dir=bundle["bundle_dir"],
+                    flow_id="analysis",
+                    snapshot=fail_snapshot if isinstance(fail_snapshot, dict) else {},
+                    current_view=_extract_analysis_view(fail_snapshot if isinstance(fail_snapshot, dict) else {}),
+                    goal_completion_mode="none",
+                )
+                write_json(out_dir / "failure_summary.json", bundle["summary"])
+                write_json(out_dir / "bundle_quality.failure.json", bundle_quality)
+                print(format_first_bad_line(bundle["summary"]))
+            except Exception as diag_exc:
+                failure_diag["observability_error"] = str(diag_exc)
+                write_json(out_dir / "failure_summary.json", fallback_summary)
+                print(format_first_bad_line(fallback_summary))
+            write_json(out_dir / "failure_diagnostics.json", failure_diag)
             raise
 
         await flow.refresh()
@@ -316,6 +517,21 @@ async def run(args: argparse.Namespace) -> int:
             "bundle_quality": bundle_quality,
             "flow_scores": flow_scores,
         }
+
+        _write_live_status(
+            out_dir,
+            state="completed",
+            session_id=session_id,
+            matter_id=final_matter_id,
+            wait_round=wait_round,
+            snapshot=snapshot,
+            pending_card=pending_card,
+            analysis_view=analysis_view,
+            pricing_view=pricing_view,
+            seen_cards=len(flow.seen_cards),
+            seen_sse_rounds=len(flow.seen_sse),
+            kickoff_output=kickoff_output,
+        )
 
         write_json(out_dir / "summary.json", summary)
         write_json(out_dir / "bundle_quality.json", bundle_quality)

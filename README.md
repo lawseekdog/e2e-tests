@@ -44,8 +44,6 @@ e2e-tests/
     │   └── ... shared support modules and fixtures
     └── _debug/
         ├── assert_workbench_hardcut_results.py
-        ├── continue_session_to_docs.py
-        ├── inspect_session_progress.py
         ├── run_workbench_hardcut_playwright_cli.sh
         └── ... generic debug / hardcut tools only
 ```
@@ -122,7 +120,7 @@ python scripts/run_template_draft_real_flow.py --base-url http://<host>/api/v1 -
 
 - `scripts/` 顶层只保留规范主入口
 - `_debug/` 只保留通用排障工具与 hardcut 工具
-- 排障时可以使用 `scripts/_debug/inspect_session_progress.py`、`scripts/_debug/continue_session_to_docs.py` 等脚本，但它们不再视为规范入口
+- 会话/节点级排障改由 plugin 的 `monitor`、`replay-points`、`replay-continue`、`breakpoint-set` 承担
 
 ## 维护原则
 

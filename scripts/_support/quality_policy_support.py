@@ -343,10 +343,10 @@ def _score_node(row: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
             reasons.append(f"missing_fact:{_safe_str(fact_name)}")
     score = max(0, min(100, score))
     severity = "pass"
-    if status == "failed" or score < 60:
-        severity = "fail"
-    elif status == "blocked" and bool(row.get("human_input_required")):
+    if status == "blocked" and bool(row.get("human_input_required")):
         severity = "block"
+    elif status == "failed" or score < 60:
+        severity = "fail"
     elif score < 85 or reasons:
         severity = "warn"
     return {
@@ -440,9 +440,15 @@ def _score_skill(row: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]
 
 def _select_lane_profile(policy: dict[str, Any], row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     task_id = _safe_str(row.get("task_id"))
+    lane_id = _safe_str(row.get("lane_id"))
+    phase = _safe_str(row.get("phase"))
     for profile_name, profile in _as_dict(policy.get("lane_profiles")).items():
         match = _as_dict(_as_dict(profile).get("match"))
         if task_id and task_id in [_safe_str(item) for item in _as_list(match.get("task_ids"))]:
+            return _safe_str(profile_name), _as_dict(profile)
+        if lane_id and _match_prefixes(lane_id, _as_list(match.get("lane_id_prefixes"))):
+            return _safe_str(profile_name), _as_dict(profile)
+        if phase and phase in [_safe_str(item) for item in _as_list(match.get("phases"))]:
             return _safe_str(profile_name), _as_dict(profile)
     return "", {}
 

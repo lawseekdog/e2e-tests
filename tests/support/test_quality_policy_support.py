@@ -126,6 +126,120 @@ def test_build_bundle_quality_reports_writes_summary_and_refs(tmp_path: Path) ->
     assert summary["worst_node"]["trace_id"] == "trace-1"
 
 
+def test_document_drafting_quality_policy_matches_dynamic_lanes_and_support_profiles(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    bundle_dir = tmp_path / "session:template-draft"
+    bundle_dir.mkdir(parents=True)
+    for name in ("failure_summary.json", "execution_traces.json", "timeline.json", "node_trace_timeline.json"):
+        (bundle_dir / name).write_text("{}", encoding="utf-8")
+
+    _write_jsonl(
+        bundle_dir / "quality" / "raw" / "nodes.jsonl",
+        [
+            {
+                "trace_id": "trace-1",
+                "node_id": "materials",
+                "node_path": "workbench/materials",
+                "sequence": 12,
+                "skill_name": "",
+                "task_id": "materials",
+                "status": "completed",
+                "failure_class": "",
+                "primary_reason_code": "",
+                "reason_code_chain": [],
+                "duration_ms": 100,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "tool_call_count": 0,
+                "llm_call_count": 0,
+                "provider_raw_captured": False,
+                "structured_response_captured": False,
+                "parser_ok": True,
+                "raw_validate_ok": True,
+                "final_validate_ok": True,
+                "output_contract_ok": True,
+                "ask_user": False,
+                "human_input_required": False,
+                "recovered_after_retry": False,
+                "empty_output": False,
+                "produced_output_keys": ["data.files.classifications"],
+                "changed_fields": ["data.files.classifications"],
+                "state_input_ref": "",
+                "state_output_ref": "",
+                "skill_stage_refs": [],
+                "llm_call_refs": [],
+                "contract_diff_refs": [],
+            }
+        ],
+    )
+    _write_jsonl(
+        bundle_dir / "quality" / "raw" / "skills.jsonl",
+        [
+            {
+                "skill_name": "document-intake",
+                "attempt_id": "attempt-1",
+                "task_id": "",
+                "prepare_status": "completed",
+                "preprocess_status": "completed",
+                "mode_guard_status": "completed",
+                "llm_stage_status": "completed",
+                "envelope_action_status": "completed",
+                "finalize_status": "completed",
+                "prompt_contract_ok": True,
+                "prefetch_ok": True,
+                "llm_admission_ok": True,
+                "provider_raw_captured": True,
+                "parser_error": "",
+                "validator_error_count": 0,
+                "retry_count": 0,
+                "final_action": "continue",
+                "final_reason_code": "validated",
+                "trace_ids": ["trace-1"],
+                "skill_stage_dir": "/tmp/skill",
+                "skill_stage_refs": [],
+                "llm_call_refs": [],
+            }
+        ],
+    )
+    _write_jsonl(
+        bundle_dir / "quality" / "raw" / "lanes.jsonl",
+        [
+            {
+                "lane_id": "analysis:1173",
+                "task_id": "1173",
+                "phase": "analysis",
+                "node_count": 1,
+                "skill_count": 0,
+                "retry_count": 0,
+                "blocked_count": 0,
+                "ask_user_count": 0,
+                "first_unresolved_bad": {},
+                "trace_ids": ["trace-1"],
+                "skill_attempt_ids": [],
+            }
+        ],
+    )
+
+    summary = build_bundle_quality_reports(
+        repo_root=repo_root,
+        bundle_dir=str(bundle_dir),
+        flow_id="template_draft",
+        snapshot={
+            "matter": {
+                "service_type_id": "document_drafting",
+                "id": "1173",
+                "session_id": "session:2533",
+            }
+        },
+        current_view={"summary": "ok"},
+        goal_completion_mode="none",
+    )
+
+    assert "unknown_node_profile:materials" not in summary["hard_fail_reasons"]
+    assert "unknown_skill_profile:document-intake" not in summary["hard_fail_reasons"]
+    assert "unknown_lane_profile:analysis:1173" not in summary["hard_fail_reasons"]
+
+
 def test_merge_bundle_quality_report_and_flow_scores_include_quality_failures() -> None:
     quality_summary = {
         "refs": {"summary": "/tmp/quality/summary.json"},

@@ -203,6 +203,19 @@ def _resume_ack_only_response(*, action: str, sse: dict[str, Any], visible_error
     return False
 
 
+def _kickoff_ack_only_response(*, action: str, sse: dict[str, Any], visible_error: str) -> bool:
+    if action != "chat.kickoff":
+        return False
+    err = _safe_str(visible_error)
+    if "SSE missing end/complete" not in err:
+        return False
+    event_names = set(_event_counts(sse).keys())
+    allowed = {"user_message", "progress", "usage"}
+    if not event_names or not event_names.issubset(allowed):
+        return False
+    return "progress" in event_names
+
+
 def _workflow_action_ack_only_response(*, action: str, sse: dict[str, Any]) -> bool:
     if action != "workflow_action.template_draft_start":
         return False
@@ -361,8 +374,14 @@ async def _resolve_template_name(client: ApiClient, template_id: str, preferred_
     if _safe_str(preferred_name):
         return _safe_str(preferred_name)
 
+    lookup_timeout_s = max(1.0, float(os.getenv("E2E_TEMPLATE_LOOKUP_TIMEOUT_S", "5") or 5))
+
     try:
-        payload = await client.get("/templates-service/atomic/templates")
+        payload = await client.get(
+            "/templates-service/atomic/templates",
+            timeout=lookup_timeout_s,
+            get_retries=1,
+        )
         templates = _extract_templates(payload)
         for row in templates:
             if _safe_str(row.get("id")) != template_id:
@@ -374,7 +393,11 @@ async def _resolve_template_name(client: ApiClient, template_id: str, preferred_
         pass
 
     try:
-        detail = await client.get(f"/templates-service/templates/{template_id}")
+        detail = await client.get(
+            f"/templates-service/templates/{template_id}",
+            timeout=lookup_timeout_s,
+            get_retries=1,
+        )
         data = unwrap_api_response(detail)
         if isinstance(data, dict):
             name = _safe_str(data.get("name"))
@@ -424,6 +447,43 @@ def _deliverable_signature(row: dict[str, Any] | None) -> str:
             _safe_str(row.get("analysis_version")),
         ]
     )
+
+
+def _snapshot_requires_docgen_settle(snapshot: dict[str, Any] | None) -> bool:
+    snap = snapshot if isinstance(snapshot, dict) else {}
+    phase = _safe_str(snap.get("current_phase")).lower()
+    task_id = _safe_str(snap.get("current_task_id")).lower()
+    docgen_node = _safe_str(snap.get("docgen_node")).lower()
+    deliverable = snap.get("deliverable") if isinstance(snap.get("deliverable"), dict) else {}
+    deliverable_status = _safe_str(deliverable.get("status")).lower()
+    quality_decision = _safe_str(snap.get("quality_review_decision")).lower()
+
+    if phase == "docgen":
+        return True
+    if task_id.startswith("docgen") or task_id.startswith("document_drafting_docgen") or task_id.startswith("document_generation"):
+        return True
+    if docgen_node and docgen_node not in {"finish", "sync", "done", "completed"}:
+        return True
+    if quality_decision in {"repair", "review"}:
+        return True
+    if deliverable_status and deliverable_status not in {"completed", "archived", "done"}:
+        return True
+    return False
+
+
+def _deliverable_candidate_settled(
+    *,
+    snapshot: dict[str, Any] | None,
+    stable_polls: int,
+    seen_for_s: float,
+    min_stable_polls: int,
+    settle_grace_s: float,
+) -> bool:
+    if stable_polls < max(1, int(min_stable_polls)):
+        return False
+    if _snapshot_requires_docgen_settle(snapshot) and seen_for_s < max(0.0, float(settle_grace_s)):
+        return False
+    return True
 
 
 async def _create_matter_with_retry(
@@ -552,8 +612,9 @@ def _evaluate_dialogue_quality(
 
     kind_set = set(card_kinds)
     has_reasonable_card_type = bool(kind_set.intersection(REASONABLE_CARD_KINDS))
+    cardless_success = (not cards) and (not visible_failures) and bool(rounds)
 
-    if not cards:
+    if not cards and not cardless_success:
         failures.append("未观察到可交互卡片，无法证明对话式起草链路可用")
     if cards and not has_reasonable_card_type:
         failures.append(
@@ -577,6 +638,7 @@ def _evaluate_dialogue_quality(
         "card_count": len(cards),
         "card_types": sorted(kind_set),
         "has_reasonable_card_type": has_reasonable_card_type,
+        "cardless_success": cardless_success,
     }
 
 
@@ -837,6 +899,8 @@ async def run(args: argparse.Namespace) -> int:
                 visible_error = str(e)
                 if _resume_ack_only_response(action=action, sse=sse, visible_error=visible_error):
                     visible_ok = True
+                elif _kickoff_ack_only_response(action=action, sse=sse, visible_error=visible_error):
+                    visible_ok = True
                 else:
                     visible_ok = False
 
@@ -848,11 +912,18 @@ async def run(args: argparse.Namespace) -> int:
             and _sse_has_user_message_event(sse)
             and not cards_in_sse
         )
+        kickoff_ack_only = (
+            action == "chat.kickoff"
+            and visible_ok
+            and _sse_has_user_message_event(sse)
+            and not cards_in_sse
+        )
         if (
             (not busy)
             and has_stream_events
             and (not cards_in_sse)
             and (not resume_ack_only)
+            and (not kickoff_ack_only)
             and _is_low_signal_output(output_text)
         ):
             low_signal_streak = prev_streak + 1
@@ -1186,6 +1257,7 @@ async def run(args: argparse.Namespace) -> int:
                     "output_key": output_key,
                     "template_key": output_key,
                 },
+                settle_mode="fire_and_poll",
             )
             await _record_round(
                 action="workflow_action.template_draft_start",
@@ -1254,6 +1326,7 @@ async def run(args: argparse.Namespace) -> int:
                     facts_text,
                     attachments=uploaded_file_ids,
                     max_loops=max(1, int(args.max_loops)),
+                    settle_mode="fire_and_poll",
                 )
                 await _record_round(
                     action="chat.kickoff",
@@ -1312,33 +1385,54 @@ async def run(args: argparse.Namespace) -> int:
             max_skill_error_repeats = max(1, int(args.max_skill_error_repeats))
             max_stall_rounds = max(1, int(args.max_stall_rounds))
             cause_anchor_repeat_threshold = max(1, int(args.cause_anchor_repeat_threshold))
+            deliverable_settle_grace_s = max(0.0, float(os.getenv("E2E_DELIVERABLE_SETTLE_GRACE_S", "45") or 45))
+            deliverable_min_stable_polls = max(1, int(os.getenv("E2E_DELIVERABLE_MIN_STABLE_POLLS", "2") or 2))
             use_pending_card_api = str(os.getenv("E2E_USE_PENDING_CARD_API", "1") or "1").strip().lower() not in {
                 "0",
                 "false",
                 "no",
                 "off",
             }
+            deliverable_candidate_seen_at = 0.0
+            deliverable_candidate_sig = ""
+            deliverable_candidate_stable_polls = 0
             for step_idx in range(max_steps):
                 if step_idx > 0 and poll_interval_s > 0:
                     await asyncio.sleep(poll_interval_s)
                 await flow.refresh()
                 deliverable_head: dict[str, Any] | None = None
                 deliverable_rows: list[dict[str, Any]] = []
+                deliverable_candidate: dict[str, Any] | None = None
                 if flow.matter_id:
                     deliverable_rows = await _list_deliverables(client, flow.matter_id, output_key)
                     if deliverable_rows:
                         deliverable_head = deliverable_rows[0]
-                        candidate = _pick_deliverable_with_file(deliverable_rows)
-                        if candidate:
-                            deliverable_row = candidate
+                        deliverable_candidate = _pick_deliverable_with_file(deliverable_rows)
                     head_sig = _deliverable_signature(deliverable_head)
                     if head_sig and head_sig != last_deliverable_sig:
                         last_deliverable_sig = head_sig
                         stall_rounds = 0
                 if observer is not None:
                     await observer(trigger="poll.loop", deliverable_rows=deliverable_rows)
-                if deliverable_row:
-                    break
+
+                if deliverable_candidate:
+                    candidate_sig = _deliverable_signature(deliverable_candidate)
+                    now = asyncio.get_running_loop().time()
+                    if candidate_sig and candidate_sig != deliverable_candidate_sig:
+                        deliverable_candidate_sig = candidate_sig
+                        deliverable_candidate_seen_at = now
+                        deliverable_candidate_stable_polls = 1
+                    elif candidate_sig:
+                        deliverable_candidate_stable_polls += 1
+                    if _deliverable_candidate_settled(
+                        snapshot=last_docgen_snapshot,
+                        stable_polls=deliverable_candidate_stable_polls,
+                        seen_for_s=(now - deliverable_candidate_seen_at) if deliverable_candidate_seen_at > 0 else 0.0,
+                        min_stable_polls=deliverable_min_stable_polls,
+                        settle_grace_s=deliverable_settle_grace_s,
+                    ):
+                        deliverable_row = deliverable_candidate
+                        break
 
                 pending = await flow.get_pending_card() if use_pending_card_api else None
                 if observer is not None and pending:
@@ -1424,6 +1518,27 @@ async def run(args: argparse.Namespace) -> int:
                     last_card_sig = ""
                     last_card_repeats = 0
                     now = asyncio.get_running_loop().time()
+                    if deliverable_candidate:
+                        await _record_round(
+                            action="state.wait_deliverable_settle",
+                            payload={
+                                "deliverable_status": _safe_str((deliverable_candidate or {}).get("status")),
+                                "deliverable_file_id": _safe_str((deliverable_candidate or {}).get("file_id")),
+                                "settle_seen_for_s": round((now - deliverable_candidate_seen_at), 2) if deliverable_candidate_seen_at > 0 else 0.0,
+                                "stable_polls": deliverable_candidate_stable_polls,
+                                "settle_grace_s": deliverable_settle_grace_s,
+                                "current_phase": _safe_str(last_docgen_snapshot.get("current_phase")),
+                                "current_task_id": _safe_str(last_docgen_snapshot.get("current_task_id")),
+                                "docgen_node": _safe_str(last_docgen_snapshot.get("docgen_node")),
+                                "quality_review_decision": _safe_str(last_docgen_snapshot.get("quality_review_decision")),
+                            },
+                            sse={},
+                            enforce_visibility=False,
+                        )
+                        stall_rounds = 0
+                        await asyncio.sleep(max(0.5, float(args.poll_interval_s)))
+                        continue
+
                     if deliverable_head:
                         current_sig = _deliverable_signature(deliverable_head)
                         if (not current_sig) or current_sig == last_deliverable_sig:

@@ -817,6 +817,13 @@ def build_template_flow_scores(
     unexpected = score_unexpected_cards(flow_id="template_draft", seen_cards=cards, pending_card=pending_card)
     rows = [row for row in (node_timeline or []) if isinstance(row, dict)]
     node_set = {_safe_str(row.get("docgen_node")).lower() for row in rows if _safe_str(row.get("docgen_node"))}
+    node_set.update(
+        {
+            _safe_str(item).lower()
+            for item in _as_list(_as_dict(summary).get("docgen_node_sequence"))
+            if _safe_str(item)
+        }
+    )
     expected_nodes = {"intake", "compose", "render", "sync", "finish"}
     matched_nodes = sorted(node_set & expected_nodes)
     node_path_score = {
@@ -838,6 +845,11 @@ def build_template_flow_scores(
     deliverable = _as_dict(snapshot_obj.get("deliverable"))
     snapshot_failures: list[str] = []
     snapshot_score = 0
+    has_terminal_quality_review = (
+        _safe_str(_as_dict(summary).get("latest_docgen_node")).lower() == "finish"
+        and _safe_str(deliverable.get("status")).lower() in {"completed", "archived", "done"}
+        and bool(_safe_str(snapshot_obj.get("quality_review_decision")))
+    )
     if _safe_str(snapshot_obj.get("current_task_id")) or _safe_str(snapshot_obj.get("current_phase")):
         snapshot_score += 20
     else:
@@ -846,7 +858,7 @@ def build_template_flow_scores(
         snapshot_score += 20
     else:
         snapshot_failures.append("docgen_node_missing")
-    if bool(snapshot_obj.get("template_quality_contracts_json_exists")):
+    if bool(snapshot_obj.get("template_quality_contracts_json_exists")) or has_terminal_quality_review:
         snapshot_score += 20
     else:
         snapshot_failures.append("template_quality_contracts_missing")

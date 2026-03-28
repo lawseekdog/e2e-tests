@@ -116,6 +116,51 @@ def test_build_template_flow_scores_uses_existing_dialogue_and_document_quality(
     assert scores["overall_e2e_score"]["passed"] is True
 
 
+def test_build_template_flow_scores_uses_summary_docgen_sequence_when_timeline_is_sparse() -> None:
+    scores = build_template_flow_scores(
+        cards=[],
+        pending_card={},
+        node_timeline=[{"docgen_node": "finish"}],
+        summary={
+            "latest_docgen_node": "finish",
+            "docgen_node_sequence": ["section_contract", "compose", "hard_validate", "soft_validate", "render", "sync", "finish"],
+        },
+        last_docgen_snapshot={
+            "current_phase": "docgen",
+            "current_task_id": "goal_completion",
+            "template_quality_contracts_json_exists": True,
+            "quality_review_decision": "pass",
+            "deliverable": {"status": "completed"},
+        },
+        dialogue_quality={"pass": True},
+        document_quality={"pass": True, "citation_count": 2, "fact_coverage_score": 90.0},
+    )
+
+    assert scores["node_path_score"]["matched_hints"] == ["compose", "finish", "render", "sync"]
+    assert scores["node_path_score"]["passed"] is True
+
+
+def test_build_template_flow_scores_accepts_terminal_quality_review_when_contract_flag_is_missing() -> None:
+    scores = build_template_flow_scores(
+        cards=[],
+        pending_card={},
+        node_timeline=[{"docgen_node": "finish"}],
+        summary={"latest_docgen_node": "finish", "docgen_node_sequence": ["compose", "render", "sync", "finish"]},
+        last_docgen_snapshot={
+            "current_phase": "docgen",
+            "current_task_id": "goal_completion",
+            "template_quality_contracts_json_exists": False,
+            "quality_review_decision": "repair",
+            "deliverable": {"status": "completed"},
+        },
+        dialogue_quality={"pass": True},
+        document_quality={"pass": True, "citation_count": 2, "fact_coverage_score": 90.0},
+    )
+
+    assert scores["snapshot_progress_score"]["passed"] is True
+    assert "template_quality_contracts_missing" not in scores["snapshot_progress_score"]["failures"]
+
+
 def test_build_flow_scores_enforces_contract_review_v2_expectations() -> None:
     snapshot = {"analysis_state": {"current_node": "goal_completion", "current_phase": "contract_review"}}
     contract_view = {

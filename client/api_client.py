@@ -623,6 +623,7 @@ class ApiClient:
         user_query: str,
         attachments: list[str] | None = None,
         max_loops: int | None = None,
+        settle_mode: str = "full",
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "user_query": user_query,
@@ -632,7 +633,13 @@ class ApiClient:
             data["max_loops"] = max_loops
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
         open_timeout_s = float(os.getenv("E2E_WS_OPEN_TIMEOUT_S", "20") or 20)
-        return await self._post_ws(ws_path, "chat", data, open_timeout_s=open_timeout_s)
+        return await self._post_ws(
+            ws_path,
+            "chat",
+            data,
+            open_timeout_s=open_timeout_s,
+            settle_mode=settle_mode,
+        )
 
     async def get_pending_card(self, session_id: str) -> dict[str, Any]:
         # pending_card is a high-frequency poll endpoint; keep it short so transient
@@ -781,6 +788,7 @@ class ApiClient:
         workflow_action_params: dict[str, Any] | None = None,
         attachments: list[str] | None = None,
         max_loops: int | None = None,
+        settle_mode: str = "full",
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "workflow_action": workflow_action,
@@ -791,7 +799,13 @@ class ApiClient:
             data["max_loops"] = int(max_loops)
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
         open_timeout_s = float(os.getenv("E2E_WS_OPEN_TIMEOUT_S", "20") or 20)
-        return await self._post_ws(ws_path, "actions", data, open_timeout_s=open_timeout_s)
+        return await self._post_ws(
+            ws_path,
+            "actions",
+            data,
+            open_timeout_s=open_timeout_s,
+            settle_mode=settle_mode,
+        )
 
     async def switch_service_type(
         self,
@@ -927,6 +941,21 @@ class ApiClient:
 
     async def get_workflow_profile(self, matter_id: str) -> dict[str, Any]:
         return await self.get(f"{MATTERS}/internal/matters/{matter_id}/workflow/profile")
+
+    async def get_matter_ui_dictionary(self) -> dict[str, Any]:
+        return await self.get(f"{MATTERS}/lawyer/matters/ui-dictionary")
+
+    async def sync_matter_workflow_all(
+        self,
+        matter_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        mid = str(matter_id).strip()
+        if not mid:
+            raise ValueError("matter_id is required")
+        if not isinstance(payload, dict) or not payload:
+            raise ValueError("payload is required")
+        return await self.post(f"{MATTERS}/internal/matters/{mid}/sync/all", payload)
 
     async def list_deliverables(
         self, matter_id: str, output_key: str | None = None, include_content: bool = False

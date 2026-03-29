@@ -1370,8 +1370,13 @@ class WorkbenchFlow:
         return card if isinstance(card, dict) and card else None
 
     async def actionable_card_from_sse(self, sse: dict[str, Any] | None) -> dict[str, Any] | None:
-        _ = sse
-        return None
+        card = extract_last_card_from_sse(sse or {})
+        if not isinstance(card, dict) or not card:
+            return None
+        authoritative = await self.get_pending_card()
+        if authoritative:
+            return None
+        return card
 
     async def resume_card(self, card: dict[str, Any], *, max_loops: int | None = None) -> dict[str, Any]:
         # Keep an audit trail for assertions/debugging.
@@ -1437,9 +1442,25 @@ class WorkbenchFlow:
         await self._emit_progress(label=f"resume:{settle_mode}", card=card, sse=sse)
         return sse
 
-    async def nudge(self, text: str, *, attachments: list[str] | None = None, max_loops: int = 8) -> dict[str, Any]:
-        _debug(f"[flow] nudge text={text!r} attachments={len(attachments or [])} max_loops={max_loops}")
-        sse = await self.client.chat(self.session_id, text, attachments=attachments or [], max_loops=max_loops)
+    async def nudge(
+        self,
+        text: str,
+        *,
+        attachments: list[str] | None = None,
+        max_loops: int = 8,
+        settle_mode: str = "full",
+    ) -> dict[str, Any]:
+        _debug(
+            f"[flow] nudge text={text!r} attachments={len(attachments or [])} "
+            f"max_loops={max_loops} settle_mode={settle_mode}"
+        )
+        sse = await self.client.chat(
+            self.session_id,
+            text,
+            attachments=attachments or [],
+            max_loops=max_loops,
+            settle_mode=settle_mode,
+        )
         if isinstance(sse, dict):
             self.last_sse = sse
             self.seen_sse.append(sse)
@@ -1453,6 +1474,7 @@ class WorkbenchFlow:
         workflow_action_params: dict[str, Any] | None = None,
         attachments: list[str] | None = None,
         max_loops: int = 12,
+        settle_mode: str = "full",
     ) -> dict[str, Any]:
         _debug(
             f"[flow] workflow_action action={workflow_action!r} params={workflow_action_params or {}} "
@@ -1464,6 +1486,7 @@ class WorkbenchFlow:
             workflow_action_params=workflow_action_params or {},
             attachments=attachments or self.uploaded_file_ids,
             max_loops=max_loops,
+            settle_mode=settle_mode,
         )
         if isinstance(sse, dict):
             self.last_sse = sse
@@ -1482,6 +1505,8 @@ class WorkbenchFlow:
             # Avoid any chat/resume operations once the session is archived; keep run_until polling only.
             return {"events": [{"event": "session_archived"}], "output": "session archived"}
         card = await self.get_pending_card()
+        if not card and isinstance(self.last_sse, dict):
+            card = await self.actionable_card_from_sse(self.last_sse)
         if card:
             self._last_step_used_nudge = False
             sig = card_signature(card)

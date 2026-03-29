@@ -53,17 +53,18 @@ DEFAULT_KICKOFF = "请基于已上传材料形成一份结构化法律意见分�
 _GOAL_DOCGEN = "document_generation"
 _SUCCESS_STATUSES = {"completed", "archived", "done"}
 
-FLOW_OVERRIDES = {
-    "profile.service_type_id": "legal_opinion",
-    "profile.client_role": "applicant",
-    "client_role": "applicant",
-    "profile.summary": "服务器采购合同履约争议，需要形成法律意见分析。",
-    "profile.background": DEFAULT_LEGAL_OPINION_FACTS,
-    "profile.facts": DEFAULT_LEGAL_OPINION_FACTS,
-    "profile.legal_issue": "暂停付款、逾期交付责任、质量责任、解除与索赔边界。",
-    "profile.opinion_topic_primary": "contract_dispute",
-    "profile.opinion_subtype": "dispute_response",
-}
+FLOW_OVERRIDES: dict[str, Any] = {}
+
+
+def _build_kickoff_prompt(raw_kickoff: str) -> str:
+    kickoff = _safe_str(raw_kickoff) or DEFAULT_KICKOFF
+    if kickoff == DEFAULT_KICKOFF:
+        return (
+            f"{DEFAULT_KICKOFF}\n\n"
+            f"以下是当前案件背景与目标，请直接基于这些事实进入法律意见分析：\n"
+            f"{DEFAULT_LEGAL_OPINION_FACTS}"
+        )
+    return kickoff
 
 
 def _extract_goal_view(snapshot: dict[str, Any] | None, view_id: str) -> dict[str, Any]:
@@ -214,6 +215,15 @@ def _analysis_allows_auto_review_card(snapshot: dict[str, Any] | None) -> bool:
     if task_id.endswith(("_seed", "_parallel", "_normalize", "_assemble", "_publish_gate")):
         return evidence_handoff_ready
     return True
+
+
+def _is_auto_answerable_intake_card(card: dict[str, Any] | None) -> bool:
+    if not isinstance(card, dict):
+        return False
+    if _safe_str(card.get("skill_id")).lower() != "legal_opinion-intake-gate":
+        return False
+    questions = card.get("questions") if isinstance(card.get("questions"), list) else []
+    return bool(questions)
 
 
 def _legal_opinion_core_ready(legal_view: dict[str, Any] | None) -> bool:
@@ -580,7 +590,7 @@ async def run(args: argparse.Namespace) -> int:
         base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
     username = _safe_str(args.username) or _safe_str(os.getenv("LAWYER_USERNAME")) or "lawyer1"
     password = _safe_str(args.password) or _safe_str(os.getenv("LAWYER_PASSWORD")) or "lawyer123456"
-    kickoff = _safe_str(args.kickoff) or DEFAULT_KICKOFF
+    kickoff = _build_kickoff_prompt(_safe_str(args.kickoff))
 
     evidence_paths = _resolve_fixture_paths(list(DEFAULT_LEGAL_OPINION_EVIDENCE_RELATIVE))
     if not evidence_paths:
@@ -622,6 +632,7 @@ async def run(args: argparse.Namespace) -> int:
             client_role="applicant",
             uploaded_file_ids=uploaded_file_ids,
             overrides=FLOW_OVERRIDES,
+            preseed_profile=False,
         )
         print(f"[session] id={session_id} matter_id={matter_id or '-'}")
 
@@ -701,6 +712,18 @@ async def run(args: argparse.Namespace) -> int:
                 break
             analysis_snapshot = analysis_round.get("snapshot")
             analysis_legal_view = analysis_round.get("legal_view")
+            pending_card = analysis_round["pending_card"] if isinstance(analysis_round.get("pending_card"), dict) else {}
+            if _is_auto_answerable_intake_card(pending_card):
+                summary = {
+                    "status": "unexpected_intake_card",
+                    "pending_card": pending_card,
+                    "flow_scores": analysis_round["flow_scores"],
+                    "bundle_quality": analysis_round["bundle_quality"],
+                }
+                write_json(out_dir / "summary.json", summary)
+                print("[result] unexpected_intake_card")
+                print(f"[artifacts] {out_dir}")
+                return 4
             auto_action = _pick_analysis_auto_action(analysis_snapshot, analysis_legal_view)
             if auto_action and analysis_action_cooldown <= 0 and _analysis_allows_auto_review_card(analysis_snapshot):
                 payload = auto_action.get("payload") if isinstance(auto_action.get("payload"), dict) else {}
@@ -727,7 +750,6 @@ async def run(args: argparse.Namespace) -> int:
                     continue
             elif analysis_action_cooldown > 0:
                 analysis_action_cooldown -= 1
-            pending_card = analysis_round["pending_card"] if isinstance(analysis_round.get("pending_card"), dict) else {}
             allow_reference_refresh = _analysis_should_refresh_references(
                 snapshot=analysis_snapshot,
                 legal_view=analysis_legal_view,
@@ -807,11 +829,22 @@ async def run(args: argparse.Namespace) -> int:
             print(f"[artifacts] {out_dir}")
             return 3
 
-        set_goal_sse = await flow.workflow_action(
-            "set_goal",
-            workflow_action_params={"goal": _GOAL_DOCGEN},
-            max_loops=max(12, int(args.action_max_loops)),
+        ready_pending_card = (
+            analysis_round["pending_card"]
+            if isinstance(analysis_round.get("pending_card"), dict)
+            else {}
         )
+        if is_goal_completion_card(ready_pending_card):
+            set_goal_sse = await flow.resume_card(
+                ready_pending_card,
+                max_loops=max(12, int(args.action_max_loops)),
+            )
+        else:
+            set_goal_sse = await flow.workflow_action(
+                "set_goal",
+                workflow_action_params={"goal": _GOAL_DOCGEN},
+                max_loops=max(12, int(args.action_max_loops)),
+            )
         await _persist_action_sse(out_dir, 2, "set_goal_document_generation", set_goal_sse)
 
         stable_block_fingerprint = ""
@@ -837,13 +870,24 @@ async def run(args: argparse.Namespace) -> int:
                 success = True
                 break
 
+            if _is_auto_answerable_intake_card(pending_card):
+                summary = {
+                    "status": "unexpected_intake_card",
+                    "pending_card": pending_card,
+                    "flow_scores": round_state["flow_scores"],
+                    "bundle_quality": round_state["bundle_quality"],
+                }
+                write_json(out_dir / "summary.json", summary)
+                print("[result] unexpected_intake_card")
+                print(f"[artifacts] {out_dir}")
+                return 4
+
             if is_goal_completion_card(pending_card):
-                sse = await flow.workflow_action(
-                    "set_goal",
-                    workflow_action_params={"goal": _GOAL_DOCGEN},
+                sse = await flow.resume_card(
+                    pending_card,
                     max_loops=max(12, int(args.action_max_loops)),
                 )
-                await _persist_action_sse(out_dir, round_no, "goal_completion_set_goal", sse)
+                await _persist_action_sse(out_dir, round_no, "goal_completion_resume_card", sse)
                 continue
 
             if _safe_str(pending_card.get("skill_id")).lower() == "reference-grounding" and reference_refresh_attempts < int(args.max_reference_refresh):

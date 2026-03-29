@@ -281,7 +281,13 @@ async def run(args: argparse.Namespace) -> int:
         )
         print(f"[session] id={session_id} matter_id={matter_id or '-'}")
 
-        kickoff_sse = await flow.nudge(kickoff, attachments=[file_id], max_loops=max(1, int(args.kickoff_max_loops)))
+        kickoff_settle_mode = "first_event" if args.cards_only else "full"
+        kickoff_sse = await flow.nudge(
+            kickoff,
+            attachments=[file_id],
+            max_loops=max(1, int(args.kickoff_max_loops)),
+            settle_mode=kickoff_settle_mode,
+        )
         kickoff_counts = _event_counts(kickoff_sse if isinstance(kickoff_sse, dict) else {})
         print(f"[kickoff] event_counts={kickoff_counts}")
         write_json(out_dir / "kickoff.sse.json", kickoff_sse if isinstance(kickoff_sse, dict) else {})

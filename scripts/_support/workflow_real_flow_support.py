@@ -25,6 +25,9 @@ _REMOTE_SERVICE_PORTS: dict[str, int] = {
     "matter": 18107,
     "templates": 18112,
 }
+_DEFAULT_LOCAL_CONSULTATIONS_PORT = 18021
+_DEFAULT_LOCAL_MATTER_PORT = 18020
+_DEFAULT_LOCAL_TEMPLATES_PORT = 18022
 
 
 def safe_str(value: Any) -> str:
@@ -117,6 +120,19 @@ def api_url(host: str, port: int) -> str:
     return f"http://{host}:{int(port)}/api/v1"
 
 
+def _local_service_port(env_key: str, default: int) -> int:
+    token = safe_str(os.getenv(env_key))
+    try:
+        port = int(token)
+    except Exception:
+        return int(default)
+    return port if port > 0 else int(default)
+
+
+def _local_service_api_url(env_key: str, default: int) -> str:
+    return api_url("127.0.0.1", _local_service_port(env_key, default))
+
+
 def configure_direct_service_mode(
     *,
     remote_stack_host: str = "",
@@ -147,24 +163,38 @@ def configure_direct_service_mode(
     resolved_org = safe_str(organization_base_url) or safe_str(os.getenv("E2E_ORG_BASE_URL")) or api_url(host, _REMOTE_SERVICE_PORTS["organization"])
     resolved_consultations = (
         safe_str(consultations_base_url)
-        or safe_str(os.getenv("E2E_CONSULTATIONS_BASE_URL"))
-        or api_url("127.0.0.1", 18021)
-        if local_consultations
-        else api_url(host, _REMOTE_SERVICE_PORTS["consultations"])
+        or (
+            _local_service_api_url("LOCAL_CONSULTATIONS_PORT", _DEFAULT_LOCAL_CONSULTATIONS_PORT)
+            if local_consultations
+            else (
+                safe_str(os.getenv("E2E_CONSULTATIONS_BASE_URL"))
+                or api_url(host, _REMOTE_SERVICE_PORTS["consultations"])
+            )
+        )
     )
     resolved_matter = (
         safe_str(matter_base_url)
-        or safe_str(os.getenv("E2E_MATTER_BASE_URL"))
-        or api_url("127.0.0.1", 18020)
-        if local_matter
-        else api_url(host, _REMOTE_SERVICE_PORTS["matter"])
+        or (
+            _local_service_api_url("LOCAL_MATTER_PORT", _DEFAULT_LOCAL_MATTER_PORT)
+            if local_matter
+            else (
+                safe_str(os.getenv("E2E_MATTER_BASE_URL"))
+                or api_url(host, _REMOTE_SERVICE_PORTS["matter"])
+            )
+        )
     )
     resolved_files = safe_str(files_base_url) or safe_str(os.getenv("E2E_FILES_BASE_URL")) or api_url(host, _REMOTE_SERVICE_PORTS["files"])
     resolved_knowledge = safe_str(knowledge_base_url) or safe_str(os.getenv("E2E_KNOWLEDGE_BASE_URL")) or api_url(host, _REMOTE_SERVICE_PORTS["knowledge"])
     resolved_templates = (
         safe_str(templates_base_url)
-        or safe_str(os.getenv("E2E_TEMPLATES_BASE_URL"))
-        or (api_url("127.0.0.1", 18022) if local_templates else api_url(host, _REMOTE_SERVICE_PORTS["templates"]))
+        or (
+            _local_service_api_url("LOCAL_TEMPLATES_PORT", _DEFAULT_LOCAL_TEMPLATES_PORT)
+            if local_templates
+            else (
+                safe_str(os.getenv("E2E_TEMPLATES_BASE_URL"))
+                or api_url(host, _REMOTE_SERVICE_PORTS["templates"])
+            )
+        )
     )
 
     os.environ["E2E_AUTH_BASE_URL"] = resolved_auth
@@ -208,6 +238,108 @@ def configure_direct_service_mode(
     return resolved_consultations, config
 
 
+def _flatten_profile_override_patch(overrides: dict[str, Any]) -> dict[str, Any]:
+    patch: dict[str, Any] = {}
+    if not isinstance(overrides, dict):
+        return patch
+    name_aliases = {
+        "plaintiff.name": "plaintiff",
+        "defendant.name": "defendant",
+        "appellant.name": "appellant",
+        "appellee.name": "appellee",
+        "applicant.name": "applicant",
+        "respondent.name": "respondent",
+        "suspect.name": "suspect",
+    }
+    for raw_key, value in overrides.items():
+        key = safe_str(raw_key)
+        if not key or value is None or not key.startswith("profile."):
+            continue
+        leaf = safe_str(key[len("profile."):])
+        if not leaf:
+            continue
+        if leaf in {"service_type_id", "decisions"} or leaf.startswith("decisions."):
+            continue
+        alias = name_aliases.get(leaf)
+        if alias:
+            patch.setdefault(alias, value)
+            continue
+        if "." in leaf:
+            continue
+        patch[leaf] = value
+    return patch
+
+
+def _default_goal_from_service_dictionary(service_dictionary: dict[str, Any], *, service_type_id: str) -> str:
+    want = safe_str(service_type_id)
+    if not want or not isinstance(service_dictionary, dict):
+        return ""
+    for key in ("resolved_service_types", "service_types"):
+        rows = service_dictionary.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if safe_str(row.get("id")) != want:
+                continue
+            goal = safe_str(row.get("default_goal"))
+            if goal:
+                return goal
+    return safe_str(service_dictionary.get("default_goal"))
+
+
+async def preseed_workflow_profile(
+    client: ApiClient,
+    *,
+    matter_id: str,
+    service_type_id: str,
+    client_role: str,
+    overrides: dict[str, Any],
+) -> dict[str, Any]:
+    mid = safe_str(matter_id)
+    st = safe_str(service_type_id)
+    role = safe_str(client_role)
+    patch = _flatten_profile_override_patch(overrides)
+    if not mid or not st or not patch:
+        return {}
+
+    ui_dict_raw = unwrap_api_response(await client.get_matter_ui_dictionary())
+    ui_dict = ui_dict_raw if isinstance(ui_dict_raw, dict) else {}
+    dictionary_version = safe_str(ui_dict.get("dictionary_version"))
+    dictionary_hash = safe_str(ui_dict.get("dictionary_hash"))
+    service_dictionary = ui_dict.get("service_dictionary") if isinstance(ui_dict.get("service_dictionary"), dict) else {}
+    if not dictionary_version:
+        dictionary_version = safe_str(service_dictionary.get("dictionary_version"))
+    if not dictionary_hash:
+        dictionary_hash = safe_str(service_dictionary.get("dictionary_hash"))
+    if not dictionary_version or not dictionary_hash:
+        raise RuntimeError("workflow_profile_preseed_missing_dictionary_metadata")
+
+    current_profile_raw = unwrap_api_response(await client.get_workflow_profile(mid))
+    current_profile = current_profile_raw if isinstance(current_profile_raw, dict) else {}
+    goal = safe_str(current_profile.get("goal")) or _default_goal_from_service_dictionary(service_dictionary, service_type_id=st)
+    if not goal:
+        raise RuntimeError(f"workflow_profile_preseed_missing_goal:{st}")
+
+    payload = {
+        "service_type_id": st,
+        "client_role": role,
+        "goal": goal,
+        "decisions": {},
+        "routing": {},
+        "skill_execution": {},
+        "goal_views": {},
+        "diagnostics": {
+            "dictionary_version": dictionary_version,
+            "dictionary_hash": dictionary_hash,
+            "intake_profile": patch,
+        },
+    }
+    await client.sync_matter_workflow_all(mid, payload)
+    return patch
+
+
 def resolve_output_dir(*, repo_root: Path, output_dir: str, default_leaf: str) -> Path:
     path = Path(output_dir).expanduser() if safe_str(output_dir) else repo_root / default_leaf
     resolved = path.resolve()
@@ -234,6 +366,7 @@ async def bootstrap_flow(
     client_role: str,
     uploaded_file_ids: list[str],
     overrides: dict[str, Any],
+    preseed_profile: bool = True,
     strict_card_driven: bool = True,
 ) -> tuple[WorkbenchFlow, str, str]:
     sess = await client.create_session(
@@ -246,6 +379,14 @@ async def bootstrap_flow(
     matter_id = safe_str(sess_data.get("matter_id"))
     if not session_id:
         raise RuntimeError(f"create_session failed: {sess}")
+    if matter_id and preseed_profile:
+        await preseed_workflow_profile(
+            client,
+            matter_id=matter_id,
+            service_type_id=service_type_id,
+            client_role=client_role,
+            overrides=overrides,
+        )
     flow = WorkbenchFlow(
         client=client,
         session_id=session_id,

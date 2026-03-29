@@ -234,6 +234,67 @@ async def test_workflow_action_uses_websocket_actions_endpoint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_workflow_action_passes_settle_mode() -> None:
+    called: dict[str, object] = {}
+
+    class _Client:
+        async def workflow_action(self, session_id: str, **kwargs):  # type: ignore[no-untyped-def]
+            called["session_id"] = session_id
+            called.update(kwargs)
+            return {"events": [{"event": "progress", "data": {"phase": "materials"}}], "output": ""}
+
+        async def get_matter_phase_timeline(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": {}}
+
+        async def list_traces(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": {"traces": []}}
+
+        async def list_deliverables(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": {"deliverables": []}}
+
+    flow = WorkbenchFlow(client=_Client(), session_id="session-4", uploaded_file_ids=["file-1"])
+    result = await flow.workflow_action(
+        "template_draft_start",
+        workflow_action_params={"template_id": "50"},
+        max_loops=18,
+        settle_mode="fire_and_poll",
+    )
+
+    assert isinstance(result, dict)
+    assert called["session_id"] == "session-4"
+    assert called["settle_mode"] == "fire_and_poll"
+
+
+@pytest.mark.asyncio
+async def test_nudge_passes_settle_mode() -> None:
+    called: dict[str, object] = {}
+
+    class _Client:
+        async def chat(self, session_id: str, text: str, **kwargs):  # type: ignore[no-untyped-def]
+            called["session_id"] = session_id
+            called["text"] = text
+            called.update(kwargs)
+            return {"events": [{"event": "progress", "data": {"phase": "intake"}}], "output": ""}
+
+    flow = WorkbenchFlow(client=_Client(), session_id="session-chat", uploaded_file_ids=["file-1"])
+    flow._emit_progress = lambda *args, **kwargs: asyncio.sleep(0)  # type: ignore[method-assign]
+
+    result = await flow.nudge(
+        "kickoff",
+        attachments=["file-2"],
+        max_loops=6,
+        settle_mode="fire_and_poll",
+    )
+
+    assert isinstance(result, dict)
+    assert called["session_id"] == "session-chat"
+    assert called["text"] == "kickoff"
+    assert called["attachments"] == ["file-2"]
+    assert called["max_loops"] == 6
+    assert called["settle_mode"] == "fire_and_poll"
+
+
+@pytest.mark.asyncio
 async def test_resume_card_raises_after_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Client:
         async def resume(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
@@ -412,6 +473,26 @@ async def test_actionable_card_from_sse_returns_none_without_pending_card_api_co
 
 
 @pytest.mark.asyncio
+async def test_actionable_card_from_sse_uses_sse_card_when_pending_card_api_is_empty() -> None:
+    sse_card = {
+        "id": "card-live",
+        "skill_id": "cause-recommendation",
+        "task_key": "confirm_claim_path",
+    }
+
+    class _Client:
+        async def get_pending_card(self, _session_id: str):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": {}}
+
+    flow = WorkbenchFlow(client=_Client(), session_id="session-8a", matter_id="matter-8a")
+    sse = {"events": [{"event": "card", "data": sse_card}]}
+
+    resolved = await flow.actionable_card_from_sse(sse)
+
+    assert resolved == sse_card
+
+
+@pytest.mark.asyncio
 async def test_step_resumes_authoritative_pending_card_before_nudge() -> None:
     pending_card = {
         "id": "card-step",
@@ -425,6 +506,36 @@ async def test_step_resumes_authoritative_pending_card_before_nudge() -> None:
 
     async def _get_pending_card() -> dict[str, object]:
         return pending_card
+
+    async def _resume_card(card, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return {"pending_card": card}
+
+    flow.refresh = _refresh  # type: ignore[method-assign]
+    flow.get_pending_card = _get_pending_card  # type: ignore[method-assign]
+    flow.resume_card = _resume_card  # type: ignore[method-assign]
+
+    result = await flow.step()
+
+    assert isinstance(result, dict)
+    assert result.get("pending_card") == pending_card
+
+
+@pytest.mark.asyncio
+async def test_step_resumes_card_from_last_sse_when_pending_poll_is_empty() -> None:
+    pending_card = {
+        "id": "card-sse",
+        "skill_id": "cause-recommendation",
+        "task_key": "confirm_claim_path",
+        "questions": [{"field_key": "profile.subject_code", "input_type": "select"}],
+    }
+    flow = WorkbenchFlow(client=object(), session_id="session-8c", matter_id="matter-8c")
+    flow.last_sse = {"events": [{"event": "card", "data": pending_card}]}
+
+    async def _refresh() -> None:
+        return None
+
+    async def _get_pending_card():
+        return None
 
     async def _resume_card(card, *args, **kwargs):  # type: ignore[no-untyped-def]
         return {"pending_card": card}

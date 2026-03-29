@@ -25,8 +25,6 @@ TEMPLATES = "/templates-service"
 
 _WS_DEBUG = str(os.getenv("E2E_WS_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
 _WS_BREAK_ON_CARD = str(os.getenv("E2E_WS_BREAK_ON_CARD", "1") or "").strip().lower() in {"1", "true", "yes"}
-# Hard-cut resume contract: websocket `resume` payload only allows
-# {type, cardId, answers, max_loops, silent}. Do not send pending_card.
 
 
 def _resolve_ws_proxy() -> str | bool | None:
@@ -746,12 +744,12 @@ class ApiClient:
         answers_or_payload: dict[str, Any] | list[dict[str, Any]],
         pending_card: dict[str, Any] | None = None,
         max_loops: int | None = None,
-        cardId: str | None = None,
+        card_id: str | None = None,
         settle_mode: str = "full",
     ) -> dict[str, Any]:
-        resolved_card_id = str(cardId or "").strip() or _extract_pending_card_id(pending_card)
+        resolved_card_id = str(card_id or "").strip() or _extract_pending_card_id(pending_card)
         if not resolved_card_id:
-            raise ValueError("resume requires pending card id (cardId)")
+            raise ValueError("resume requires pending card id (card_id)")
 
         if isinstance(answers_or_payload, dict):
             raw_answers = answers_or_payload.get("answers")
@@ -765,7 +763,7 @@ class ApiClient:
 
         data: dict[str, Any] = {
             "answers": answers,
-            "cardId": resolved_card_id,
+            "card_id": resolved_card_id,
         }
         _ = pending_card
         if max_loops is not None:

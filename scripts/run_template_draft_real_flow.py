@@ -370,9 +370,9 @@ def _build_flow_overrides(
     }
 
 
-async def _resolve_template_name(client: ApiClient, template_id: str, preferred_name: str) -> str:
+async def _resolve_template_meta(client: ApiClient, template_id: str, preferred_name: str) -> dict[str, str]:
     if _safe_str(preferred_name):
-        return _safe_str(preferred_name)
+        return {"name": _safe_str(preferred_name), "output_key": ""}
 
     lookup_timeout_s = max(1.0, float(os.getenv("E2E_TEMPLATE_LOOKUP_TIMEOUT_S", "5") or 5))
 
@@ -387,8 +387,9 @@ async def _resolve_template_name(client: ApiClient, template_id: str, preferred_
             if _safe_str(row.get("id")) != template_id:
                 continue
             name = _safe_str(row.get("name"))
-            if name:
-                return name
+            output_key = _safe_str(row.get("output_key"))
+            if name or output_key:
+                return {"name": name, "output_key": output_key}
     except Exception:
         pass
 
@@ -401,12 +402,13 @@ async def _resolve_template_name(client: ApiClient, template_id: str, preferred_
         data = unwrap_api_response(detail)
         if isinstance(data, dict):
             name = _safe_str(data.get("name"))
-            if name:
-                return name
+            output_key = _safe_str(data.get("output_key"))
+            if name or output_key:
+                return {"name": name, "output_key": output_key}
     except Exception:
         pass
 
-    return f"模板#{template_id}"
+    return {"name": f"模板#{template_id}", "output_key": ""}
 
 
 async def _list_deliverables(client: ApiClient, matter_id: str, output_key: str) -> list[dict[str, Any]]:
@@ -791,7 +793,6 @@ async def run(args: argparse.Namespace) -> int:
 
     facts_text = _load_facts_text(args)
     doc_targets = _build_doc_targets(facts_text)
-    output_key = _safe_str(args.output_key) or f"template:{template_id}"
     effective_service_type = _safe_str(args.service_type_id) or DEFAULT_SERVICE_TYPE_ID
     if effective_service_type != DEFAULT_SERVICE_TYPE_ID:
         raise ValueError(
@@ -822,7 +823,6 @@ async def run(args: argparse.Namespace) -> int:
     print(f"[config] user={username}")
     print(f"[config] service_type_id={effective_service_type}")
     print(f"[config] template_id={template_id}")
-    print(f"[config] output_key={output_key}")
     print(f"[config] output_dir={out_dir}")
     print(f"[config] direct_service_mode={direct_mode}")
     if direct_mode:
@@ -850,7 +850,6 @@ async def run(args: argparse.Namespace) -> int:
         "service_type_id": effective_service_type,
         "template_id": template_id,
         "template_name": "",
-        "output_key": output_key,
         "strict_dialogue": bool(args.strict_dialogue),
         "strict_quality": bool(args.strict_quality),
         "session_id": "",
@@ -1244,24 +1243,26 @@ async def run(args: argparse.Namespace) -> int:
             summary["matter_id"] = matter_id
             print(f"[session] id={session_id} matter_id={matter_id}")
 
-            template_name = await _resolve_template_name(client, template_id, _safe_str(args.template_name))
-            summary["template_name"] = template_name
-            print(f"[template] id={template_id} name={template_name}")
+    template_meta = await _resolve_template_meta(client, template_id, _safe_str(args.template_name))
+    template_name = _safe_str(template_meta.get("name")) or f"模板#{template_id}"
+    output_key = _safe_str(template_meta.get("output_key"))
+    summary["template_name"] = template_name
+    summary["output_key"] = output_key
+    print(f"[template] id={template_id} name={template_name}")
+    if output_key:
+        print(f"[template] output_key={output_key}")
 
             start_sse = await client.workflow_action(
                 session_id,
                 workflow_action="template_draft_start",
                 workflow_action_params={
                     "template_id": template_id,
-                    "deliverable_title": template_name,
-                    "output_key": output_key,
-                    "template_key": output_key,
                 },
                 settle_mode="fire_and_poll",
             )
             await _record_round(
                 action="workflow_action.template_draft_start",
-                payload={"template_id": template_id, "output_key": output_key, "template_key": output_key},
+                payload={"template_id": template_id},
                 sse=start_sse if isinstance(start_sse, dict) else {},
                 enforce_visibility=False,
             )
@@ -2022,8 +2023,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--password", default="", help="Lawyer password")
     parser.add_argument("--service-type-id", default=DEFAULT_SERVICE_TYPE_ID, help="Matter service_type_id")
     parser.add_argument("--template-id", required=True, help="Template ID used by template_draft_start")
-    parser.add_argument("--template-name", default="", help="Optional override for deliverable title")
-    parser.add_argument("--output-key", default="", help="Deliverable output_key; default template:<template_id>")
+    parser.add_argument("--template-name", default="", help="Optional display label for logs only")
     parser.add_argument("--facts-file", default="", help="UTF-8 text file for kickoff facts")
     parser.add_argument(
         "--evidence-file",

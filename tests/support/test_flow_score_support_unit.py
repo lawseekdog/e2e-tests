@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
+
 from scripts._support.flow_score_support import (
     build_flow_scores,
     build_legal_opinion_formal_ready_report,
     build_template_flow_scores,
+    collect_flow_observability,
     score_unexpected_cards,
 )
 
@@ -52,40 +58,109 @@ def test_score_unexpected_cards_reads_nested_card_questions() -> None:
 
 
 def test_build_flow_scores_produces_all_four_scores_for_analysis() -> None:
-    snapshot = {"analysis_state": {"current_node": "goal_completion", "current_phase": "analysis"}}
+    snapshot = {"analysis_state": {"current_phase_id": "artifact_render", "current_phase_name": "交付物渲染"}}
     analysis_view = {
+        "status": "ready",
         "summary": "这是一个足够长的案件分析摘要。" * 8,
-        "issues": [{"issue_id": "i1"}],
-        "strategy_options": [{"strategy_id": "s1"}],
-        "risk_assessment": {"key_risks": [{"title": "证据风险"}]},
-        "result_contract_diagnostics": {"status": "valid"},
+        "sections": [
+            {"section_type": "issues", "data": {"items": [{"issue_id": "i1"}]}},
+            {"section_type": "strategy_matrix", "data": {"items": [{"strategy_id": "s1"}]}},
+            {"section_type": "risks", "data": {"items": [{"risk_id": "r1", "title": "证据风险"}]}},
+        ],
     }
-    pricing_view = {"status": "ready"}
     scores = build_flow_scores(
         flow_id="analysis",
         seen_cards=[{"skill_id": "goal-completion", "task_key": "goal_completion", "review_type": "select", "questions": [{"field_key": "data.workbench.goal"}]}],
         pending_card={"skill_id": "goal-completion", "task_key": "goal_completion", "review_type": "select", "questions": [{"field_key": "data.workbench.goal"}]},
         snapshot=snapshot,
         current_view=analysis_view,
-        aux_views={"pricing_view": pricing_view},
+        aux_views={},
         deliverables={},
         deliverable_status="ready",
         observability={
-            "matter_traces": [{"node_id": "analysis_output", "task_id": "goal_completion"}],
-            "session_traces": [{"node_id": "pricing_plan", "task_id": "analysis"}],
-            "phase_timeline": {"phases": [{"id": "analysis", "status": "completed"}]},
-            "matter_timeline": {"rounds": [{"content": {"produced_output_keys": ["analysis_view", "pricing_plan_view"]}}]},
-            "session_timeline": {"rounds": []},
+            "matter_traces": [{"node_id": "civil_litigation_program:grounding", "task_id": "grounding"}],
+            "session_traces": [{"node_id": "civil_litigation_program:artifact_render", "task_id": "artifact_render"}],
+            "phase_timeline": {"phases": [{"id": "artifact_render", "status": "completed"}]},
+            "matter_timeline": {"rounds": [{"content": {"produced_output_keys": ["analysis_view"]}}]},
+            "session_timeline": {"entries": [{"step_id": "civil_litigation_program:reasoning", "phase": "reasoning", "status": "completed", "event_type": "result.merge", "payload": {"work_product_type": "reasoning"}}]},
             "errors": {},
         },
-        goal_completion_mode="card",
+        goal_completion_mode="requested_documents",
     )
 
     assert "unexpected_card_score" in scores
     assert "node_path_score" in scores
     assert "snapshot_progress_score" in scores
     assert "deliverable_quality_score" in scores
-    assert scores["overall_e2e_score"]["score"] > 0
+    assert scores["snapshot_progress_score"]["passed"] is True
+    assert scores["deliverable_quality_score"]["passed"] is True
+    assert scores["overall_e2e_score"]["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_collect_flow_observability_falls_back_to_ai_engine_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo_root = tmp_path
+    bundle_dir = repo_root / "output" / "ai-debug-bundles" / "session:demo"
+    bundle_dir.mkdir(parents=True)
+    (bundle_dir / "timeline.json").write_text(
+        json.dumps(
+            {
+                "thread_id": "session:demo",
+                "entries": [
+                    {
+                        "event_type": "result.merge",
+                        "status": "completed",
+                        "step_id": "civil_litigation_program:grounding",
+                        "phase": "grounding",
+                        "payload": {"work_product_type": "grounding"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (bundle_dir / "execution_traces.json").write_text(
+        json.dumps(
+            {
+                "thread_id": "session:demo",
+                "traces": [
+                    {
+                        "id": "session:demo::civil_litigation_program:artifact_render",
+                        "node_id": "civil_litigation_program:artifact_render",
+                        "node_type": "result.merge",
+                        "sequence": 2,
+                        "status": "completed",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts._support.flow_score_support._repo_root", lambda: repo_root)
+
+    class StubClient:
+        async def get_matter_timeline(self, matter_id: str, limit: int | None = None) -> dict:
+            raise RuntimeError("matter_timeline_missing")
+
+        async def get_matter_phase_timeline(self, matter_id: str) -> dict:
+            return {"data": {"phases": []}}
+
+        async def list_traces(self, matter_id: str, limit: int | None = None) -> dict:
+            raise RuntimeError("matter_traces_missing")
+
+        async def get_session_timeline(self, session_id: str, limit: int | None = None) -> dict:
+            raise RuntimeError("session_timeline_missing")
+
+        async def list_session_traces(self, session_id: str, limit: int | None = None) -> dict:
+            raise RuntimeError("session_traces_missing")
+
+    observability = await collect_flow_observability(StubClient(), matter_id="1402", session_id="demo")
+
+    assert observability["session_timeline"]["thread_id"] == "session:demo"
+    assert len(observability["session_traces"]) == 1
+    assert len(observability["matter_traces"]) == 1
+    assert "session_timeline" not in observability["errors"]
+    assert "session_traces" not in observability["errors"]
 
 
 def test_build_template_flow_scores_uses_existing_dialogue_and_document_quality() -> None:
@@ -255,7 +330,7 @@ def test_build_legal_opinion_formal_ready_report_flags_internal_text_pollution()
             "fact_gaps": [],
         },
         aux_views={
-            "document_generation_view": {
+            "document_generation_state": {
                 "formal_gate_blocked": True,
                 "formal_gate_reason_codes": ["formal_opinion_authority_pending"],
                 "formal_gate_actions": [{"action_id": "references_refresh_partial"}],
@@ -287,7 +362,7 @@ def test_build_flow_scores_uses_formal_ready_signals_for_legal_opinion() -> None
             "result_contract_diagnostics": {"status": "valid"},
         },
         aux_views={
-            "document_generation_view": {
+            "document_generation_state": {
                 "formal_gate_blocked": True,
                 "formal_gate_reason_codes": ["formal_opinion_authority_pending"],
                 "formal_gate_actions": [{"action_id": "references_refresh_partial"}],
@@ -300,11 +375,11 @@ def test_build_flow_scores_uses_formal_ready_signals_for_legal_opinion() -> None
             "matter_traces": [{"node_id": "legal_opinion_output", "task_id": "goal_completion"}],
             "session_traces": [{"node_id": "docgen_prepare", "task_id": "document_generation"}],
             "phase_timeline": {"phases": [{"id": "legal_opinion", "status": "completed"}]},
-            "matter_timeline": {"rounds": [{"content": {"produced_output_keys": ["legal_opinion_view", "document_generation_view"]}}]},
+            "matter_timeline": {"rounds": [{"content": {"produced_output_keys": ["analysis_projection", "document_generation_state"]}}]},
             "session_timeline": {"rounds": []},
             "errors": {},
         },
-        goal_completion_mode="workflow_action",
+        goal_completion_mode="requested_documents",
     )
 
     assert scores["deliverable_quality_score"]["details"]["formal_ready"]["blocking_reason_codes"] == [

@@ -95,7 +95,7 @@ pytest tests/support/test_flow_runner_unit.py -q
 - deliverable 生成
 - traces / timeline / workflow profile 基本可用
 - 正式脚本约束：kickoff 一次，后续只答卡，不自动发送“继续”
-- 唯一保留的前置动作例外：模板起草的 `template_draft_start`
+- 统一入口是 `requested_documents`；模板起草通过 `document_kind + instance_key(template_id)` 直接启动
 
 ## 不再在本仓库维护
 

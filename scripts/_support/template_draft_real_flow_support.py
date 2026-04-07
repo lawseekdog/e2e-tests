@@ -139,7 +139,6 @@ def _extract_trace_state_signals(traces: list[dict[str, Any]] | None) -> dict[st
         "document_render_metrics_exists": False,
         "document_render_diagnostics_exists": False,
         "docgen": {},
-        "document_generation_view": {},
     }
     rows = traces if isinstance(traces, list) else []
     seen_nodes: list[str] = []
@@ -189,10 +188,6 @@ def _extract_trace_state_signals(traces: list[dict[str, Any]] | None) -> dict[st
                 docgen = work_product.get("docgen") if isinstance(work_product.get("docgen"), dict) else {}
                 if docgen:
                     info["docgen"] = dict(docgen)
-            if not info["document_generation_view"]:
-                view = work_product.get("document_generation_view") if isinstance(work_product.get("document_generation_view"), dict) else {}
-                if view:
-                    info["document_generation_view"] = dict(view)
     info["trace_node_ids"] = seen_nodes
     return info
 
@@ -233,13 +228,7 @@ def _extract_docgen_snapshot(
 ) -> dict[str, Any]:
     snapshot = workbench_snapshot if isinstance(workbench_snapshot, dict) else {}
     analysis_state = snapshot.get("analysis_state") if isinstance(snapshot.get("analysis_state"), dict) else {}
-    goal_views = analysis_state.get("goal_views") if isinstance(analysis_state.get("goal_views"), dict) else {}
-    document_generation_view = {}
-    if isinstance(analysis_state.get("document_generation_view"), dict):
-        document_generation_view = dict(analysis_state.get("document_generation_view"))
-    elif isinstance(goal_views.get("document_generation_view"), dict):
-        document_generation_view = dict(goal_views.get("document_generation_view"))
-
+    document_generation_state = snapshot.get("document_generation_state") if isinstance(snapshot.get("document_generation_state"), dict) else {}
     workflow = workflow_snapshot if isinstance(workflow_snapshot, dict) else {}
     workflow_instance = workflow.get("instance") if isinstance(workflow.get("instance"), dict) else {}
     session_data = session if isinstance(session, dict) else {}
@@ -247,7 +236,7 @@ def _extract_docgen_snapshot(
     deliverable_rows = [row for row in (deliverables or []) if isinstance(row, dict)]
     deliverable_head = _compact_deliverable(deliverable_rows[0]) if deliverable_rows else {}
     trace_info = _extract_trace_state_signals(traces)
-    runtime_docgen = analysis_state.get("docgen_runtime_signals") if isinstance(analysis_state.get("docgen_runtime_signals"), dict) else {}
+    runtime_docgen = document_generation_state.get("runtime_signals") if isinstance(document_generation_state.get("runtime_signals"), dict) else {}
     docgen = trace_info.get("docgen") if isinstance(trace_info.get("docgen"), dict) and trace_info.get("docgen") else {}
     if not docgen and runtime_docgen:
         docgen = dict(runtime_docgen)
@@ -266,7 +255,7 @@ def _extract_docgen_snapshot(
 
     quality_review_decision = _safe_str(trace_info.get("quality_review_decision")).lower()
     if not quality_review_decision:
-        quality_review_decision = _safe_str(document_generation_view.get("quality_review_decision")).lower()
+        quality_review_decision = _safe_str(document_generation_state.get("quality_review_decision")).lower()
 
     soft_reason_codes = trace_info.get("soft_reason_codes") if isinstance(trace_info.get("soft_reason_codes"), list) else []
     normalized_docgen = {
@@ -279,7 +268,7 @@ def _extract_docgen_snapshot(
         "rendered": bool(docgen.get("rendered")),
         "synced": bool(docgen.get("synced")),
         "section_contract_ready": bool(trace_info.get("template_quality_contracts_json_exists"))
-        or bool(document_generation_view.get("template_quality_contracts_json_exists")),
+        or bool(analysis_state.get("template_quality_contracts_json_exists")),
         "soft_reason_codes": soft_reason_codes,
     }
 
@@ -296,18 +285,18 @@ def _extract_docgen_snapshot(
         "deliverable": deliverable_head,
         "docgen": normalized_docgen,
         "template_quality_contracts_json_exists": bool(trace_info.get("template_quality_contracts_json_exists"))
-        or bool(document_generation_view.get("template_quality_contracts_json_exists")),
+        or bool(document_generation_state.get("template_quality_contracts_json_exists")),
         "docgen_repair_plan_exists": bool(trace_info.get("docgen_repair_plan_exists"))
-        or bool(document_generation_view.get("docgen_repair_plan_exists")),
+        or bool(document_generation_state.get("repair_plan_exists")),
         "docgen_repair_contracts_json_exists": bool(trace_info.get("docgen_repair_contracts_json_exists"))
-        or bool(document_generation_view.get("docgen_repair_contracts_json_exists")),
+        or bool(document_generation_state.get("repair_contracts_json_exists")),
         "quality_review_decision": quality_review_decision,
         "soft_reason_codes": soft_reason_codes,
         "documents_fingerprint": _safe_str(trace_info.get("documents_fingerprint")),
         "quality_review_fingerprint": _safe_str(trace_info.get("quality_review_fingerprint")),
         "document_render_metrics_exists": bool(trace_info.get("document_render_metrics_exists")),
         "document_render_diagnostics_exists": bool(trace_info.get("document_render_diagnostics_exists")),
-        "document_generation_view": document_generation_view,
+        "document_generation_state": document_generation_state,
         "trace": {
             "latest_docgen_node_id": _safe_str(trace_info.get("latest_trace_node_id")),
             "trace_node_ids": trace_info.get("trace_node_ids") if isinstance(trace_info.get("trace_node_ids"), list) else [],

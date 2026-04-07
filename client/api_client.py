@@ -71,6 +71,15 @@ def _extract_pending_card_id(card: dict[str, Any] | None) -> str:
     return str(card.get("id") or "").strip()
 
 
+def _submitted_ack(msg_type: str) -> tuple[str, str]:
+    normalized = str(msg_type or "").strip().lower()
+    return {
+        "resume": ("resume_submitted", "resume submitted"),
+        "actions": ("action_submitted", "action submitted"),
+        "chat": ("chat_submitted", "chat submitted"),
+    }.get(normalized, ("request_submitted", "request submitted"))
+
+
 class ApiClient:
     """API 客户端封装"""
 
@@ -338,18 +347,20 @@ class ApiClient:
                             if evt in {"end", "complete"}:
                                 break
                         except asyncio.TimeoutError:
-                            if settle_mode == "fire_and_poll" and not events:
+                            if settle_mode == "fire_and_poll":
+                                ack_event, ack_output = _submitted_ack(msg_type)
                                 return {
                                     "events": [
+                                        *events,
                                         {
-                                            "event": "resume_submitted",
+                                            "event": ack_event,
                                             "data": {
                                                 "partial": True,
                                                 "settle_mode": "fire_and_poll",
                                             },
-                                        }
+                                        },
                                     ],
-                                    "output": "resume submitted",
+                                    "output": ack_output,
                                 }
                             events.append(
                                 {
@@ -620,15 +631,21 @@ class ApiClient:
         session_id: str,
         user_query: str,
         attachments: list[str] | None = None,
+        requested_documents: list[dict[str, Any]] | None = None,
         max_loops: int | None = None,
+        silent: bool | None = None,
         settle_mode: str = "full",
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "user_query": user_query,
             "attachments": attachments or [],
         }
+        if requested_documents:
+            data["requested_documents"] = requested_documents
         if max_loops is not None:
             data["max_loops"] = max_loops
+        if silent is not None:
+            data["silent"] = bool(silent)
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
         open_timeout_s = float(os.getenv("E2E_WS_OPEN_TIMEOUT_S", "20") or 20)
         return await self._post_ws(
@@ -778,30 +795,24 @@ class ApiClient:
             settle_mode=settle_mode,
         )
 
-    async def workflow_action(
+    async def request_documents(
         self,
         session_id: str,
         *,
-        workflow_action: str,
-        workflow_action_params: dict[str, Any] | None = None,
+        requested_documents: list[dict[str, Any]],
+        user_query: str = "",
         attachments: list[str] | None = None,
         max_loops: int | None = None,
+        silent: bool | None = None,
         settle_mode: str = "full",
     ) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            "workflow_action": workflow_action,
-            "workflow_action_params": workflow_action_params or {},
-            "attachments": attachments or [],
-        }
-        if max_loops is not None:
-            data["max_loops"] = int(max_loops)
-        ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
-        open_timeout_s = float(os.getenv("E2E_WS_OPEN_TIMEOUT_S", "20") or 20)
-        return await self._post_ws(
-            ws_path,
-            "actions",
-            data,
-            open_timeout_s=open_timeout_s,
+        return await self.chat(
+            session_id,
+            user_query,
+            attachments=attachments,
+            requested_documents=requested_documents,
+            max_loops=max_loops,
+            silent=silent,
             settle_mode=settle_mode,
         )
 

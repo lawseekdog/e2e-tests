@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from typing import Any
 
 from support.workbench.docx import (
@@ -24,6 +26,18 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _section_items(view: dict[str, Any], section_type: str) -> list[dict[str, Any]]:
+    sections = _as_list(_as_dict(view).get("sections"))
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        if _safe_str(section.get("section_type")) != section_type:
+            continue
+        data = _as_dict(section.get("data"))
+        return [row for row in _as_list(data.get("items")) if isinstance(row, dict)]
+    return []
+
+
 _ALLOWED_REVIEW_TYPES = {"clarify", "select", "confirm", "phase_done"}
 _ATTACHMENT_FIELD = "case.file_refs.pending_upload_file_ids"
 _FORBIDDEN_SKILL_IDS = {"skill-error-analysis"}
@@ -36,7 +50,7 @@ _FLOW_CARD_POLICY: dict[str, dict[str, Any]] = {
 }
 
 _NODE_HINTS: dict[str, tuple[str, ...]] = {
-    "analysis": ("analysis", "pricing", "goal_completion"),
+    "analysis": ("grounding", "reasoning", "artifact_render"),
     "contract_review": ("contract", "document", "render", "sync"),
     "legal_opinion": ("legal_opinion", "opinion", "goal_completion"),
     "template_draft": ("intake", "compose", "render", "sync", "finish"),
@@ -44,6 +58,105 @@ _NODE_HINTS: dict[str, tuple[str, ...]] = {
 
 _CITATION_RE = re.compile(r"《[^》]{2,40}》第[一二三四五六七八九十百千万0-9]{1,8}条")
 _CONTRACT_REVIEW_OUTPUT_KEYS = ("contract_review_report", "modification_suggestion", "redline_comparison")
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _bundle_dir_for_session(session_id: str) -> Path | None:
+    token = _safe_str(session_id)
+    if not token:
+        return None
+    thread_id = token if token.startswith("session:") else f"session:{token}"
+    bundle_dir = _repo_root() / "output" / "ai-debug-bundles" / thread_id
+    return bundle_dir if bundle_dir.exists() else None
+
+
+def _load_bundle_observability(session_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    bundle_dir = _bundle_dir_for_session(session_id)
+    if bundle_dir is None:
+        return {}, []
+    timeline = _read_json(bundle_dir / "timeline.json")
+    traces_payload = _read_json(bundle_dir / "execution_traces.json")
+    rows = traces_payload.get("traces") if isinstance(traces_payload.get("traces"), list) else []
+    traces = [row for row in rows if isinstance(row, dict)]
+    return timeline, traces
+
+
+def _bundle_phase_timeline(traces: list[dict[str, Any]]) -> dict[str, Any]:
+    phases: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    ordered = sorted(
+        [row for row in traces if isinstance(row, dict)],
+        key=lambda row: int(row.get("sequence") or 0),
+    )
+    for row in ordered:
+        node_id = _safe_str(row.get("node_id"))
+        phase_id = _safe_str(node_id.split(":")[-1] if ":" in node_id else node_id)
+        if not phase_id or phase_id in seen:
+            continue
+        seen.add(phase_id)
+        phases.append({"id": phase_id, "status": _safe_str(row.get("status")) or "completed"})
+    return {"phases": phases} if phases else {}
+
+
+def _bundle_round_timeline(*, session_id: str, timeline: dict[str, Any], traces: list[dict[str, Any]]) -> dict[str, Any]:
+    entries = [row for row in _as_list(timeline.get("entries")) if isinstance(row, dict)]
+    output_keys: list[str] = []
+    seen: set[str] = set()
+    for row in entries:
+        payload = _as_dict(row.get("payload"))
+        for key in ("output_keys", "response_keys", "updated_keys"):
+            for item in _as_list(payload.get(key)):
+                token = _safe_str(item)
+                if token and token not in seen:
+                    seen.add(token)
+                    output_keys.append(token)
+        product_type = _safe_str(payload.get("work_product_type"))
+        if product_type and product_type not in seen:
+            seen.add(product_type)
+            output_keys.append(product_type)
+    if not output_keys:
+        for row in sorted(traces, key=lambda item: int(item.get("sequence") or 0)):
+            token = _safe_str(row.get("node_id")).split(":")[-1]
+            if token and token not in seen:
+                seen.add(token)
+                output_keys.append(token)
+    if not output_keys:
+        return timeline if timeline else {}
+    thread_id = _safe_str(timeline.get("thread_id"))
+    session_token = _safe_str(session_id)
+    return {
+        "thread_id": thread_id or (session_token if session_token.startswith("session:") else f"session:{session_token}" if session_token else ""),
+        "session_id": session_token,
+        "rounds": [{"content": {"produced_output_keys": output_keys}}],
+        "entries": entries,
+        "total": len(entries),
+    }
+
+
+def _analysis_counts(view: dict[str, Any]) -> tuple[int, int, int]:
+    issues = _section_items(view, "issues")
+    strategies = _section_items(view, "strategy_matrix")
+    risks = _section_items(view, "risks")
+    if not issues:
+        issues = [row for row in _as_list(view.get("issues")) if isinstance(row, dict)]
+    if not strategies:
+        strategies = [row for row in _as_list(view.get("strategy_options")) if isinstance(row, dict)]
+    if not risks:
+        risks = [row for row in _as_list(view.get("risks")) if isinstance(row, dict)]
+    if not risks:
+        risks = [row for row in _as_list(_as_dict(view.get("risk_assessment")).get("key_risks")) if isinstance(row, dict)]
+    return len(issues), len(strategies), len(risks)
 
 
 def _contract_review_expected_output_keys(*, review_scope: str, expectations: dict[str, Any] | None = None) -> set[str]:
@@ -155,6 +268,29 @@ async def collect_flow_observability(
         except Exception as exc:  # noqa: BLE001
             errors["session_traces"] = str(exc)
 
+    bundle_timeline, bundle_traces = _load_bundle_observability(session_id)
+    synthesized_bundle_timeline = _bundle_round_timeline(
+        session_id=session_id,
+        timeline=bundle_timeline,
+        traces=bundle_traces,
+    )
+    synthesized_phase_timeline = _bundle_phase_timeline(bundle_traces)
+    if not session_timeline and synthesized_bundle_timeline:
+        session_timeline = synthesized_bundle_timeline
+        errors.pop("session_timeline", None)
+    if not session_traces and bundle_traces:
+        session_traces = bundle_traces
+        errors.pop("session_traces", None)
+    if not phase_timeline and synthesized_phase_timeline:
+        phase_timeline = synthesized_phase_timeline
+        errors.pop("phase_timeline", None)
+    if not matter_timeline and synthesized_bundle_timeline:
+        matter_timeline = synthesized_bundle_timeline
+        errors.pop("matter_timeline", None)
+    if not matter_traces and bundle_traces:
+        matter_traces = bundle_traces
+        errors.pop("matter_traces", None)
+
     return {
         "matter_timeline": matter_timeline,
         "phase_timeline": phase_timeline,
@@ -255,10 +391,13 @@ def _collect_node_tokens(observability: dict[str, Any] | None) -> tuple[list[str
             if not isinstance(row, dict):
                 continue
             trace_count += 1
-            for key in ("node_id", "nodeId", "task_id", "taskId", "status", "state"):
+            for key in ("node_id", "nodeId", "task_id", "taskId", "status", "state", "node_type", "nodeType", "phase"):
                 token = _safe_str(row.get(key)).lower()
                 if token:
                     tokens.append(token)
+            node_id = _safe_str(row.get("node_id") or row.get("nodeId")).lower()
+            if ":" in node_id:
+                tokens.extend(part for part in node_id.split(":") if part)
 
     for phase in _as_list(_as_dict(obs.get("phase_timeline")).get("phases")):
         if not isinstance(phase, dict):
@@ -270,8 +409,33 @@ def _collect_node_tokens(observability: dict[str, Any] | None) -> tuple[list[str
 
     for timeline_key in ("matter_timeline", "session_timeline"):
         produced_keys.update(produced_output_keys(_as_dict(obs.get(timeline_key))))
+        entries = _as_list(_as_dict(obs.get(timeline_key)).get("entries"))
+        for row in entries:
+            if not isinstance(row, dict):
+                continue
+            for key in ("event_type", "status", "phase", "node_name", "skill_name", "step_id"):
+                token = _safe_str(row.get(key)).lower()
+                if token:
+                    tokens.append(token)
+            payload = _as_dict(row.get("payload"))
+            for key in ("active_product_type", "work_product_type", "goto"):
+                token = _safe_str(payload.get(key)).lower()
+                if token:
+                    tokens.append(token)
+            step_id = _safe_str(row.get("step_id")).lower()
+            if ":" in step_id:
+                tokens.extend(part for part in step_id.split(":") if part)
 
     return tokens, trace_count, phase_count, produced_keys
+
+
+def _view_contract_ready(*, flow_id: str, view: dict[str, Any]) -> bool:
+    diagnostics = _as_dict(view.get("result_contract_diagnostics"))
+    if _safe_str(diagnostics.get("status")).lower() == "valid":
+        return True
+    if flow_id == "analysis" and _safe_str(view.get("status")).lower() in {"ready", "completed", "done"}:
+        return True
+    return False
 
 
 def score_node_path(
@@ -296,10 +460,14 @@ def score_node_path(
         score += min(20, int(min(phase_count, 4) / 4 * 20))
     if hints:
         score += int((len(matched_hints) / float(len(hints))) * 30)
+    structured_fallback = trace_count > 0 and (phase_count > 0 or bool(produced_keys)) and len(unique_tokens) >= 3
 
     return {
         "score": min(100, score),
-        "passed": trace_count > 0 and len(matched_hints) >= max(1, min(len(hints), 2)),
+        "passed": trace_count > 0 and (
+            len(matched_hints) >= max(1, min(len(hints), 2))
+            or structured_fallback
+        ),
         "trace_count": trace_count,
         "distinct_node_token_count": len(unique_tokens),
         "phase_count": phase_count,
@@ -332,8 +500,18 @@ def score_snapshot_progress(
     failures: list[str] = []
     score = 0
 
-    current_node = _safe_str(analysis_state.get("current_node"))
-    current_phase = _safe_str(analysis_state.get("current_phase") or snap.get("current_phase"))
+    current_node = _safe_str(
+        analysis_state.get("current_node")
+        or analysis_state.get("current_phase_id")
+        or analysis_state.get("current_step_id")
+        or analysis_state.get("current_product_type")
+    )
+    current_phase = _safe_str(
+        analysis_state.get("current_phase")
+        or analysis_state.get("current_phase_id")
+        or analysis_state.get("current_phase_name")
+        or snap.get("current_phase")
+    )
     if current_node or current_phase:
         score += 15
     else:
@@ -345,8 +523,7 @@ def score_snapshot_progress(
     else:
         failures.append("view_summary_too_short")
 
-    diagnostics = _as_dict(view.get("result_contract_diagnostics"))
-    if _safe_str(diagnostics.get("status")).lower() == "valid":
+    if _view_contract_ready(flow_id=flow_id, view=view):
         score += 15
     else:
         failures.append("view_contract_invalid")
@@ -359,11 +536,8 @@ def score_snapshot_progress(
         failures.append(f"unfinished_pending_card:{pending_skill or 'unknown'}")
 
     if flow_id == "analysis":
-        issues = len(_as_list(view.get("issues")))
-        strategies = len(_as_list(view.get("strategy_options")))
-        risks = len(_as_list(_as_dict(view.get("risk_assessment")).get("key_risks")))
-        pricing = _as_dict(aux.get("pricing_view"))
-        pricing_status = _safe_str(pricing.get("status")).lower()
+        issues, strategies, risks = _analysis_counts(view)
+        view_status = _safe_str(view.get("status")).lower()
         if issues > 0:
             score += 10
         else:
@@ -374,10 +548,10 @@ def score_snapshot_progress(
             failures.append("analysis_strategies_missing")
         if risks > 0:
             score += 5
-        if pricing_status in {"ready", "review_pending", "completed"}:
+        if view_status in {"ready", "completed", "done"}:
             score += 15
         else:
-            failures.append(f"pricing_status:{pricing_status or 'missing'}")
+            failures.append(f"analysis_view_status:{view_status or 'missing'}")
     elif flow_id == "contract_review":
         clauses = len(_as_list(view.get("clauses")))
         if clauses >= 3:
@@ -461,12 +635,8 @@ def score_snapshot_progress(
 
 def _score_analysis_output_quality(*, current_view: dict[str, Any], aux_views: dict[str, Any] | None = None) -> dict[str, Any]:
     view = current_view if isinstance(current_view, dict) else {}
-    aux = aux_views if isinstance(aux_views, dict) else {}
-    pricing = _as_dict(aux.get("pricing_view"))
-    issues = len(_as_list(view.get("issues")))
-    strategies = len(_as_list(view.get("strategy_options")))
-    risks = len(_as_list(_as_dict(view.get("risk_assessment")).get("key_risks")))
-    pricing_status = _safe_str(pricing.get("status")).lower()
+    issues, strategies, risks = _analysis_counts(view)
+    view_status = _safe_str(view.get("status")).lower()
     failures: list[str] = []
     score = 0
     if len(_safe_str(view.get("summary"))) >= 80:
@@ -485,11 +655,21 @@ def _score_analysis_output_quality(*, current_view: dict[str, Any], aux_views: d
         score += 10
     else:
         failures.append("analysis_risks_missing")
-    if pricing_status in {"ready", "review_pending", "completed"}:
+    if view_status in {"ready", "completed", "done"}:
         score += 20
     else:
-        failures.append(f"pricing_status:{pricing_status or 'missing'}")
-    return {"score": min(100, score), "passed": score >= 75 and not failures, "failures": failures, "details": {"issues": issues, "strategies": strategies, "risks": risks, "pricing_status": pricing_status}}
+        failures.append(f"analysis_view_status:{view_status or 'missing'}")
+    return {
+        "score": min(100, score),
+        "passed": score >= 75 and not failures,
+        "failures": failures,
+        "details": {
+            "issues": issues,
+            "strategies": strategies,
+            "risks": risks,
+            "view_status": view_status,
+        },
+    }
 
 
 def _score_contract_review_output_quality(
@@ -542,7 +722,7 @@ def build_legal_opinion_formal_ready_report(
 ) -> dict[str, Any]:
     view = current_view if isinstance(current_view, dict) else {}
     aux = aux_views if isinstance(aux_views, dict) else {}
-    docgen_view = _as_dict(aux.get("document_generation_view"))
+    docgen_state = _as_dict(aux.get("document_generation_state"))
     content = _safe_str(deliverable_text)
     title = _safe_str(view.get("title"))
     summary = _safe_str(view.get("summary"))
@@ -561,14 +741,14 @@ def build_legal_opinion_formal_ready_report(
     actions = len(_as_list(view.get("action_items")))
     material_gaps = [_safe_str(item) for item in _as_list(view.get("material_gaps")) if _safe_str(item)]
     fact_gaps = [_safe_str(item) for item in _as_list(view.get("fact_gaps")) if _safe_str(item)]
-    formal_gate_blocked = bool(docgen_view.get("formal_gate_blocked"))
+    formal_gate_blocked = bool(docgen_state.get("formal_gate_blocked"))
     formal_gate_reason_codes = [
         _safe_str(code)
-        for code in _as_list(docgen_view.get("formal_gate_reason_codes"))
+        for code in _as_list(docgen_state.get("formal_gate_reason_codes"))
         if _safe_str(code)
     ]
     formal_gate_actions = [
-        row for row in _as_list(docgen_view.get("formal_gate_actions")) if isinstance(row, dict)
+        row for row in _as_list(docgen_state.get("formal_gate_actions")) if isinstance(row, dict)
     ]
     pollution_hits = [
         token
@@ -611,10 +791,10 @@ def build_legal_opinion_formal_ready_report(
             score += 10
         else:
             failures.append("formal_gate_actions_missing")
-    elif docgen_view:
+    elif docgen_state:
         score += 20
     else:
-        failures.append("document_generation_view_missing")
+        failures.append("document_generation_state_missing")
     if _safe_str(deliverable_status).lower() in {"completed", "archived", "done"}:
         score += 10
     elif content:

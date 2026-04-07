@@ -46,6 +46,7 @@ from scripts._support.flow_score_support import build_template_flow_scores
 from scripts._support.diagnostic_bundle_support import export_observability_bundle
 from scripts._support.quality_policy_support import build_bundle_quality_reports
 from scripts._support.workflow_real_flow_support import collect_ai_debug_refs, configure_direct_service_mode, load_real_flow_env, terminate_stale_script_runs
+from scripts._support.run_status import RunStatusSupervisor
 
 
 DEFAULT_FACTS = DEFAULT_LEGAL_OPINION_FACTS
@@ -216,8 +217,8 @@ def _kickoff_ack_only_response(*, action: str, sse: dict[str, Any], visible_erro
     return "progress" in event_names
 
 
-def _workflow_action_ack_only_response(*, action: str, sse: dict[str, Any]) -> bool:
-    if action != "workflow_action.template_draft_start":
+def _template_request_ack_only_response(*, action: str, sse: dict[str, Any]) -> bool:
+    if action != "requested_documents.template_draft":
         return False
     errors = _sse_error_events(sse)
     if not errors:
@@ -370,11 +371,51 @@ def _build_flow_overrides(
     }
 
 
+_OUTPUT_KEY_TO_DELIVERABLE_KIND: dict[str, str] = {
+    "civil_complaint": "civil_complaint_document",
+    "defense_statement": "civil_defense_document",
+    "appeal_brief": "civil_appeal_document",
+    "arbitration_application": "arbitration_application_document",
+    "property_preservation_application": "property_preservation_document",
+    "evidence_list_document": "evidence_catalog_document",
+}
+
+
+def _resolve_deliverable_kind(*, output_key: str, explicit_kind: str) -> str:
+    explicit = _safe_str(explicit_kind)
+    if explicit:
+        return explicit
+    resolved = _OUTPUT_KEY_TO_DELIVERABLE_KIND.get(_safe_str(output_key))
+    if resolved:
+        return resolved
+    raise ValueError(f"deliverable_kind is required for output_key={output_key!r}")
+
+
 async def _resolve_template_meta(client: ApiClient, template_id: str, preferred_name: str) -> dict[str, str]:
     if _safe_str(preferred_name):
-        return {"name": _safe_str(preferred_name), "output_key": ""}
+        return {"name": _safe_str(preferred_name), "output_key": "", "template_version_id": ""}
 
     lookup_timeout_s = max(1.0, float(os.getenv("E2E_TEMPLATE_LOOKUP_TIMEOUT_S", "5") or 5))
+
+    try:
+        contract = await client.get(
+            f"/templates-service/atomic/templates/{template_id}/contract",
+            timeout=lookup_timeout_s,
+            get_retries=1,
+        )
+        contract_data = unwrap_api_response(contract)
+        if isinstance(contract_data, dict):
+            name = _safe_str(contract_data.get("displayName")) or _safe_str(contract_data.get("display_name"))
+            output_key = _safe_str(contract_data.get("outputKey")) or _safe_str(contract_data.get("output_key"))
+            template_version_id = _safe_str(contract_data.get("templateVersionId")) or _safe_str(contract_data.get("template_version_id"))
+            if name or output_key or template_version_id:
+                return {
+                    "name": name,
+                    "output_key": output_key,
+                    "template_version_id": template_version_id,
+                }
+    except Exception:
+        pass
 
     try:
         payload = await client.get(
@@ -389,7 +430,7 @@ async def _resolve_template_meta(client: ApiClient, template_id: str, preferred_
             name = _safe_str(row.get("name"))
             output_key = _safe_str(row.get("output_key"))
             if name or output_key:
-                return {"name": name, "output_key": output_key}
+                return {"name": name, "output_key": output_key, "template_version_id": ""}
     except Exception:
         pass
 
@@ -403,12 +444,13 @@ async def _resolve_template_meta(client: ApiClient, template_id: str, preferred_
         if isinstance(data, dict):
             name = _safe_str(data.get("name"))
             output_key = _safe_str(data.get("output_key"))
+            template_version_id = _safe_str(data.get("template_version_id")) or _safe_str(data.get("templateVersionId"))
             if name or output_key:
-                return {"name": name, "output_key": output_key}
+                return {"name": name, "output_key": output_key, "template_version_id": template_version_id}
     except Exception:
         pass
 
-    return {"name": f"模板#{template_id}", "output_key": ""}
+    return {"name": f"模板#{template_id}", "output_key": "", "template_version_id": ""}
 
 
 async def _list_deliverables(client: ApiClient, matter_id: str, output_key: str) -> list[dict[str, Any]]:
@@ -538,7 +580,7 @@ async def _create_session_with_retry(client: ApiClient, matter_id: str, max_atte
     raise last_error if last_error else RuntimeError("create_session failed")
 
 
-async def _wait_template_draft_start_settled(
+async def _wait_template_draft_request_settled(
     client: ApiClient,
     *,
     session_id: str,
@@ -796,7 +838,7 @@ async def run(args: argparse.Namespace) -> int:
     effective_service_type = _safe_str(args.service_type_id) or DEFAULT_SERVICE_TYPE_ID
     if effective_service_type != DEFAULT_SERVICE_TYPE_ID:
         raise ValueError(
-            f"template_draft_start only allowed for {DEFAULT_SERVICE_TYPE_ID} matters; got={effective_service_type}"
+            f"template draft request only allowed for {DEFAULT_SERVICE_TYPE_ID} matters; got={effective_service_type}"
         )
     raw_stop_after_node = _safe_str(args.stop_after_node)
     stop_after_node = _normalize_stop_node(raw_stop_after_node)
@@ -812,6 +854,8 @@ async def run(args: argparse.Namespace) -> int:
         else REPO_ROOT / f"output/template-draft-chain/{ts}"
     ).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    supervisor = RunStatusSupervisor(out_dir=out_dir, flow_id="template_draft")
+    supervisor.update(status="booting", current_step="bootstrap.init", next_action="login")
 
     cause_anchor_path: Path | None = None
     if _safe_str(args.cause_anchor_file):
@@ -1018,6 +1062,7 @@ async def run(args: argparse.Namespace) -> int:
     async with ApiClient(base_url) as client:
         try:
             await client.login(username, password)
+            supervisor.update(status="booting", current_step="bootstrap.login", next_action="upload_files")
             print(f"[login] ok user_id={client.user_id} org_id={client.organization_id}")
 
             async def _observe_runtime_state(
@@ -1179,6 +1224,26 @@ async def run(args: argparse.Namespace) -> int:
                     }
                 )
                 last_docgen_snapshot = snapshot
+                supervisor.update(
+                    status="running",
+                    current_step=f"poll.{trigger}",
+                    session_id=_safe_str(summary.get("session_id")),
+                    matter_id=_safe_str(summary.get("matter_id")),
+                    pending_card=pending_effective,
+                    current_blocker=_safe_str(pending_effective.get("task_key")) if isinstance(pending_effective, dict) else "",
+                    next_action="continue_docgen",
+                    artifact_refs={"node_timeline": str(out_dir / "node_timeline.json")},
+                    latest_payloads={
+                        "pending_card": pending_effective or {},
+                        "docgen_snapshot": snapshot,
+                    },
+                    extra={
+                        "docgen_node": current_node,
+                        "quality_review_decision": _safe_str(snapshot.get("quality_review_decision")),
+                        "deliverable_status": _safe_str(deliverable_obj.get("status")),
+                        "step_no": step_no,
+                    },
+                )
 
                 if stop_after_node and _is_stop_node_reached(
                     target_node=stop_after_node,
@@ -1211,6 +1276,12 @@ async def run(args: argparse.Namespace) -> int:
                 uploaded_file_ids.append(file_id)
                 print(f"[upload] {p.name} -> file_id={file_id}")
             summary["uploaded_file_ids"] = uploaded_file_ids
+            supervisor.update(
+                status="booting",
+                current_step="bootstrap.upload_files",
+                next_action="create_matter",
+                extra={"uploaded_file_ids": uploaded_file_ids},
+            )
 
             try:
                 matter = await _create_matter_with_retry(
@@ -1242,40 +1313,82 @@ async def run(args: argparse.Namespace) -> int:
             summary["session_id"] = session_id
             summary["matter_id"] = matter_id
             print(f"[session] id={session_id} matter_id={matter_id}")
+            supervisor.update(
+                status="booting",
+                current_step="bootstrap.session_created",
+                session_id=session_id,
+                matter_id=matter_id,
+                next_action="resolve_template_contract",
+            )
 
-    template_meta = await _resolve_template_meta(client, template_id, _safe_str(args.template_name))
-    template_name = _safe_str(template_meta.get("name")) or f"模板#{template_id}"
-    output_key = _safe_str(template_meta.get("output_key"))
-    summary["template_name"] = template_name
-    summary["output_key"] = output_key
-    print(f"[template] id={template_id} name={template_name}")
-    if output_key:
-        print(f"[template] output_key={output_key}")
-
-            start_sse = await client.workflow_action(
-                session_id,
-                workflow_action="template_draft_start",
-                workflow_action_params={
+            template_meta = await _resolve_template_meta(client, template_id, _safe_str(args.template_name))
+            template_name = _safe_str(template_meta.get("name")) or f"模板#{template_id}"
+            output_key = _safe_str(template_meta.get("output_key"))
+            template_version_id = _safe_str(template_meta.get("template_version_id"))
+            if not output_key or not template_version_id:
+                raise ValueError(
+                    f"template contract missing required binding fields: template_id={template_id}, "
+                    f"output_key={output_key!r}, template_version_id={template_version_id!r}"
+                )
+            deliverable_kind = _resolve_deliverable_kind(
+                output_key=output_key,
+                explicit_kind=_safe_str(getattr(args, "deliverable_kind", "")),
+            )
+            summary["template_name"] = template_name
+            summary["output_key"] = output_key
+            summary["template_version_id"] = template_version_id
+            summary["deliverable_kind"] = deliverable_kind
+            print(f"[template] id={template_id} name={template_name}")
+            supervisor.update(
+                status="booting",
+                current_step="bootstrap.template_resolved",
+                session_id=session_id,
+                matter_id=matter_id,
+                next_action="kickoff",
+                extra={
                     "template_id": template_id,
+                    "template_version_id": template_version_id,
+                    "output_key": output_key,
+                    "deliverable_kind": deliverable_kind,
                 },
+            )
+            if output_key:
+                print(f"[template] output_key={output_key}")
+            if template_version_id:
+                print(f"[template] template_version_id={template_version_id}")
+            print(f"[template] deliverable_kind={deliverable_kind}")
+
+            start_sse = await client.request_documents(
+                session_id,
+                requested_documents=[
+                    {
+                        "document_kind": deliverable_kind,
+                        "instance_key": template_id,
+                    }
+                ],
                 settle_mode="fire_and_poll",
             )
             await _record_round(
-                action="workflow_action.template_draft_start",
-                payload={"template_id": template_id},
+                action="requested_documents.template_draft",
+                payload={
+                    "deliverable_kind": deliverable_kind,
+                    "template_id": template_id,
+                    "template_version_id": template_version_id,
+                    "output_key": output_key,
+                },
                 sse=start_sse if isinstance(start_sse, dict) else {},
                 enforce_visibility=False,
             )
             start_errors = _sse_error_events(start_sse if isinstance(start_sse, dict) else {})
             if start_errors:
-                if _workflow_action_ack_only_response(
-                    action="workflow_action.template_draft_start",
+                if _template_request_ack_only_response(
+                    action="requested_documents.template_draft",
                     sse=start_sse if isinstance(start_sse, dict) else {},
                 ):
                     print(
                         json.dumps(
                             {
-                                "stage": "workflow_action.template_draft_start",
+                                "stage": "requested_documents.template_draft",
                                 "errors": start_errors,
                                 "ack_only": True,
                             },
@@ -1285,8 +1398,8 @@ async def run(args: argparse.Namespace) -> int:
                     )
                     await asyncio.sleep(2.0)
                 else:
-                    print(json.dumps({"stage": "workflow_action.template_draft_start", "errors": start_errors}, ensure_ascii=False), flush=True)
-                    raise RuntimeError(f"template_draft_start returned error events: {start_errors}")
+                    print(json.dumps({"stage": "requested_documents.template_draft", "errors": start_errors}, ensure_ascii=False), flush=True)
+                    raise RuntimeError(f"template draft request returned error events: {start_errors}")
 
             flow_overrides = _build_flow_overrides(
                 facts_text,
@@ -1301,8 +1414,9 @@ async def run(args: argparse.Namespace) -> int:
                 overrides=flow_overrides,
                 strict_card_driven=True,
                 matter_id=matter_id,
+                progress_observer=supervisor.observe_flow_progress,
             )
-            start_settle = await _wait_template_draft_start_settled(
+            start_settle = await _wait_template_draft_request_settled(
                 client,
                 session_id=session_id,
                 matter_id=matter_id,
@@ -1323,6 +1437,13 @@ async def run(args: argparse.Namespace) -> int:
                     enforce_visibility=False,
                 )
             else:
+                supervisor.update(
+                    status="running",
+                    current_step="kickoff.submitting",
+                    session_id=session_id,
+                    matter_id=matter_id,
+                    next_action="await_kickoff_events",
+                )
                 kickoff_sse = await flow.nudge(
                     facts_text,
                     attachments=uploaded_file_ids,
@@ -1748,6 +1869,22 @@ async def run(args: argparse.Namespace) -> int:
             _write_json(out_dir / "flow_scores.json", flow_scores)
             _write_json(out_dir / "debug_refs.json", summary.get("debug_refs") if isinstance(summary.get("debug_refs"), dict) else {})
             _write_json(out_dir / "summary.json", summary)
+            supervisor.update(
+                status="completed",
+                current_step="terminal.completed",
+                session_id=_safe_str(summary.get("session_id")),
+                matter_id=_safe_str(summary.get("matter_id")),
+                next_action="inspect_summary",
+                artifact_refs={
+                    "summary": str(out_dir / "summary.json"),
+                    "deliverables": str(out_dir / "deliverables.json"),
+                    "document": str(out_dir / "document.docx"),
+                },
+                extra={
+                    "deliverable_status": status,
+                    "output_key": _safe_str(deliverable.get("output_key")),
+                },
+            )
 
             print("[done] template draft workflow completed")
             print(f"[artifacts] {out_dir}")
@@ -1880,6 +2017,15 @@ async def run(args: argparse.Namespace) -> int:
             _write_json(out_dir / "flow_scores.json", flow_scores)
             _write_json(out_dir / "debug_refs.json", summary.get("debug_refs") if isinstance(summary.get("debug_refs"), dict) else {})
             _write_json(out_dir / "summary.json", summary)
+            supervisor.update(
+                status="blocked",
+                current_step="terminal.stopped_after_node",
+                session_id=_safe_str(summary.get("session_id")),
+                matter_id=_safe_str(summary.get("matter_id")),
+                current_blocker="stop_after_node",
+                next_action="inspect_summary",
+                artifact_refs={"summary": str(out_dir / "summary.json")},
+            )
 
             print(f"[stopped] stop_after_node={stop_exc.target_node} reached")
             print(f"[artifacts] {out_dir}")
@@ -2002,6 +2148,16 @@ async def run(args: argparse.Namespace) -> int:
             _write_json(out_dir / "flow_scores.json", flow_scores)
             _write_json(out_dir / "debug_refs.json", summary.get("debug_refs") if isinstance(summary.get("debug_refs"), dict) else {})
             _write_json(out_dir / "summary.json", summary)
+            supervisor.update(
+                status="failed",
+                current_step="terminal.failed",
+                session_id=_safe_str(summary.get("session_id")),
+                matter_id=_safe_str(summary.get("matter_id")),
+                current_blocker="template_draft_failed",
+                next_action="inspect_summary",
+                error=str(e),
+                artifact_refs={"summary": str(out_dir / "summary.json")},
+            )
             print(f"[failed] {e}")
             print(f"[artifacts] {out_dir}")
             return 1
@@ -2022,8 +2178,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--username", default="", help="Lawyer username")
     parser.add_argument("--password", default="", help="Lawyer password")
     parser.add_argument("--service-type-id", default=DEFAULT_SERVICE_TYPE_ID, help="Matter service_type_id")
-    parser.add_argument("--template-id", required=True, help="Template ID used by template_draft_start")
+    parser.add_argument("--template-id", required=True, help="Template ID used as requested_documents.instance_key")
     parser.add_argument("--template-name", default="", help="Optional display label for logs only")
+    parser.add_argument("--deliverable-kind", default="", help="Explicit formal_document kind, e.g. civil_complaint_document")
     parser.add_argument("--facts-file", default="", help="UTF-8 text file for kickoff facts")
     parser.add_argument(
         "--evidence-file",

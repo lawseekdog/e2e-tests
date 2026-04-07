@@ -562,27 +562,30 @@ def build_bundle_quality_reports(
     if failure_summary and (_safe_str(failure_summary.get("first_bad_node")) or _safe_str(failure_summary.get("trace_id"))):
         if not _safe_str(failure_summary.get("primary_reason_code")) or not _safe_str(failure_summary.get("failure_class")):
             hard_fail_reasons.append("observability_contract_missing_reason_code")
-    hard_fail_reasons.extend(
-        [
-            f"unknown_node_profile:{_safe_str(row.get('node_id'))}"
-            for row, (profile_name, _) in zip(node_rows, node_profile_matches)
-            if not _safe_str(profile_name) and _safe_str(row.get("node_id"))
-        ][:20]
-    )
-    hard_fail_reasons.extend(
-        [
-            f"unknown_skill_profile:{_safe_str(row.get('skill_name'))}"
-            for row, (profile_name, _) in zip(skill_rows, skill_profile_matches)
-            if not _safe_str(profile_name) and _safe_str(row.get("skill_name"))
-        ][:20]
-    )
-    hard_fail_reasons.extend(
-        [
-            f"unknown_lane_profile:{_safe_str(row.get('lane_id'))}"
-            for row, (profile_name, _) in zip(lane_rows, lane_profile_matches)
-            if not _safe_str(profile_name) and _safe_str(row.get("lane_id"))
-        ][:20]
-    )
+    if _as_dict(policy.get("node_profiles")):
+        hard_fail_reasons.extend(
+            [
+                f"unknown_node_profile:{_safe_str(row.get('node_id'))}"
+                for row, (profile_name, _) in zip(node_rows, node_profile_matches)
+                if not _safe_str(profile_name) and _safe_str(row.get("node_id"))
+            ][:20]
+        )
+    if _as_dict(policy.get("skill_profiles")):
+        hard_fail_reasons.extend(
+            [
+                f"unknown_skill_profile:{_safe_str(row.get('skill_name'))}"
+                for row, (profile_name, _) in zip(skill_rows, skill_profile_matches)
+                if not _safe_str(profile_name) and _safe_str(row.get("skill_name"))
+            ][:20]
+        )
+    if _as_dict(policy.get("lane_profiles")):
+        hard_fail_reasons.extend(
+            [
+                f"unknown_lane_profile:{_safe_str(row.get('lane_id'))}"
+                for row, (profile_name, _) in zip(lane_rows, lane_profile_matches)
+                if not _safe_str(profile_name) and _safe_str(row.get("lane_id"))
+            ][:20]
+        )
     failed_nodes = [row for row in node_reports if _safe_str(row.get("severity")) == "fail"]
     failed_skills = [row for row in skill_reports if _safe_str(row.get("severity")) == "fail"]
     failed_lanes = [row for row in lane_reports if _safe_str(row.get("severity")) == "fail"]

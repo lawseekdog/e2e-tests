@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from httpx import HTTPStatusError
 
 from client.api_client import ApiClient
 from support.workbench.flow_runner import WorkbenchFlow
@@ -316,7 +317,12 @@ async def preseed_workflow_profile(
     if not dictionary_version or not dictionary_hash:
         raise RuntimeError("workflow_profile_preseed_missing_dictionary_metadata")
 
-    current_profile_raw = unwrap_api_response(await client.get_workflow_profile(mid))
+    try:
+        current_profile_raw = unwrap_api_response(await client.get_workflow_profile(mid))
+    except HTTPStatusError as exc:
+        if exc.response is None or exc.response.status_code != 404:
+            raise
+        current_profile_raw = {}
     current_profile = current_profile_raw if isinstance(current_profile_raw, dict) else {}
     goal = safe_str(current_profile.get("goal")) or _default_goal_from_service_dictionary(service_dictionary, service_type_id=st)
     if not goal:
@@ -329,14 +335,17 @@ async def preseed_workflow_profile(
         "decisions": {},
         "routing": {},
         "skill_execution": {},
-        "goal_views": {},
         "diagnostics": {
             "dictionary_version": dictionary_version,
             "dictionary_hash": dictionary_hash,
             "intake_profile": patch,
         },
     }
-    await client.sync_matter_workflow_all(mid, payload)
+    try:
+        await client.sync_matter_workflow_all(mid, payload)
+    except HTTPStatusError as exc:
+        if exc.response is None or exc.response.status_code != 404:
+            raise
     return patch
 
 
@@ -368,6 +377,7 @@ async def bootstrap_flow(
     overrides: dict[str, Any],
     preseed_profile: bool = True,
     strict_card_driven: bool = True,
+    progress_observer: Any = None,
 ) -> tuple[WorkbenchFlow, str, str]:
     sess = await client.create_session(
         service_type_id=service_type_id,
@@ -394,6 +404,7 @@ async def bootstrap_flow(
         overrides=dict(overrides),
         strict_card_driven=bool(strict_card_driven),
         matter_id=matter_id or None,
+        progress_observer=progress_observer,
     )
     return flow, session_id, matter_id
 
@@ -454,6 +465,14 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 async def collect_ai_debug_refs(
     client: ApiClient,
     *,
@@ -464,39 +483,33 @@ async def collect_ai_debug_refs(
     session_token = safe_str(session_id)
     matter_token = safe_str(matter_id)
     thread_id = session_token if session_token.startswith("session:") else (f"session:{session_token}" if session_token else "")
-    internal_api_key = safe_str(os.getenv("INTERNAL_API_KEY"))
     summary: dict[str, Any] = {}
     events: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
-
-    if thread_id and internal_api_key:
-        headers = {**client.headers, "X-Internal-Api-Key": internal_api_key}
-        try:
-            resp = await client.get(
-                "/ai-platform-service/internal/ai/diagnostics/summary",
-                params={"thread_id": thread_id},
-                headers=headers,
-            )
-            payload = unwrap_api_response(resp)
-            summary = payload.get("summary") if isinstance(payload, dict) and isinstance(payload.get("summary"), dict) else {}
-        except Exception as exc:  # noqa: BLE001
-            errors["diagnostics_summary"] = str(exc)
-        try:
-            resp = await client.get(
-                "/ai-platform-service/internal/ai/diagnostics/events",
-                params={"thread_id": thread_id, "limit": 20},
-                headers=headers,
-            )
-            payload = unwrap_api_response(resp)
-            rows = payload.get("events") if isinstance(payload, dict) else None
-            events = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
-        except Exception as exc:  # noqa: BLE001
-            errors["diagnostics_events"] = str(exc)
-
     bundle_dir = (repo_root / "output" / "ai-debug-bundles" / thread_id).resolve() if thread_id else None
     bundle_refs: list[str] = []
+
     if bundle_dir and bundle_dir.exists():
-        for rel in ("failure_summary.json", "execution_traces.json", "timeline.json", "node_trace_timeline.json"):
+        failure_summary = _read_json(bundle_dir / "failure_summary.json")
+        diagnosis = _read_json(bundle_dir / "diagnosis.json")
+        timeline = _read_json(bundle_dir / "timeline.json")
+        trace_payload = _read_json(bundle_dir / "execution_traces.json")
+        entries = [row for row in (timeline.get("entries") if isinstance(timeline.get("entries"), list) else []) if isinstance(row, dict)]
+        traces = [row for row in (trace_payload.get("traces") if isinstance(trace_payload.get("traces"), list) else []) if isinstance(row, dict)]
+        summary = diagnosis or {
+            "thread_id": thread_id,
+            "session_id": session_token,
+            "matter_id": matter_token,
+            "run_id": safe_str(failure_summary.get("run_id")) or safe_str(timeline.get("run_id")),
+            "quality_status": safe_str(failure_summary.get("quality_status")),
+            "quality_summary": safe_str(failure_summary.get("quality_summary")),
+            "summary": safe_str(failure_summary.get("summary")),
+            "event_count": len(entries),
+            "trace_count": len(traces),
+        }
+        events = [row for row in entries[-20:] if isinstance(row, dict)]
+
+        for rel in ("failure_summary.json", "diagnosis.json", "execution_traces.json", "timeline.json", "node_trace_timeline.json"):
             target = bundle_dir / rel
             if target.exists():
                 bundle_refs.append(str(target))
@@ -510,6 +523,11 @@ async def collect_ai_debug_refs(
         quality_dir = bundle_dir / "quality"
         if quality_dir.exists():
             bundle_refs.append(str(quality_dir))
+
+    if not summary and thread_id:
+        errors["diagnostics_summary"] = "bundle_missing"
+    if not events and thread_id:
+        errors["diagnostics_events"] = "bundle_missing"
 
     return {
         "thread_id": thread_id,

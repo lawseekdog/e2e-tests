@@ -13,6 +13,9 @@ def _safe_str(value: Any) -> str:
 
 def _resolve_ai_engine_python(repo_root: Path) -> Path:
     candidates = (
+        repo_root / "ai-engine-v2" / ".venv" / "bin" / "python",
+        repo_root / "ai-engine-v2" / ".venv312" / "bin" / "python",
+        repo_root / ".venv" / "bin" / "python",
         repo_root / "ai-engine" / ".venv312" / "bin" / "python",
         repo_root / "ai-engine" / ".venv" / "bin" / "python",
     )
@@ -23,10 +26,31 @@ def _resolve_ai_engine_python(repo_root: Path) -> Path:
 
 
 def _resolve_ai_engine_env_file(repo_root: Path) -> Path:
-    path = repo_root / "ai-engine" / ".local" / "local-ai-engine-stack.env"
-    if path.exists() and path.is_file():
-        return path
+    configured = _safe_str(os.getenv("AI_ENGINE_V2_ENV_FILE"))
+    candidates = tuple(
+        path
+        for path in (
+            Path(configured).expanduser() if configured else None,
+            repo_root / "ai-engine-v2" / ".local" / "local-ai-engine-stack.env",
+            repo_root / "infra-live" / ".local" / "aliyun-remote.env",
+            repo_root / "infra-live" / ".local" / "env.local",
+        )
+        if path is not None
+    )
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return path
     raise RuntimeError("diagnostic_export_env_missing")
+
+
+def _resolve_ai_engine_export_script(repo_root: Path) -> Path:
+    candidates = (
+        repo_root / "ai-engine-v2" / "scripts" / "export_debug_bundle.py",
+    )
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return path
+    raise RuntimeError("diagnostic_export_script_missing")
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
@@ -60,9 +84,7 @@ def _export_bundle_via_ai_engine_runtime(
 ) -> str:
     python_bin = _resolve_ai_engine_python(repo_root)
     env_file = _resolve_ai_engine_env_file(repo_root)
-    script_path = repo_root / "ai-engine" / "scripts" / "_debug" / "export_debug_bundle.py"
-    if not script_path.exists():
-        raise RuntimeError("diagnostic_export_script_missing")
+    script_path = _resolve_ai_engine_export_script(repo_root)
     command = [
         str(python_bin),
         str(script_path),
@@ -78,10 +100,10 @@ def _export_bundle_via_ai_engine_runtime(
         command.extend(["--matter-id", _safe_str(matter_id)])
     env = os.environ.copy()
     env.update(_load_env_file(env_file))
-    env["AI_ENGINE_ENV_FILE"] = str(env_file)
+    env["AI_ENGINE_V2_ENV_FILE"] = str(env_file)
     result = subprocess.run(
         command,
-        cwd=repo_root / "ai-engine",
+        cwd=script_path.parent.parent,
         capture_output=True,
         text=True,
         check=False,

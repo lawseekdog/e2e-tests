@@ -114,7 +114,7 @@ def test_analysis_auto_action_prefers_legal_opinion_core_missing() -> None:
 
     assert action
     assert action["payload"]["target"] == "legal_opinion_analyze"
-    assert _analysis_should_refresh_references(snapshot={}, legal_view=legal_view) is False
+    assert _analysis_should_refresh_references(snapshot={}, analysis_projection=legal_view) is False
     assert _analysis_auto_review_card_target(action) == "legal_opinion_analyze"
 
 
@@ -139,7 +139,7 @@ def test_analysis_allows_reference_refresh_only_after_core_ready() -> None:
         "next_actions": [],
     }
 
-    assert _analysis_should_refresh_references(snapshot=snapshot, legal_view=legal_view) is True
+    assert _analysis_should_refresh_references(snapshot=snapshot, analysis_projection=legal_view) is True
 
 
 def test_analysis_allows_reference_refresh_when_references_stage_is_explicitly_blocked() -> None:
@@ -181,7 +181,7 @@ def test_analysis_allows_reference_refresh_when_references_stage_is_explicitly_b
         ],
     }
 
-    assert _analysis_should_refresh_references(snapshot=snapshot, legal_view=legal_view) is True
+    assert _analysis_should_refresh_references(snapshot=snapshot, analysis_projection=legal_view) is True
 
 
 def test_analysis_auto_review_card_waits_while_evidence_pipeline_is_running() -> None:

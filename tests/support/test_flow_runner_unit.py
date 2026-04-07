@@ -200,14 +200,14 @@ async def test_step_strict_card_mode_skips_hidden_remediation_nudge() -> None:
 
 
 @pytest.mark.asyncio
-async def test_workflow_action_uses_websocket_actions_endpoint() -> None:
+async def test_request_documents_uses_chat_requested_documents_contract() -> None:
     called: dict[str, object] = {}
 
     class _Client:
-        async def workflow_action(self, session_id: str, **kwargs):  # type: ignore[no-untyped-def]
+        async def request_documents(self, session_id: str, **kwargs):  # type: ignore[no-untyped-def]
             called["session_id"] = session_id
             called.update(kwargs)
-            return {"events": [{"event": "workflow_action"}], "output": "ok"}
+            return {"events": [{"event": "chat"}], "output": "ok"}
 
         async def get_matter_phase_timeline(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
             return {"code": 0, "data": {}}
@@ -219,26 +219,24 @@ async def test_workflow_action_uses_websocket_actions_endpoint() -> None:
             return {"code": 0, "data": {"deliverables": []}}
 
     flow = WorkbenchFlow(client=_Client(), session_id="session-4", uploaded_file_ids=["file-1"])
-    result = await flow.workflow_action(
-        "set_goal",
-        workflow_action_params={"goal": "document_generation"},
+    result = await flow.request_documents(
+        [{"document_kind": "legal_opinion_report", "instance_key": ""}],
         max_loops=18,
     )
 
     assert isinstance(result, dict)
     assert called["session_id"] == "session-4"
-    assert called["workflow_action"] == "set_goal"
-    assert called["workflow_action_params"] == {"goal": "document_generation"}
+    assert called["requested_documents"] == [{"document_kind": "legal_opinion_report", "instance_key": ""}]
     assert called["attachments"] == ["file-1"]
     assert called["max_loops"] == 18
 
 
 @pytest.mark.asyncio
-async def test_workflow_action_passes_settle_mode() -> None:
+async def test_request_documents_passes_settle_mode() -> None:
     called: dict[str, object] = {}
 
     class _Client:
-        async def workflow_action(self, session_id: str, **kwargs):  # type: ignore[no-untyped-def]
+        async def request_documents(self, session_id: str, **kwargs):  # type: ignore[no-untyped-def]
             called["session_id"] = session_id
             called.update(kwargs)
             return {"events": [{"event": "progress", "data": {"phase": "materials"}}], "output": ""}
@@ -253,9 +251,8 @@ async def test_workflow_action_passes_settle_mode() -> None:
             return {"code": 0, "data": {"deliverables": []}}
 
     flow = WorkbenchFlow(client=_Client(), session_id="session-4", uploaded_file_ids=["file-1"])
-    result = await flow.workflow_action(
-        "template_draft_start",
-        workflow_action_params={"template_id": "50"},
+    result = await flow.request_documents(
+        [{"document_kind": "civil_complaint_document", "instance_key": "50"}],
         max_loops=18,
         settle_mode="fire_and_poll",
     )
@@ -263,6 +260,42 @@ async def test_workflow_action_passes_settle_mode() -> None:
     assert isinstance(result, dict)
     assert called["session_id"] == "session-4"
     assert called["settle_mode"] == "fire_and_poll"
+
+
+@pytest.mark.asyncio
+async def test_request_documents_notifies_progress_observer() -> None:
+    observed: list[dict[str, object]] = []
+
+    class _Client:
+        async def request_documents(self, session_id: str, **kwargs):  # type: ignore[no-untyped-def]
+            return {"events": [{"event": "chat"}], "output": "ok"}
+
+        async def get_matter_phase_timeline(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": {"current_phase": "references", "phases": [{"id": "references", "status": "active"}]}}
+
+        async def list_traces(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": {"traces": [{"node_id": "references.query", "status": "running"}]}}
+
+        async def list_deliverables(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"code": 0, "data": {"deliverables": [{"output_key": "analysis_report"}]}}
+
+    async def _observe(event: dict[str, object]) -> None:
+        observed.append(event)
+
+    flow = WorkbenchFlow(
+        client=_Client(),
+        session_id="session-5",
+        matter_id="matter-1",
+        progress_observer=_observe,
+    )
+    await flow.request_documents([{"document_kind": "case_analysis_report", "instance_key": ""}])
+
+    assert observed
+    row = observed[-1]
+    assert row["label"] == "request:case_analysis_report"
+    assert row["matter_id"] == "matter-1"
+    assert row["phase"] == "references"
+    assert row["trace_node"] == "references.query"
 
 
 @pytest.mark.asyncio

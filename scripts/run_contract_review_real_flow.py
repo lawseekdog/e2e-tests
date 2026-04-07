@@ -41,6 +41,7 @@ from scripts._support.workflow_real_flow_support import (
 from scripts._support.diagnostic_bundle_support import export_failure_bundle, export_observability_bundle
 from scripts._support.flow_score_support import build_flow_scores, collect_flow_observability
 from scripts._support.quality_policy_support import build_bundle_quality_reports
+from scripts._support.run_status import RunStatusSupervisor
 
 
 REQUIRED_DOC_OUTPUT_KEYS = (
@@ -176,11 +177,7 @@ def _extract_contract_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     analysis = snapshot.get("analysis_state") if isinstance(snapshot.get("analysis_state"), dict) else {}
     view = analysis.get("contract_review_view") if isinstance(analysis.get("contract_review_view"), dict) else {}
-    if view:
-        return view
-    goals = analysis.get("goal_views") if isinstance(analysis.get("goal_views"), dict) else {}
-    fallback = goals.get("contract_review_view") if isinstance(goals.get("contract_review_view"), dict) else {}
-    return fallback if isinstance(fallback, dict) else {}
+    return view if isinstance(view, dict) else {}
 
 
 async def _list_deliverables(client: ApiClient, matter_id: str) -> dict[str, dict[str, Any]]:
@@ -243,6 +240,8 @@ async def run(args: argparse.Namespace) -> int:
         output_dir=_safe_str(args.output_dir),
         default_leaf=f"output/contract-review-chain/{ts}",
     )
+    supervisor = RunStatusSupervisor(out_dir=out_dir, flow_id="contract_review")
+    supervisor.update(status="booting", current_step="bootstrap.init", next_action="login")
 
     print(f"[config] base_url={base_url}")
     print(f"[config] direct_service_mode={direct_mode}")
@@ -264,12 +263,19 @@ async def run(args: argparse.Namespace) -> int:
     async with ApiClient(base_url) as client:
         await client.login(username, password)
         print(f"[login] ok user_id={client.user_id} org_id={client.organization_id}")
+        supervisor.update(status="booting", current_step="bootstrap.login", next_action="upload_contract")
 
         uploaded_file_ids = await upload_consultation_files(client, [contract_file])
         file_id = uploaded_file_ids[0] if uploaded_file_ids else ""
         if not file_id:
             raise RuntimeError(f"upload_file failed: {contract_file}")
         print(f"[upload] ok file_id={file_id}")
+        supervisor.update(
+            status="booting",
+            current_step="bootstrap.upload_contract",
+            next_action="create_session",
+            extra={"uploaded_file_ids": uploaded_file_ids},
+        )
 
         flow, session_id, matter_id = await bootstrap_flow(
             client=client,
@@ -278,10 +284,25 @@ async def run(args: argparse.Namespace) -> int:
             uploaded_file_ids=[file_id],
             overrides=flow_overrides,
             strict_card_driven=True,
+            progress_observer=supervisor.observe_flow_progress,
         )
         print(f"[session] id={session_id} matter_id={matter_id or '-'}")
+        supervisor.update(
+            status="booting",
+            current_step="bootstrap.session_created",
+            session_id=session_id,
+            matter_id=matter_id,
+            next_action="kickoff",
+        )
 
         kickoff_settle_mode = "first_event" if args.cards_only else "full"
+        supervisor.update(
+            status="running",
+            current_step="kickoff.submitting",
+            session_id=session_id,
+            matter_id=_safe_str(flow.matter_id) or matter_id,
+            next_action="await_kickoff_events",
+        )
         kickoff_sse = await flow.nudge(
             kickoff,
             attachments=[file_id],
@@ -291,6 +312,21 @@ async def run(args: argparse.Namespace) -> int:
         kickoff_counts = _event_counts(kickoff_sse if isinstance(kickoff_sse, dict) else {})
         print(f"[kickoff] event_counts={kickoff_counts}")
         write_json(out_dir / "kickoff.sse.json", kickoff_sse if isinstance(kickoff_sse, dict) else {})
+        supervisor.update(
+            status="running",
+            current_step="kickoff.completed",
+            session_id=session_id,
+            matter_id=_safe_str(flow.matter_id) or matter_id,
+            next_action="wait_deliverables",
+            extra={"kickoff_event_counts": kickoff_counts},
+        )
+        supervisor.update(
+            status="running",
+            current_step="deliverables.waiting",
+            session_id=session_id,
+            matter_id=_safe_str(flow.matter_id) or matter_id,
+            next_action="continue_poll",
+        )
 
         async def _deliverables_ready(f: WorkbenchFlow) -> bool:
             await f.refresh()
@@ -369,6 +405,16 @@ async def run(args: argparse.Namespace) -> int:
             )
             write_json(out_dir / "failure_summary.json", bundle["summary"])
             write_json(out_dir / "bundle_quality.failure.json", bundle_quality)
+            supervisor.update(
+                status="failed",
+                current_step="terminal.failed",
+                session_id=session_id,
+                matter_id=fail_matter_id,
+                current_blocker="contract_review_real_flow_failed",
+                next_action="inspect_failure_summary",
+                error=str(e),
+                artifact_refs={"failure_summary": str(out_dir / "failure_summary.json")},
+            )
             raise
 
         await flow.refresh()
@@ -482,6 +528,22 @@ async def run(args: argparse.Namespace) -> int:
         write_json(out_dir / "debug_refs.json", debug_refs)
         if report_text:
             (out_dir / "contract_review_report.txt").write_text(report_text, encoding="utf-8")
+        supervisor.update(
+            status="completed",
+            current_step="terminal.completed",
+            session_id=session_id,
+            matter_id=final_matter_id,
+            next_action="inspect_summary",
+            pending_card=pending_card,
+            artifact_refs={
+                "summary": str(out_dir / "summary.json"),
+                "deliverables": str(out_dir / "deliverables.json"),
+            },
+            extra={
+                "deliverable_keys": sorted(deliverables.keys()),
+                "report_file_id": report_file_id,
+            },
+        )
 
     print("[done] contract review workflow completed")
     print(f"[artifacts] {out_dir}")

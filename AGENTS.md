@@ -1,3 +1,19 @@
+# 第一优先级（强制）
+
+- 不兜底：禁止 fallback、repair、compatibility shim、synthetic recovery、默认补全。
+- 不兼容：禁止为旧协议、旧字段、旧路径保留兼容层、双写或过渡分支。
+- 不止血：禁止只修表象；排查、修复、方案、重构必须优先处理根因和主控制面。
+- 不保留旧路径：命中 legacy path、旧接口、旧流程、旧状态语义时，默认直接删除或硬报错，不继续维护。
+- 适用范围：任何修改、排查问题、修复问题、解决方案、重构都必须遵守以上规则。
+
+## 硬切执行细则（强制）
+
+- 真链路脚本只能调用当前唯一入口；禁止继续保留 legacy kickoff、legacy stream、legacy resume、legacy deliverable 参数。
+- 禁止双写：新旧 run status、新旧 watcher、新旧 flow runner 状态面不得并存。
+- 禁止 synthetic recovery：测试脚本不得伪造 stream event、pending-card、阶段推进或补写运行状态。
+- 真实排查优先读取 runtime traces、timeline、snapshot、run_status；禁止只靠 stdout 猜当前步骤。
+- 旧脚本路径一旦被新统一脚本替代，必须直接删除旧参数和旧 helper。
+
 # AI 代理协作说明（Codex）
 
 > 本文件用于给 Codex 类工具提供仓库上下文与约束。

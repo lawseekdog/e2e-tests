@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from client.api_client import ApiClient
+from client.api_client import ApiClient, _submitted_ack
 
 
 class _Response:
@@ -51,3 +51,9 @@ async def test_login_uses_auth_service_gateway_prefix(monkeypatch: pytest.Monkey
     await client.login("admin", "admin123456")
 
     assert fake.calls[0][1] == "http://127.0.0.1:18080/api/v1/auth-service/auth/login"
+
+
+def test_submitted_ack_uses_message_type_specific_event_names() -> None:
+    assert _submitted_ack("resume") == ("resume_submitted", "resume submitted")
+    assert _submitted_ack("actions") == ("action_submitted", "action submitted")
+    assert _submitted_ack("chat") == ("chat_submitted", "chat submitted")

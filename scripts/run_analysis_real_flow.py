@@ -24,6 +24,7 @@ from scripts._support.workflow_real_flow_support import (
     event_counts,
     fetch_workbench_snapshot,
     is_goal_completion_card,
+    list_deliverables,
     list_session_messages,
     load_real_flow_env,
     resolve_output_dir,
@@ -35,41 +36,48 @@ from scripts._support.workflow_real_flow_support import (
 from scripts._support.diagnostic_bundle_support import export_failure_bundle, export_observability_bundle, format_first_bad_line
 from scripts._support.flow_score_support import build_flow_scores, collect_flow_observability
 from scripts._support.quality_policy_support import build_bundle_quality_reports
+from scripts._support.run_status import RunStatusSupervisor
 
 
-DEFAULT_KICKOFF = (
-    "我准备起诉一起民间借贷纠纷，请基于已上传材料完成案件分析，输出争点、风险、策略建议与下一步动作。"
-)
+START_REQUESTED_DOCUMENTS: list[dict[str, str]] = [
+    {"document_kind": "case_analysis_report", "instance_key": ""},
+]
 
 FLOW_OVERRIDES: dict[str, Any] = {}
 
 def _extract_analysis_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
-    analysis = snapshot.get("analysis_state") if isinstance(snapshot.get("analysis_state"), dict) else {}
-    direct = analysis.get("analysis_view") if isinstance(analysis.get("analysis_view"), dict) else {}
-    if direct:
-        return direct
-    goals = analysis.get("goal_views") if isinstance(analysis.get("goal_views"), dict) else {}
-    view = goals.get("analysis_view") if isinstance(goals.get("analysis_view"), dict) else {}
-    if view:
-        return view
-    goal_views = snapshot.get("goal_views") if isinstance(snapshot.get("goal_views"), dict) else {}
-    view = goal_views.get("analysis_view") if isinstance(goal_views.get("analysis_view"), dict) else {}
+    view = snapshot.get("analysis_view") if isinstance(snapshot.get("analysis_view"), dict) else {}
     return view if isinstance(view, dict) else {}
 
 
 def _extract_pricing_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
-    analysis = snapshot.get("analysis_state") if isinstance(snapshot.get("analysis_state"), dict) else {}
-    goals = analysis.get("goal_views") if isinstance(analysis.get("goal_views"), dict) else {}
-    view = goals.get("pricing_plan_view") if isinstance(goals.get("pricing_plan_view"), dict) else {}
-    if view:
-        return view
-    goal_views = snapshot.get("goal_views") if isinstance(snapshot.get("goal_views"), dict) else {}
-    view = goal_views.get("pricing_plan_view") if isinstance(goal_views.get("pricing_plan_view"), dict) else {}
+    view = snapshot.get("pricing_plan_view") if isinstance(snapshot.get("pricing_plan_view"), dict) else {}
     return view if isinstance(view, dict) else {}
+
+
+def _extract_document_generation_state(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    state = snapshot.get("document_generation_state") if isinstance(snapshot.get("document_generation_state"), dict) else {}
+    return state if isinstance(state, dict) else {}
+
+
+def _section_items(analysis_view: dict[str, Any] | None, section_type: str) -> list[dict[str, Any]]:
+    view = analysis_view if isinstance(analysis_view, dict) else {}
+    sections = view.get("sections") if isinstance(view.get("sections"), list) else []
+    for row in sections:
+        if not isinstance(row, dict):
+            continue
+        if _safe_str(row.get("section_type")) != section_type:
+            continue
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        return [item for item in items if isinstance(item, dict)]
+    return []
 
 
 def _extract_runtime_progress(snapshot: dict[str, Any] | None) -> dict[str, str]:
@@ -106,17 +114,56 @@ def _is_intake_card(card: dict[str, Any] | None) -> bool:
     return _safe_str(card.get("skill_id")).lower() == "civil-analysis-intake"
 
 
-def _analysis_readiness(analysis_view: dict[str, Any], pricing_view: dict[str, Any]) -> dict[str, Any]:
+def _docgen_expected(docgen_state: dict[str, Any] | None) -> bool:
+    state = docgen_state if isinstance(docgen_state, dict) else {}
+    runtime_signals = state.get("runtime_signals") if isinstance(state.get("runtime_signals"), dict) else {}
+    return bool(
+        _safe_str(state.get("status"))
+        or _safe_str(state.get("quality_review_decision"))
+        or bool(state.get("selected_documents"))
+        or bool(runtime_signals)
+    )
+
+
+def _docgen_terminal(docgen_state: dict[str, Any] | None) -> bool:
+    state = docgen_state if isinstance(docgen_state, dict) else {}
+    if not _docgen_expected(state):
+        return True
+    status = _safe_str(state.get("status")).lower()
+    return status in {"document_ready", "repair_blocked", "review_pending", "blocked", "failed", "completed", "ready"}
+
+
+def _analysis_readiness(
+    analysis_view: dict[str, Any],
+    pricing_view: dict[str, Any],
+    docgen_state: dict[str, Any],
+    *,
+    require_documents: bool,
+) -> dict[str, Any]:
+    docgen_checks = {
+        "docgen_terminal": _docgen_terminal(docgen_state),
+    }
+    if require_documents:
+        docgen_checks = {
+            "docgen_started": _docgen_expected(docgen_state),
+            "docgen_terminal": _docgen_terminal(docgen_state),
+        }
     checks = {
         "summary_ready": bool(_safe_str(analysis_view.get("summary"))),
-        "issues_ready": bool(isinstance(analysis_view.get("issues"), list) and analysis_view.get("issues")),
-        "strategy_options_ready": bool(
-            isinstance(analysis_view.get("strategy_options"), list) and analysis_view.get("strategy_options")
-        ),
-        "pricing_ready": _safe_str(pricing_view.get("status")).lower() in {"ready", "review_pending"},
+        "issues_ready": bool(_section_items(analysis_view, "issues")),
+        "strategy_options_ready": bool(_section_items(analysis_view, "strategy_matrix")),
+        **docgen_checks,
+    }
+    optional_checks = {
+        "pricing_ready": _safe_str(pricing_view.get("status")).lower() in {"ready", "review_pending", "completed"},
     }
     missing = [name for name, passed in checks.items() if not passed]
-    return {"checks": checks, "missing_requirements": missing, "ready": not missing}
+    return {
+        "checks": checks,
+        "optional_checks": optional_checks,
+        "missing_requirements": missing,
+        "ready": not missing,
+    }
 
 
 def _analysis_reference_refresh_hint(
@@ -211,8 +258,8 @@ def _progress_fingerprint(
             "status": _safe_str(analysis_obj.get("status")),
             "updated_at": _safe_str(analysis_obj.get("updated_at")),
             "summary_len": len(_safe_str(analysis_obj.get("summary"))),
-            "issues_count": len(analysis_obj.get("issues")) if isinstance(analysis_obj.get("issues"), list) else 0,
-            "strategy_options_count": len(analysis_obj.get("strategy_options")) if isinstance(analysis_obj.get("strategy_options"), list) else 0,
+            "issues_count": len(_section_items(analysis_obj, "issues")),
+            "strategy_options_count": len(_section_items(analysis_obj, "strategy_matrix")),
             "blocking_reason_codes": [
                 _safe_str(code)
                 for code in (analysis_obj.get("blocking_reason_codes") if isinstance(analysis_obj.get("blocking_reason_codes"), list) else [])
@@ -264,10 +311,12 @@ def _is_session_busy_sse(sse: dict[str, Any] | None) -> bool:
     return "会话正在处理中" in _safe_str(sse.get("output")) or "session busy" in _safe_str(sse.get("output")).lower()
 
 
-def _write_live_status(
-    out_dir: Path,
+def _write_run_status(
+    supervisor: RunStatusSupervisor,
     *,
     state: str,
+    current_step: str,
+    require_documents: bool = False,
     session_id: str,
     matter_id: str,
     wait_round: int,
@@ -275,47 +324,67 @@ def _write_live_status(
     pending_card: dict[str, Any] | None,
     analysis_view: dict[str, Any] | None,
     pricing_view: dict[str, Any] | None,
+    docgen_state: dict[str, Any] | None,
     seen_cards: int,
     seen_sse_rounds: int,
     error: str = "",
-    kickoff_output: str = "",
+    start_output: str = "",
 ) -> None:
     snapshot_obj = snapshot if isinstance(snapshot, dict) else {}
     analysis_obj = analysis_view if isinstance(analysis_view, dict) else {}
     pricing_obj = pricing_view if isinstance(pricing_view, dict) else {}
+    docgen_obj = docgen_state if isinstance(docgen_state, dict) else {}
     runtime = _extract_runtime_progress(snapshot_obj)
-    readiness = _analysis_readiness(analysis_obj, pricing_obj)
-    payload = {
-        "contract_version": "analysis_live_status.v1",
-        "state": _safe_str(state),
-        "session_id": _safe_str(session_id),
-        "matter_id": _safe_str(matter_id),
-        "wait_round": int(wait_round),
-        "current_task_id": runtime["current_task_id"],
-        "current_node": runtime["current_node"],
-        "current_phase": runtime["current_phase"],
-        "pending_card": _compact_pending_card(pending_card),
-        "analysis_view": {
-            "summary_len": len(_safe_str(analysis_obj.get("summary"))),
-            "issues_count": len(analysis_obj.get("issues")) if isinstance(analysis_obj.get("issues"), list) else 0,
-            "strategy_options_count": len(analysis_obj.get("strategy_options")) if isinstance(analysis_obj.get("strategy_options"), list) else 0,
+    readiness = _analysis_readiness(
+        analysis_obj,
+        pricing_obj,
+        docgen_obj,
+        require_documents=require_documents,
+    )
+    supervisor.update(
+        status=_safe_str(state),
+        current_step=current_step,
+        session_id=_safe_str(session_id),
+        matter_id=_safe_str(matter_id),
+        snapshot=snapshot_obj,
+        pending_card=pending_card,
+        current_blocker=",".join(readiness.get("missing_requirements") or []),
+        next_action="collect_final_outputs" if bool(readiness.get("ready")) else "continue_poll",
+        wait_round=wait_round,
+        seen_cards=seen_cards,
+        seen_sse_rounds=seen_sse_rounds,
+        error=_safe_str(error),
+        latest_payloads={
+            "snapshot": snapshot_obj,
+            "analysis_view": analysis_obj,
+            "pricing_plan_view": pricing_obj,
+            "document_generation_state": docgen_obj,
+            "pending_card": _compact_pending_card(pending_card),
         },
-        "pricing_plan_view": {
-            "status": _safe_str(pricing_obj.get("status")),
-            "reviewed": bool(pricing_obj.get("reviewed")),
-            "pricing_mode": _safe_str(pricing_obj.get("pricing_mode")),
+        extra={
+            "analysis_view": {
+                "summary_len": len(_safe_str(analysis_obj.get("summary"))),
+                "issues_count": len(_section_items(analysis_obj, "issues")),
+                "strategy_options_count": len(_section_items(analysis_obj, "strategy_matrix")),
+            },
+            "pricing_plan_view": {
+                "status": _safe_str(pricing_obj.get("status")),
+                "reviewed": bool(pricing_obj.get("reviewed")),
+                "pricing_mode": _safe_str(pricing_obj.get("pricing_mode")),
+            },
+            "document_generation_state": {
+                "status": _safe_str(docgen_obj.get("status")),
+                "formal_gate_blocked": bool(docgen_obj.get("formal_gate_blocked")),
+                "quality_review_decision": _safe_str(docgen_obj.get("quality_review_decision")),
+                "selected_document_count": len(
+                    docgen_obj.get("selected_documents") if isinstance(docgen_obj.get("selected_documents"), list) else []
+                ),
+            },
+            "readiness": readiness,
+            "start_output": _safe_str(start_output),
+            "runtime_progress": runtime,
         },
-        "readiness": readiness,
-        "seen_cards": int(seen_cards),
-        "seen_sse_rounds": int(seen_sse_rounds),
-        "error": _safe_str(error),
-        "kickoff_output": _safe_str(kickoff_output),
-    }
-    write_json(out_dir / "live_status.json", payload)
-    write_json(out_dir / "snapshot.latest.json", snapshot_obj)
-    write_json(out_dir / "analysis_view.latest.json", analysis_obj)
-    write_json(out_dir / "pricing_plan_view.latest.json", pricing_obj)
-    write_json(out_dir / "pending_card.latest.json", _compact_pending_card(pending_card))
+    )
 
 
 def _fallback_failure_summary(
@@ -327,7 +396,7 @@ def _fallback_failure_summary(
 ) -> dict[str, Any]:
     runtime = _extract_runtime_progress(snapshot if isinstance(snapshot, dict) else {})
     message = _safe_str(error)
-    reason_code = "analysis_view_not_ready" if "analysis view + pricing plan ready" in message else error.__class__.__name__.lower()
+    reason_code = "analysis_view_not_ready" if "analysis readiness" in message else error.__class__.__name__.lower()
     return {
         "contract_version": "failure_summary.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -362,7 +431,6 @@ async def run(args: argparse.Namespace) -> int:
         base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
     username = _safe_str(args.username) or _safe_str(os.getenv("LAWYER_USERNAME")) or "lawyer1"
     password = _safe_str(args.password) or _safe_str(os.getenv("LAWYER_PASSWORD")) or "lawyer123456"
-    kickoff = _safe_str(args.kickoff) or DEFAULT_KICKOFF
 
     fixture_dir = E2E_ROOT / "fixtures"
     evidence_files = [
@@ -376,6 +444,14 @@ async def run(args: argparse.Namespace) -> int:
         repo_root=REPO_ROOT,
         output_dir=_safe_str(args.output_dir),
         default_leaf=f"output/analysis-chain/{ts}",
+    )
+    require_documents = False
+    supervisor = RunStatusSupervisor(out_dir=out_dir, flow_id="analysis")
+    supervisor.update(
+        status="booting",
+        current_step="bootstrap.init",
+        current_blocker="",
+        next_action="login",
     )
 
     print(f"[config] base_url={base_url}")
@@ -394,10 +470,21 @@ async def run(args: argparse.Namespace) -> int:
     async with ApiClient(base_url) as client:
         await client.login(username, password)
         print(f"[login] ok user_id={client.user_id} org_id={client.organization_id}")
+        supervisor.update(
+            status="booting",
+            current_step="bootstrap.login",
+            next_action="upload_files",
+        )
 
         uploaded_file_ids = await upload_consultation_files(client, evidence_files)
         for path, fid in zip([p for p in evidence_files if p.exists()], uploaded_file_ids):
             print(f"[upload] ok file={path.name} file_id={fid}")
+        supervisor.update(
+            status="booting",
+            current_step="bootstrap.upload_files",
+            next_action="create_session",
+            extra={"uploaded_file_ids": uploaded_file_ids},
+        )
 
         flow, session_id, matter_id = await bootstrap_flow(
             client=client,
@@ -406,23 +493,43 @@ async def run(args: argparse.Namespace) -> int:
             uploaded_file_ids=uploaded_file_ids,
             overrides=FLOW_OVERRIDES,
             preseed_profile=False,
+            progress_observer=supervisor.observe_flow_progress,
         )
         print(f"[session] id={session_id} matter_id={matter_id or '-'}")
-
-        kickoff_settle_mode = "first_event" if args.cards_only else "full"
-        kickoff_sse = await flow.nudge(
-            kickoff,
-            attachments=uploaded_file_ids,
-            max_loops=max(1, int(args.kickoff_max_loops)),
-            settle_mode=kickoff_settle_mode,
+        supervisor.update(
+            status="booting",
+            current_step="bootstrap.session_created",
+            session_id=session_id,
+            matter_id=matter_id,
+            next_action="start_analysis",
         )
-        kickoff_counts = event_counts(kickoff_sse if isinstance(kickoff_sse, dict) else {})
-        write_json(out_dir / "kickoff.sse.json", kickoff_sse if isinstance(kickoff_sse, dict) else {})
-        kickoff_output = _safe_str((kickoff_sse if isinstance(kickoff_sse, dict) else {}).get("output"))
+
+        start_output = ""
+        start_counts: dict[str, int] = {}
+        start_settle_mode = "fire_and_poll"
+        supervisor.update(
+            status="running",
+            current_step="start_request.submitting",
+            session_id=session_id,
+            matter_id=_safe_str(flow.matter_id) or matter_id,
+            next_action="await_start_request_events",
+        )
+        start_sse = await flow.request_documents(
+            START_REQUESTED_DOCUMENTS,
+            attachments=uploaded_file_ids,
+            max_loops=max(1, int(args.action_max_loops)),
+            settle_mode=start_settle_mode,
+            label="case_analysis_report",
+        )
+        start_counts = event_counts(start_sse if isinstance(start_sse, dict) else {})
+        write_json(out_dir / "start_analysis.sse.json", start_sse if isinstance(start_sse, dict) else {})
+        start_output = _safe_str((start_sse if isinstance(start_sse, dict) else {}).get("output"))
         wait_round = 0
-        _write_live_status(
-            out_dir,
-            state="kickoff_completed",
+        _write_run_status(
+            supervisor,
+            state="start_request_completed",
+            current_step="start_request.completed",
+            require_documents=require_documents,
             session_id=session_id,
             matter_id=_safe_str(flow.matter_id),
             wait_round=wait_round,
@@ -430,9 +537,10 @@ async def run(args: argparse.Namespace) -> int:
             pending_card=None,
             analysis_view={},
             pricing_view={},
+            docgen_state={},
             seen_cards=len(flow.seen_cards),
             seen_sse_rounds=len(flow.seen_sse),
-            kickoff_output=kickoff_output,
+            start_output=start_output,
         )
         reference_refresh_attempts = 0
         reference_refresh_requests = 0
@@ -451,9 +559,11 @@ async def run(args: argparse.Namespace) -> int:
                     else:
                         last_progress_fingerprint = next_progress_fingerprint
                         stall_rounds = 0
-                    _write_live_status(
-                        out_dir,
+                    _write_run_status(
+                        supervisor,
                         state="waiting_for_matter",
+                        current_step="poll.waiting_for_matter",
+                        require_documents=require_documents,
                         session_id=session_id,
                         matter_id="",
                         wait_round=wait_round,
@@ -461,12 +571,13 @@ async def run(args: argparse.Namespace) -> int:
                         pending_card=None,
                         analysis_view={},
                         pricing_view={},
+                        docgen_state={},
                         seen_cards=len(flow.seen_cards),
                         seen_sse_rounds=len(flow.seen_sse),
-                        kickoff_output=kickoff_output,
+                        start_output=start_output,
                     )
                     print(
-                        f"[flow-progress] waiting:analysis view + pricing plan ready step={step_no}/{max_total_steps} "
+                        f"[flow-progress] waiting:analysis readiness step={step_no}/{max_total_steps} "
                         f"stall={stall_rounds}/{max_no_progress_steps} session={session_id} matter=- status=waiting_for_matter",
                         flush=True,
                     )
@@ -482,6 +593,7 @@ async def run(args: argparse.Namespace) -> int:
                 snapshot = await fetch_workbench_snapshot(client, flow.matter_id)
                 analysis_view = _extract_analysis_view(snapshot)
                 pricing_view = _extract_pricing_view(snapshot)
+                docgen_state = _extract_document_generation_state(snapshot)
                 next_progress_fingerprint = _progress_fingerprint(snapshot, pending, analysis_view, pricing_view)
                 if next_progress_fingerprint == last_progress_fingerprint:
                     stall_rounds += 1
@@ -489,9 +601,11 @@ async def run(args: argparse.Namespace) -> int:
                     last_progress_fingerprint = next_progress_fingerprint
                     stall_rounds = 0
                 if is_goal_completion_card(pending):
-                    _write_live_status(
-                        out_dir,
+                    _write_run_status(
+                        supervisor,
                         state="goal_completion_pending",
+                        current_step="poll.goal_completion_pending",
+                        require_documents=require_documents,
                         session_id=session_id,
                         matter_id=_safe_str(flow.matter_id),
                         wait_round=wait_round,
@@ -499,9 +613,10 @@ async def run(args: argparse.Namespace) -> int:
                         pending_card=pending,
                         analysis_view=analysis_view,
                         pricing_view=pricing_view,
+                        docgen_state=docgen_state,
                         seen_cards=len(flow.seen_cards),
                         seen_sse_rounds=len(flow.seen_sse),
-                        kickoff_output=kickoff_output,
+                        start_output=start_output,
                     )
                     break
                 if _is_intake_card(pending):
@@ -510,11 +625,18 @@ async def run(args: argparse.Namespace) -> int:
                         f"(session_id={session_id}, matter_id={flow.matter_id}, task_key={_safe_str(pending.get('task_key'))})"
                     )
 
-                readiness = _analysis_readiness(analysis_view, pricing_view)
+                readiness = _analysis_readiness(
+                    analysis_view,
+                    pricing_view,
+                    docgen_state,
+                    require_documents=require_documents,
+                )
                 ready = bool(readiness.get("ready"))
-                _write_live_status(
-                    out_dir,
+                _write_run_status(
+                    supervisor,
                     state="ready" if ready else "waiting_for_views",
+                    current_step="poll.analysis_readiness",
+                    require_documents=require_documents,
                     session_id=session_id,
                     matter_id=_safe_str(flow.matter_id),
                     wait_round=wait_round,
@@ -522,9 +644,10 @@ async def run(args: argparse.Namespace) -> int:
                     pending_card=pending,
                     analysis_view=analysis_view,
                     pricing_view=pricing_view,
+                    docgen_state=docgen_state,
                     seen_cards=len(flow.seen_cards),
                     seen_sse_rounds=len(flow.seen_sse),
-                    kickoff_output=kickoff_output,
+                    start_output=start_output,
                 )
                 if ready:
                     break
@@ -537,9 +660,11 @@ async def run(args: argparse.Namespace) -> int:
                     and reference_refresh_attempts < max(0, int(args.max_reference_refresh))
                 ):
                     reference_refresh_requests += 1
-                    sse = await flow.workflow_action(
-                        "references_refresh_partial",
+                    sse = await flow.request_documents(
+                        START_REQUESTED_DOCUMENTS,
                         max_loops=max(12, int(args.action_max_loops)),
+                        settle_mode="fire_and_poll",
+                        label="case_analysis_report_refresh",
                     )
                     busy = _is_session_busy_sse(sse if isinstance(sse, dict) else {})
                     if not busy:
@@ -558,20 +683,20 @@ async def run(args: argparse.Namespace) -> int:
                     continue
 
                 print(
-                    f"[flow-progress] waiting:analysis view + pricing plan ready step={step_no}/{max_total_steps} "
+                    f"[flow-progress] waiting:analysis readiness step={step_no}/{max_total_steps} "
                     f"stall={stall_rounds}/{max_no_progress_steps} session={session_id} matter={flow.matter_id} status=active",
                     flush=True,
                 )
                 if stall_rounds >= max_no_progress_steps:
                     raise AssertionError(
-                        "Failed to reach analysis view + pricing plan ready after "
+                        "Failed to reach analysis readiness after "
                         f"{max_no_progress_steps} consecutive no-progress polling rounds "
                         f"(total_steps={step_no}, session_id={session_id}, matter_id={flow.matter_id})"
                     )
                 await flow.step(stop_on_pending_card=is_goal_completion_card)
             else:
                 raise AssertionError(
-                    "Failed to reach analysis view + pricing plan ready within the total polling budget "
+                    "Failed to reach analysis readiness within the total polling budget "
                     f"(total_steps={max_total_steps}, max_no_progress_steps={max_no_progress_steps}, "
                     f"session_id={session_id}, matter_id={flow.matter_id})"
                 )
@@ -601,9 +726,11 @@ async def run(args: argparse.Namespace) -> int:
                 ),
                 "debug_refs": debug_refs,
             }
-            _write_live_status(
-                out_dir,
+            _write_run_status(
+                supervisor,
                 state="failed",
+                current_step="terminal.failed",
+                require_documents=require_documents,
                 session_id=session_id,
                 matter_id=_safe_str(flow.matter_id),
                 wait_round=wait_round,
@@ -611,10 +738,11 @@ async def run(args: argparse.Namespace) -> int:
                 pending_card=await flow.get_pending_card(),
                 analysis_view=_extract_analysis_view(fail_snapshot if isinstance(fail_snapshot, dict) else {}),
                 pricing_view=_extract_pricing_view(fail_snapshot if isinstance(fail_snapshot, dict) else {}),
+                docgen_state=_extract_document_generation_state(fail_snapshot if isinstance(fail_snapshot, dict) else {}),
                 seen_cards=len(flow.seen_cards),
                 seen_sse_rounds=len(flow.seen_sse),
                 error=str(exc),
-                kickoff_output=kickoff_output,
+                start_output=start_output,
             )
             fallback_summary = _fallback_failure_summary(
                 session_id=session_id,
@@ -657,10 +785,25 @@ async def run(args: argparse.Namespace) -> int:
         snapshot = await fetch_workbench_snapshot(client, final_matter_id) or {}
         analysis_view = _extract_analysis_view(snapshot)
         pricing_view = _extract_pricing_view(snapshot)
-        risk_assessment = analysis_view.get("risk_assessment") if isinstance(analysis_view.get("risk_assessment"), dict) else {}
-        key_risks = risk_assessment.get("key_risks") if isinstance(risk_assessment.get("key_risks"), list) else []
+        docgen_state = _extract_document_generation_state(snapshot)
+        issue_items = _section_items(analysis_view, "issues")
+        risk_items = _section_items(analysis_view, "risks")
+        strategy_items = _section_items(analysis_view, "strategy_matrix")
         pending_card = await flow.get_pending_card()
         messages = await list_session_messages(client, session_id)
+        deliverables = await list_deliverables(client, final_matter_id)
+        if require_documents:
+            docgen_status = _safe_str(docgen_state.get("status")).lower()
+            if not _docgen_terminal(docgen_state):
+                raise AssertionError(
+                    "Document generation did not reach terminal state for document-requesting analysis flow "
+                    f"(session_id={session_id}, matter_id={final_matter_id}, status={docgen_status or '<empty>'})"
+                )
+            if not deliverables and docgen_status not in {"repair_blocked", "review_pending", "blocked", "failed"}:
+                raise AssertionError(
+                    "Document-requesting analysis flow reached terminal state without public deliverables "
+                    f"(session_id={session_id}, matter_id={final_matter_id}, status={docgen_status or '<empty>'})"
+                )
         bundle_export = export_observability_bundle(
             repo_root=REPO_ROOT,
             session_id=session_id,
@@ -694,8 +837,8 @@ async def run(args: argparse.Namespace) -> int:
             pending_card=pending_card,
             snapshot=snapshot,
             current_view=analysis_view,
-            aux_views={"pricing_view": pricing_view},
-            deliverables={},
+            aux_views={"pricing_view": pricing_view, "document_generation_state": docgen_state},
+            deliverables=deliverables,
             deliverable_text="",
             deliverable_status=_safe_str(pricing_view.get("status")),
             observability=observability,
@@ -708,17 +851,22 @@ async def run(args: argparse.Namespace) -> int:
             "session_id": session_id,
             "matter_id": final_matter_id,
             "uploaded_file_ids": uploaded_file_ids,
-            "kickoff_event_counts": kickoff_counts,
+            "start_event_counts": start_counts,
             "analysis_view": {
                 "summary_len": len(_safe_str(analysis_view.get("summary"))),
-                "issues_count": len(analysis_view.get("issues")) if isinstance(analysis_view.get("issues"), list) else 0,
-                "strategy_options_count": len(analysis_view.get("strategy_options")) if isinstance(analysis_view.get("strategy_options"), list) else 0,
-                "risk_count": len(key_risks),
+                "issues_count": len(issue_items),
+                "strategy_options_count": len(strategy_items),
+                "risk_count": len(risk_items),
             },
             "pricing_plan_view": {
                 "status": _safe_str(pricing_view.get("status")),
                 "reviewed": bool(pricing_view.get("reviewed")),
                 "pricing_mode": _safe_str(pricing_view.get("pricing_mode")),
+            },
+            "document_generation_state": docgen_state,
+            "deliverables": {
+                "count": len(deliverables),
+                "keys": sorted(list(deliverables.keys())),
             },
             "pending_card": {
                 "skill_id": _safe_str((pending_card or {}).get("skill_id")),
@@ -733,9 +881,11 @@ async def run(args: argparse.Namespace) -> int:
             "flow_scores": flow_scores,
         }
 
-        _write_live_status(
-            out_dir,
+        _write_run_status(
+            supervisor,
             state="completed",
+            current_step="terminal.completed",
+            require_documents=require_documents,
             session_id=session_id,
             matter_id=final_matter_id,
             wait_round=wait_round,
@@ -743,9 +893,10 @@ async def run(args: argparse.Namespace) -> int:
             pending_card=pending_card,
             analysis_view=analysis_view,
             pricing_view=pricing_view,
+            docgen_state=docgen_state,
             seen_cards=len(flow.seen_cards),
             seen_sse_rounds=len(flow.seen_sse),
-            kickoff_output=kickoff_output,
+            start_output=start_output,
         )
 
         write_json(out_dir / "summary.json", summary)
@@ -754,6 +905,9 @@ async def run(args: argparse.Namespace) -> int:
         write_json(out_dir / "snapshot.json", snapshot)
         write_json(out_dir / "analysis_view.json", analysis_view)
         write_json(out_dir / "pricing_plan_view.json", pricing_view)
+        write_json(out_dir / "document_generation_state.json", docgen_state)
+        write_json(out_dir / "deliverables.json", {"deliverables": deliverables})
+        write_json(out_dir / "deliverables.latest.json", {"deliverables": deliverables})
         write_json(out_dir / "messages.json", {"messages": messages})
         write_json(out_dir / "diagnostics_summary.json", debug_refs.get("diagnostics_summary") if isinstance(debug_refs.get("diagnostics_summary"), dict) else {})
         write_json(out_dir / "diagnostics_events.json", {"events": debug_refs.get("diagnostics_events") if isinstance(debug_refs.get("diagnostics_events"), list) else []})
@@ -777,17 +931,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--direct-is-superuser", default="", help="Optional direct service mode superuser flag")
     parser.add_argument("--username", default="", help="Lawyer username")
     parser.add_argument("--password", default="", help="Lawyer password")
-    parser.add_argument("--kickoff", default=DEFAULT_KICKOFF, help="Initial user query")
-    parser.add_argument("--kickoff-max-loops", type=int, default=24, help="kickoff max_loops")
     parser.add_argument(
         "--max-steps",
         type=int,
         default=220,
         help="Maximum consecutive no-progress polling rounds before failing",
     )
-    parser.add_argument("--action-max-loops", type=int, default=12, help="workflow_action max_loops")
+    parser.add_argument("--action-max-loops", type=int, default=24, help="requested_documents max_loops")
     parser.add_argument("--max-reference-refresh", type=int, default=2, help="Maximum references_refresh_partial attempts")
-    parser.add_argument("--cards-only", action="store_true", default=False, help="Kickoff once, then only poll and answer cards")
+    parser.add_argument("--cards-only", action="store_true", default=False, help="Start analysis once, then only poll and answer cards")
     parser.add_argument("--output-dir", default="", help="Artifacts output directory")
     return parser.parse_args()
 

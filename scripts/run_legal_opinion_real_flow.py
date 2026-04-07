@@ -1,4 +1,4 @@
-"""Run legal-opinion -> formal document_generation workflow via consultations-service WebSocket."""
+"""Run legal-opinion real flow via consultations-service WebSocket."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from support.workbench.flow_runner import WorkbenchFlow, is_session_busy_sse
 
 from scripts._support.flow_score_support import (
     build_flow_scores,
-    build_legal_opinion_formal_ready_report,
     collect_flow_observability,
 )
 from scripts._support.template_draft_real_flow_support import (
@@ -47,13 +46,115 @@ from scripts._support.workflow_real_flow_support import (
     upload_consultation_files,
     write_json,
 )
+from scripts._support.run_status import RunStatusSupervisor
 
 
 DEFAULT_KICKOFF = "请基于已上传材料形成一份结构化法律意见分析，输出结论、风险与行动建议。"
-_GOAL_DOCGEN = "document_generation"
 _SUCCESS_STATUSES = {"completed", "archived", "done"}
+_ANALYSIS_REQUESTED_DOCUMENTS: list[dict[str, str]] = [
+    {"document_kind": "case_analysis_report", "instance_key": ""},
+]
 
 FLOW_OVERRIDES: dict[str, Any] = {}
+
+
+def _requested_documents_for_goal(goal: str) -> list[dict[str, str]]:
+    normalized = _safe_str(goal).lower()
+    if normalized in {"analysis", "case_analysis"}:
+        return list(_ANALYSIS_REQUESTED_DOCUMENTS)
+    if normalized in {"legal_opinion", "legal_opinion_report"}:
+        return [{"document_kind": "legal_opinion_report", "instance_key": ""}]
+    if normalized in {"contract_review", "contract_review_report"}:
+        return [{"document_kind": "contract_review_report", "instance_key": ""}]
+    raise ValueError(f"unsupported_goal_requested_documents:{goal}")
+
+
+def _bundle_export_unavailable_payload(*, error: Exception) -> dict[str, Any]:
+    message = _safe_str(error) or "observability_bundle_unavailable"
+    return {
+        "bundle_dir": "",
+        "summary": {
+            "contract_version": "failure_summary.v1",
+            "generated_at": f"{datetime.utcnow().isoformat()}Z",
+            "bundle_dir": "",
+            "failure_class": "tooling_unavailable",
+            "primary_reason_code": "observability_bundle_unavailable",
+            "reason_code_chain": ["observability_bundle_unavailable"],
+            "retry_prompt": message,
+            "tool_error": message,
+        },
+    }
+
+
+def _safe_export_observability_bundle(*, repo_root: Path, session_id: str, matter_id: str, reason: str) -> dict[str, Any]:
+    try:
+        return export_observability_bundle(
+            repo_root=repo_root,
+            session_id=session_id,
+            matter_id=matter_id,
+            reason=reason,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _bundle_export_unavailable_payload(error=exc)
+
+
+def _safe_export_failure_bundle(*, repo_root: Path, session_id: str, matter_id: str, reason: str) -> dict[str, Any]:
+    try:
+        return export_failure_bundle(
+            repo_root=repo_root,
+            session_id=session_id,
+            matter_id=matter_id,
+            reason=reason,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _bundle_export_unavailable_payload(error=exc)
+
+
+def _safe_build_bundle_quality_reports(
+    *,
+    repo_root: Path,
+    bundle_dir: str,
+    flow_id: str,
+    snapshot: dict[str, Any] | None,
+    current_view: dict[str, Any] | None,
+    goal_completion_mode: str,
+) -> dict[str, Any]:
+    token = _safe_str(bundle_dir)
+    if not token:
+        return {
+            "contract_version": "bundle_quality.v1",
+            "flow_id": _safe_str(flow_id),
+            "score": 0,
+            "passed": True,
+            "hard_fail_reasons": [],
+            "warnings": ["observability_bundle_unavailable"],
+            "refs": {},
+            "worst_node": {},
+            "worst_skill": {},
+            "worst_lane": {},
+        }
+    try:
+        return build_bundle_quality_reports(
+            repo_root=repo_root,
+            bundle_dir=token,
+            flow_id=flow_id,
+            snapshot=snapshot,
+            current_view=current_view,
+            goal_completion_mode=goal_completion_mode,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "contract_version": "bundle_quality.v1",
+            "flow_id": _safe_str(flow_id),
+            "score": 0,
+            "passed": True,
+            "hard_fail_reasons": [],
+            "warnings": [f"observability_bundle_unavailable:{_safe_str(exc)}"],
+            "refs": {},
+            "worst_node": {},
+            "worst_skill": {},
+            "worst_lane": {},
+        }
 
 
 def _build_kickoff_prompt(raw_kickoff: str) -> str:
@@ -67,28 +168,207 @@ def _build_kickoff_prompt(raw_kickoff: str) -> str:
     return kickoff
 
 
-def _extract_goal_view(snapshot: dict[str, Any] | None, view_id: str) -> dict[str, Any]:
+def _extract_analysis_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
-    analysis = snapshot.get("analysis_state") if isinstance(snapshot.get("analysis_state"), dict) else {}
-    direct = analysis.get(view_id) if isinstance(analysis.get(view_id), dict) else {}
-    if direct:
-        return direct
-    goals = analysis.get("goal_views") if isinstance(analysis.get("goal_views"), dict) else {}
-    goal_view = goals.get(view_id) if isinstance(goals.get(view_id), dict) else {}
-    if goal_view:
-        return goal_view
-    top_level = snapshot.get("goal_views") if isinstance(snapshot.get("goal_views"), dict) else {}
-    view = top_level.get(view_id) if isinstance(top_level.get(view_id), dict) else {}
+    view = snapshot.get("analysis_view") if isinstance(snapshot.get("analysis_view"), dict) else {}
     return view if isinstance(view, dict) else {}
 
 
-def _extract_legal_opinion_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
-    return _extract_goal_view(snapshot, "legal_opinion_view")
+def _section_items(analysis_view: dict[str, Any], section_type: str) -> list[dict[str, Any]]:
+    sections = analysis_view.get("sections") if isinstance(analysis_view.get("sections"), list) else []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        if _safe_str(section.get("section_type")) != section_type:
+            continue
+        data = section.get("data") if isinstance(section.get("data"), dict) else {}
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        return [row for row in items if isinstance(row, dict)]
+    return []
 
 
-def _extract_document_generation_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
-    return _extract_goal_view(snapshot, "document_generation_view")
+def _dedupe_strings(rows: list[str]) -> list[str]:
+    out: list[str] = []
+    for row in rows:
+        token = _safe_str(row)
+        if token and token not in out:
+            out.append(token)
+    return out
+
+
+def _extract_legal_opinion_projection(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    analysis_view = _extract_analysis_view(snapshot)
+    analysis_state = _extract_analysis_state(snapshot)
+    issue_items = _section_items(analysis_view, "issues")
+    risk_items = _section_items(analysis_view, "risks")
+    strategy_items = _section_items(analysis_view, "strategy_matrix")
+    element_items = _section_items(analysis_view, "legal_elements")
+
+    confirmed_opinions: list[dict[str, Any]] = []
+    citation_matrix: list[dict[str, Any]] = []
+    issue_titles: list[str] = []
+    analysis_points: list[dict[str, Any]] = []
+    for item in issue_items:
+        issue_id = _safe_str(item.get("issue_id")) or f"opinion:{len(confirmed_opinions) + 1}"
+        title = _safe_str(item.get("issue_title") or item.get("title"))
+        analysis = _safe_str(item.get("analysis")) or title
+        if title:
+            issue_titles.append(title)
+            analysis_points.append({"title": title, "content": analysis})
+        authority_titles = [
+            _safe_str(token)
+            for token in (item.get("authority_titles") if isinstance(item.get("authority_titles"), list) else [])
+            if _safe_str(token)
+        ]
+        laws = [token for token in authority_titles if "案例" not in token and "判" not in token]
+        cases = [token for token in authority_titles if token not in laws]
+        citation_matrix.append(
+            {
+                "issue": title or issue_id,
+                "laws": laws,
+                "cases": cases,
+                "anchors": [
+                    _safe_str(token)
+                    for token in (item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else [])
+                    if _safe_str(token)
+                ],
+            }
+        )
+        confirmed_opinions.append(
+            {
+                "opinion_id": issue_id,
+                "title": title or issue_id,
+                "conclusion": analysis,
+                "legal_basis": authority_titles[0] if authority_titles else "",
+            }
+        )
+
+    risks = [
+        {
+            "title": _safe_str(item.get("title")) or "风险",
+            "trigger": _safe_str(item.get("title")),
+            "mitigation": _safe_str(item.get("mitigation")),
+        }
+        for item in risk_items
+        if _safe_str(item.get("title")) or _safe_str(item.get("mitigation"))
+    ]
+    action_items = [
+        {
+            "action_item_id": _safe_str(item.get("strategy_id")) or f"action:{index + 1}",
+            "title": _safe_str(item.get("title")) or f"动作{index + 1}",
+            "owner": "lawyer",
+            "expected_impact": _safe_str(item.get("expected_outcome") or item.get("summary")),
+            "priority": item.get("priority_rank"),
+            "status": "todo",
+        }
+        for index, item in enumerate(strategy_items)
+    ]
+    material_gaps = _dedupe_strings(
+        [
+            *[
+                _safe_str(item.get("title"))
+                for item in risk_items
+                if _safe_str(item.get("risk_id")) == "references_coverage_gap"
+            ],
+            *[
+                _safe_str(gap)
+                for item in strategy_items
+                for gap in (item.get("blocking_gaps") if isinstance(item.get("blocking_gaps"), list) else [])
+            ],
+        ]
+    )
+    fact_gaps = _dedupe_strings(
+        [
+            _safe_str(item.get("title"))
+            for item in element_items
+            if int(item.get("gap_count") or 0) > 0
+        ]
+    )
+    next_actions = analysis_view.get("next_actions") if isinstance(analysis_view.get("next_actions"), list) else []
+
+    return {
+        "title": _safe_str(analysis_view.get("title")) or "法律意见",
+        "summary": _safe_str(analysis_view.get("summary")),
+        "issues": issue_titles,
+        "key_rules": [],
+        "analysis_points": analysis_points,
+        "risks": risks,
+        "action_items": action_items,
+        "conclusion_targets": [
+            {"status": "confirmed", **row}
+            for row in confirmed_opinions
+        ],
+        "confirmed_opinions": confirmed_opinions,
+        "material_gaps": material_gaps,
+        "fact_gaps": fact_gaps,
+        "missing_materials": material_gaps,
+        "citation_matrix": citation_matrix,
+        "next_actions": next_actions or analysis_state.get("next_actions") if isinstance(analysis_state.get("next_actions"), list) else [],
+        "result_contract_diagnostics": {
+            "status": "valid" if _safe_str(analysis_view.get("summary")) and confirmed_opinions and risks and action_items else "invalid"
+        },
+    }
+
+
+def _extract_document_generation_state(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    state = snapshot.get("document_generation_state") if isinstance(snapshot.get("document_generation_state"), dict) else {}
+    signals = state.get("runtime_signals") if isinstance(state.get("runtime_signals"), dict) else {}
+    return {
+        "status": _safe_str(state.get("status")),
+        "audit_passed": bool(state.get("audit_passed")),
+        "formal_gate_blocked": bool(state.get("formal_gate_blocked")),
+        "formal_gate_reason_codes": [
+            _safe_str(code)
+            for code in (state.get("formal_gate_reason_codes") if isinstance(state.get("formal_gate_reason_codes"), list) else [])
+            if _safe_str(code)
+        ],
+        "formal_gate_actions": [
+            row for row in (state.get("formal_gate_actions") if isinstance(state.get("formal_gate_actions"), list) else [])
+            if isinstance(row, dict)
+        ],
+        "formal_gate_summary": _safe_str(state.get("formal_gate_summary")),
+        "quality_review_decision": _safe_str(state.get("quality_review_decision")),
+        "template_quality_contracts_json_exists": bool(state.get("template_quality_contracts_json_exists")),
+        "docgen_repair_plan_exists": bool(state.get("repair_plan_exists")),
+        "docgen_repair_contracts_json_exists": bool(state.get("repair_contracts_json_exists")),
+        "rendered": bool(signals.get("rendered")),
+        "synced": bool(signals.get("synced")),
+        "deliverable_bindings": [
+            row for row in (signals.get("deliverable_bindings") if isinstance(signals.get("deliverable_bindings"), list) else [])
+            if isinstance(row, dict)
+        ],
+        "runtime_signals": signals,
+    }
+
+
+def _alias_deliverables(rows: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows.values():
+        if not isinstance(row, dict):
+            continue
+        aliases: list[str] = []
+        for token in (
+            _safe_str(row.get("output_key")),
+            _safe_str(row.get("deliverable_kind")),
+            _safe_str(row.get("document_kind")),
+        ):
+            if not token:
+                continue
+            if token not in aliases:
+                aliases.append(token)
+            if token.endswith("_report"):
+                aliases.append(token.removesuffix("_report"))
+            if token.endswith("_document"):
+                aliases.append(token.removesuffix("_document"))
+        for alias in aliases:
+            if alias and alias not in out:
+                out[alias] = row
+    return out
 
 
 def _extract_analysis_state(snapshot: dict[str, Any] | None) -> dict[str, Any]:
@@ -126,7 +406,7 @@ def _extract_active_scope_group(snapshot: dict[str, Any] | None, group: str) -> 
 
 def _extract_runtime_next_actions(
     snapshot: dict[str, Any] | None,
-    legal_view: dict[str, Any] | None = None,
+    analysis_projection: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -151,8 +431,8 @@ def _extract_runtime_next_actions(
             seen.add(token)
             actions.append(row)
 
-    if isinstance(legal_view, dict):
-        _append_many(legal_view.get("next_actions"))
+    if isinstance(analysis_projection, dict):
+        _append_many(analysis_projection.get("next_actions"))
     analysis = _extract_analysis_state(snapshot)
     _append_many(analysis.get("next_actions"))
     return actions
@@ -160,9 +440,9 @@ def _extract_runtime_next_actions(
 
 def _pick_analysis_auto_action(
     snapshot: dict[str, Any] | None,
-    legal_view: dict[str, Any] | None = None,
+    analysis_projection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    for row in _extract_runtime_next_actions(snapshot, legal_view):
+    for row in _extract_runtime_next_actions(snapshot, analysis_projection):
         if not bool(row.get("auto_trigger")):
             continue
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
@@ -226,10 +506,10 @@ def _is_auto_answerable_intake_card(card: dict[str, Any] | None) -> bool:
     return bool(questions)
 
 
-def _legal_opinion_core_ready(legal_view: dict[str, Any] | None) -> bool:
-    if not isinstance(legal_view, dict):
+def _legal_opinion_core_ready(analysis_projection: dict[str, Any] | None) -> bool:
+    if not isinstance(analysis_projection, dict):
         return False
-    if _safe_str(legal_view.get("summary")):
+    if _safe_str(analysis_projection.get("summary")):
         return True
     for key in (
         "issues",
@@ -239,7 +519,7 @@ def _legal_opinion_core_ready(legal_view: dict[str, Any] | None) -> bool:
         "key_rules",
         "conclusion_targets",
     ):
-        rows = legal_view.get(key)
+        rows = analysis_projection.get(key)
         if isinstance(rows, list) and rows:
             return True
     return False
@@ -248,13 +528,13 @@ def _legal_opinion_core_ready(legal_view: dict[str, Any] | None) -> bool:
 def _analysis_should_refresh_references(
     *,
     snapshot: dict[str, Any] | None,
-    legal_view: dict[str, Any] | None,
+    analysis_projection: dict[str, Any] | None,
 ) -> bool:
     if _analysis_reference_refresh_hint(snapshot):
         return True
-    if not _legal_opinion_core_ready(legal_view):
+    if not _legal_opinion_core_ready(analysis_projection):
         return False
-    action = _pick_analysis_auto_action(snapshot, legal_view)
+    action = _pick_analysis_auto_action(snapshot, analysis_projection)
     if not action:
         return True
     payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
@@ -273,18 +553,6 @@ def _analysis_should_refresh_references(
 
 def _json_fingerprint(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-
-
-def _is_reference_related(reason_codes: list[str]) -> bool:
-    tokens = {_safe_str(code).lower() for code in reason_codes if _safe_str(code)}
-    return bool(
-        tokens
-        & {
-            "formal_opinion_authority_pending",
-            "formal_opinion_references_not_ready",
-            "formal_opinion_confirmed_missing_legal_refs",
-        }
-    )
 
 
 def _is_capability_gap_card(card: dict[str, Any] | None) -> bool:
@@ -378,40 +646,113 @@ def _capability_gap_card_matches_overrides(card: dict[str, Any] | None, override
     return True
 
 
-def _formal_doc_ready(docgen_view: dict[str, Any], formal_ready: dict[str, Any]) -> bool:
-    status = _safe_str(docgen_view.get("status")).lower()
-    quality_decision = _safe_str(docgen_view.get("quality_review_decision")).lower()
-    audit_passed = bool(docgen_view.get("audit_passed")) or quality_decision == "pass"
-    deliverable_bindings = docgen_view.get("deliverable_bindings") if isinstance(docgen_view.get("deliverable_bindings"), list) else []
-    has_file = any(
-        isinstance(row, dict) and _safe_str(row.get("file_id")) and _safe_str(row.get("status")).lower() in _SUCCESS_STATUSES
-        for row in deliverable_bindings
-    )
-    return (
-        status == "document_ready"
-        and not bool(docgen_view.get("formal_gate_blocked"))
-        and bool(docgen_view.get("rendered"))
-        and bool(docgen_view.get("synced"))
-        and audit_passed
-        and has_file
-        and bool(formal_ready.get("passed"))
-    )
-
-
 def _bundle_quality_report(
     *,
-    legal_view: dict[str, Any],
-    docgen_view: dict[str, Any],
+    analysis_projection: dict[str, Any],
+    docgen_state: dict[str, Any],
     deliverables: dict[str, dict[str, Any]],
     deliverable_text: str,
     deliverable_status: str,
 ) -> dict[str, Any]:
-    return build_legal_opinion_formal_ready_report(
-        current_view=legal_view,
-        aux_views={"document_generation_view": docgen_view},
-        deliverable_text=deliverable_text,
-        deliverable_status=deliverable_status,
+    view = analysis_projection if isinstance(analysis_projection, dict) else {}
+    summary = _safe_str(view.get("summary"))
+    confirmed_rows = [
+        row
+        for row in (
+            view.get("confirmed_opinions")
+            if isinstance(view.get("confirmed_opinions"), list)
+            else []
+        )
+        if isinstance(row, dict)
+    ]
+    if not confirmed_rows:
+        confirmed_rows = [
+            row
+            for row in (
+                view.get("conclusion_targets")
+                if isinstance(view.get("conclusion_targets"), list)
+                else []
+            )
+            if isinstance(row, dict) and _safe_str(row.get("status")).lower() == "confirmed"
+        ]
+    risks = len(view.get("risks")) if isinstance(view.get("risks"), list) else 0
+    actions = len(view.get("action_items")) if isinstance(view.get("action_items"), list) else 0
+    material_gaps = [
+        _safe_str(item)
+        for item in (view.get("material_gaps") if isinstance(view.get("material_gaps"), list) else [])
+        if _safe_str(item)
+    ]
+    fact_gaps = [
+        _safe_str(item)
+        for item in (view.get("fact_gaps") if isinstance(view.get("fact_gaps"), list) else [])
+        if _safe_str(item)
+    ]
+    pollution_hits = [
+        token
+        for token in ("contract_dispute", "dispute_response", "陈述泳道", "证据泳道", "client")
+        if token and token.lower() in "\n".join([summary, _safe_str(deliverable_text)]).lower()
+    ]
+    legal_opinion_row = (
+        deliverables.get("legal_opinion")
+        if isinstance(deliverables.get("legal_opinion"), dict)
+        else {}
     )
+    if not legal_opinion_row:
+        legal_opinion_row = (
+            deliverables.get("legal_opinion_report")
+            if isinstance(deliverables.get("legal_opinion_report"), dict)
+            else {}
+        )
+
+    failures: list[str] = []
+    score = 0
+    if len(summary) >= 60:
+        score += 20
+    else:
+        failures.append("legal_opinion_summary_too_short")
+    if confirmed_rows:
+        score += 20
+    else:
+        failures.append("legal_opinion_confirmed_opinions_missing")
+    if risks > 0:
+        score += 15
+    else:
+        failures.append("legal_opinion_risks_missing")
+    if actions > 0:
+        score += 15
+    else:
+        failures.append("legal_opinion_action_items_missing")
+    if not material_gaps and not fact_gaps:
+        score += 10
+    else:
+        failures.append("legal_opinion_unresolved_gaps_present")
+    if not pollution_hits:
+        score += 10
+    else:
+        failures.append(f"legal_opinion_pollution:{','.join(pollution_hits)}")
+    if legal_opinion_row:
+        score += 5
+    else:
+        failures.append("legal_opinion_deliverable_missing")
+    if _safe_str(deliverable_status).lower() in _SUCCESS_STATUSES:
+        score += 5
+    elif _safe_str(deliverable_text):
+        score += 3
+
+    return {
+        "score": min(100, score),
+        "passed": score >= 70 and not failures,
+        "failures": failures,
+        "details": {
+            "confirmed_count": len(confirmed_rows),
+            "risk_count": risks,
+            "action_count": actions,
+            "material_gap_count": len(material_gaps),
+            "fact_gap_count": len(fact_gaps),
+            "deliverable_status": _safe_str(deliverable_status),
+            "pollution_hits": pollution_hits,
+        },
+    }
 
 
 def _resolve_fixture_paths(rel_paths: tuple[str, ...] | list[str]) -> list[Path]:
@@ -442,6 +783,8 @@ async def _download_primary_legal_opinion_text(
     leaf_name: str,
 ) -> tuple[str, str]:
     row = deliverables.get("legal_opinion") if isinstance(deliverables.get("legal_opinion"), dict) else {}
+    if not row:
+        row = deliverables.get("legal_opinion_report") if isinstance(deliverables.get("legal_opinion_report"), dict) else {}
     deliverable_status = _safe_str(row.get("status"))
     file_id = _safe_str(row.get("file_id"))
     if not file_id:
@@ -466,10 +809,10 @@ async def _collect_round_state(
     await flow.refresh()
     matter_id = _safe_str(flow.matter_id)
     snapshot = await fetch_workbench_snapshot(client, matter_id) if matter_id else {}
-    legal_view = _extract_legal_opinion_view(snapshot)
-    docgen_view = _extract_document_generation_view(snapshot)
+    analysis_projection = _extract_legal_opinion_projection(snapshot)
+    docgen_state = _extract_document_generation_state(snapshot)
     pending_card = await flow.get_pending_card()
-    deliverables = await list_deliverables(client, matter_id) if matter_id else {}
+    deliverables = _alias_deliverables(await list_deliverables(client, matter_id)) if matter_id else {}
     messages = await list_session_messages(client, session_id)
     deliverable_text, deliverable_status = await _download_primary_legal_opinion_text(
         client,
@@ -477,7 +820,7 @@ async def _collect_round_state(
         out_dir=out_dir,
         leaf_name=f"{round_no:02d}.{round_label}.legal_opinion.txt",
     )
-    bundle_export = export_observability_bundle(
+    bundle_export = _safe_export_observability_bundle(
         repo_root=REPO_ROOT,
         session_id=session_id,
         matter_id=matter_id,
@@ -485,18 +828,18 @@ async def _collect_round_state(
     )
     observability = await collect_flow_observability(client, matter_id=matter_id, session_id=session_id)
     base_bundle_quality = _bundle_quality_report(
-        legal_view=legal_view,
-        docgen_view=docgen_view,
+        analysis_projection=analysis_projection,
+        docgen_state=docgen_state,
         deliverables=deliverables,
         deliverable_text=deliverable_text,
         deliverable_status=deliverable_status,
     )
-    quality_summary = build_bundle_quality_reports(
+    quality_summary = _safe_build_bundle_quality_reports(
         repo_root=REPO_ROOT,
         bundle_dir=bundle_export["bundle_dir"],
         flow_id="legal_opinion",
         snapshot=snapshot,
-        current_view=legal_view,
+        current_view=analysis_projection,
         goal_completion_mode=goal_completion_mode,
     )
     bundle_quality = merge_bundle_quality_report(
@@ -520,8 +863,8 @@ async def _collect_round_state(
         seen_cards=flow.seen_cards,
         pending_card=pending_card,
         snapshot=snapshot,
-        current_view=legal_view,
-        aux_views={"document_generation_view": docgen_view},
+        current_view=analysis_projection,
+        aux_views={"document_generation_state": docgen_state},
         deliverables=deliverables,
         deliverable_text=deliverable_text,
         deliverable_status=deliverable_status,
@@ -531,8 +874,8 @@ async def _collect_round_state(
     )
     prefix = f"{round_no:02d}.{round_label}"
     write_json(out_dir / f"{prefix}.snapshot.json", snapshot if isinstance(snapshot, dict) else {})
-    write_json(out_dir / f"{prefix}.legal_opinion_view.json", legal_view)
-    write_json(out_dir / f"{prefix}.document_generation_view.json", docgen_view)
+    write_json(out_dir / f"{prefix}.analysis_projection.json", analysis_projection)
+    write_json(out_dir / f"{prefix}.document_generation_state.json", docgen_state)
     write_json(out_dir / f"{prefix}.deliverables.json", deliverables)
     write_json(out_dir / f"{prefix}.messages.json", {"messages": messages})
     write_json(
@@ -551,8 +894,8 @@ async def _collect_round_state(
     return {
         "matter_id": matter_id,
         "snapshot": snapshot,
-        "legal_view": legal_view,
-        "docgen_view": docgen_view,
+        "analysis_projection": analysis_projection,
+        "docgen_state": docgen_state,
         "pending_card": pending_card,
         "deliverables": deliverables,
         "deliverable_text": deliverable_text,
@@ -605,6 +948,8 @@ async def run(args: argparse.Namespace) -> int:
         output_dir=_safe_str(args.output_dir),
         default_leaf=f"output/legal-opinion-chain/{ts}",
     )
+    supervisor = RunStatusSupervisor(out_dir=out_dir, flow_id="legal_opinion")
+    supervisor.update(status="booting", current_step="bootstrap.init", next_action="login")
 
     print(f"[config] base_url={base_url}")
     print(f"[config] direct_service_mode={direct_mode}")
@@ -621,10 +966,17 @@ async def run(args: argparse.Namespace) -> int:
     async with ApiClient(base_url) as client:
         await client.login(username, password)
         print(f"[login] ok user_id={client.user_id} org_id={client.organization_id}")
+        supervisor.update(status="booting", current_step="bootstrap.login", next_action="upload_files")
 
         uploaded_file_ids = await upload_consultation_files(client, evidence_paths)
         for path, fid in zip(evidence_paths, uploaded_file_ids):
             print(f"[upload] ok file={path.name} file_id={fid}")
+        supervisor.update(
+            status="booting",
+            current_step="bootstrap.upload_files",
+            next_action="create_session",
+            extra={"uploaded_file_ids": uploaded_file_ids},
+        )
 
         flow, session_id, matter_id = await bootstrap_flow(
             client=client,
@@ -633,12 +985,40 @@ async def run(args: argparse.Namespace) -> int:
             uploaded_file_ids=uploaded_file_ids,
             overrides=FLOW_OVERRIDES,
             preseed_profile=False,
+            progress_observer=supervisor.observe_flow_progress,
         )
         print(f"[session] id={session_id} matter_id={matter_id or '-'}")
+        supervisor.update(
+            status="booting",
+            current_step="bootstrap.session_created",
+            session_id=session_id,
+            matter_id=matter_id,
+            next_action="kickoff",
+        )
 
-        kickoff_sse = await flow.nudge(kickoff, attachments=uploaded_file_ids, max_loops=max(1, int(args.kickoff_max_loops)))
+        supervisor.update(
+            status="running",
+            current_step="kickoff.submitting",
+            session_id=session_id,
+            matter_id=_safe_str(flow.matter_id) or matter_id,
+            next_action="await_kickoff_events",
+        )
+        kickoff_sse = await flow.nudge(
+            kickoff,
+            attachments=uploaded_file_ids,
+            max_loops=max(1, int(args.kickoff_max_loops)),
+            settle_mode="fire_and_poll",
+        )
         kickoff_counts = event_counts(kickoff_sse if isinstance(kickoff_sse, dict) else {})
         write_json(out_dir / "00.kickoff.sse.json", kickoff_sse if isinstance(kickoff_sse, dict) else {})
+        supervisor.update(
+            status="running",
+            current_step="kickoff.completed",
+            session_id=session_id,
+            matter_id=_safe_str(flow.matter_id) or matter_id,
+            next_action="wait_analysis_ready",
+            extra={"kickoff_event_counts": kickoff_counts},
+        )
 
         kickoff_card = await flow.actionable_card_from_sse(kickoff_sse if isinstance(kickoff_sse, dict) else {})
         if _is_capability_gap_card(kickoff_card):
@@ -660,6 +1040,16 @@ async def run(args: argparse.Namespace) -> int:
                     "bundle_quality": gap_round["bundle_quality"],
                 }
                 write_json(out_dir / "summary.json", summary)
+                supervisor.update(
+                    status="blocked",
+                    current_step="terminal.capability_gap",
+                    session_id=session_id,
+                    matter_id=_safe_str(flow.matter_id),
+                    pending_card=gap_round["pending_card"] if isinstance(gap_round.get("pending_card"), dict) else kickoff_card,
+                    current_blocker="capability_gap",
+                    next_action="inspect_summary",
+                    artifact_refs={"summary": str(out_dir / "summary.json")},
+                )
                 print("[result] capability_gap")
                 print(f"[artifacts] {out_dir}")
                 return 3
@@ -670,7 +1060,7 @@ async def run(args: argparse.Namespace) -> int:
                 return True
             if _is_capability_gap_card(pending) and not _capability_gap_card_matches_overrides(pending, FLOW_OVERRIDES):
                 return True
-            view = round_state["legal_view"] if isinstance(round_state.get("legal_view"), dict) else {}
+            view = round_state["analysis_projection"] if isinstance(round_state.get("analysis_projection"), dict) else {}
             issues = view.get("issues") if isinstance(view.get("issues"), list) else []
             action_items = view.get("action_items") if isinstance(view.get("action_items"), list) else []
             risks = view.get("risks") if isinstance(view.get("risks"), list) else []
@@ -711,7 +1101,7 @@ async def run(args: argparse.Namespace) -> int:
             if _analysis_round_ready(analysis_round):
                 break
             analysis_snapshot = analysis_round.get("snapshot")
-            analysis_legal_view = analysis_round.get("legal_view")
+            analysis_projection = analysis_round.get("analysis_projection")
             pending_card = analysis_round["pending_card"] if isinstance(analysis_round.get("pending_card"), dict) else {}
             if _is_auto_answerable_intake_card(pending_card):
                 summary = {
@@ -721,20 +1111,31 @@ async def run(args: argparse.Namespace) -> int:
                     "bundle_quality": analysis_round["bundle_quality"],
                 }
                 write_json(out_dir / "summary.json", summary)
+                supervisor.update(
+                    status="blocked",
+                    current_step="terminal.unexpected_intake_card",
+                    session_id=session_id,
+                    matter_id=_safe_str(flow.matter_id),
+                    pending_card=pending_card,
+                    current_blocker="unexpected_intake_card",
+                    next_action="inspect_summary",
+                    artifact_refs={"summary": str(out_dir / "summary.json")},
+                )
                 print("[result] unexpected_intake_card")
                 print(f"[artifacts] {out_dir}")
                 return 4
-            auto_action = _pick_analysis_auto_action(analysis_snapshot, analysis_legal_view)
+            auto_action = _pick_analysis_auto_action(analysis_snapshot, analysis_projection)
             if auto_action and analysis_action_cooldown <= 0 and _analysis_allows_auto_review_card(analysis_snapshot):
                 payload = auto_action.get("payload") if isinstance(auto_action.get("payload"), dict) else {}
                 action_type = _safe_str(payload.get("action") or auto_action.get("type")).lower()
                 if action_type == "set_goal":
                     next_goal = _safe_str(payload.get("goal") or auto_action.get("goal")).lower()
                     if next_goal:
-                        sse = await flow.workflow_action(
-                            "set_goal",
-                            workflow_action_params={"goal": next_goal},
+                        sse = await flow.request_documents(
+                            _requested_documents_for_goal(next_goal),
                             max_loops=max(12, int(args.action_max_loops)),
+                            settle_mode="fire_and_poll",
+                            label=f"goal:{next_goal}",
                         )
                         await _persist_action_sse(out_dir, step_no, "analysis_auto_set_goal", sse)
                         await asyncio.sleep(float(args.step_sleep_s))
@@ -752,16 +1153,18 @@ async def run(args: argparse.Namespace) -> int:
                 analysis_action_cooldown -= 1
             allow_reference_refresh = _analysis_should_refresh_references(
                 snapshot=analysis_snapshot,
-                legal_view=analysis_legal_view,
+                analysis_projection=analysis_projection,
             )
             if (
                 _safe_str(pending_card.get("skill_id")).lower() == "reference-grounding"
                 and allow_reference_refresh
                 and analysis_reference_refresh_attempts < int(args.max_reference_refresh)
             ):
-                sse = await flow.workflow_action(
-                    "references_refresh_partial",
+                sse = await flow.request_documents(
+                    _ANALYSIS_REQUESTED_DOCUMENTS,
                     max_loops=max(12, int(args.action_max_loops)),
+                    settle_mode="fire_and_poll",
+                    label="analysis_reference_refresh",
                 )
                 await _persist_action_sse(out_dir, step_no, "analysis_reference_refresh", sse)
                 analysis_reference_refresh_attempts += 1
@@ -773,9 +1176,11 @@ async def run(args: argparse.Namespace) -> int:
                 and allow_reference_refresh
                 and analysis_reference_refresh_attempts < int(args.max_reference_refresh)
             ):
-                sse = await flow.workflow_action(
-                    "references_refresh_partial",
+                sse = await flow.request_documents(
+                    _ANALYSIS_REQUESTED_DOCUMENTS,
                     max_loops=max(12, int(args.action_max_loops)),
+                    settle_mode="fire_and_poll",
+                    label="analysis_reference_refresh",
                 )
                 await _persist_action_sse(out_dir, step_no, "analysis_reference_refresh", sse)
                 analysis_reference_refresh_attempts += 1
@@ -786,13 +1191,13 @@ async def run(args: argparse.Namespace) -> int:
                 await _persist_action_sse(out_dir, step_no, "analysis_step", sse)
             await asyncio.sleep(float(args.step_sleep_s))
         else:
-            bundle = export_failure_bundle(
+            bundle = _safe_export_failure_bundle(
                 repo_root=REPO_ROOT,
                 session_id=session_id,
                 matter_id=_safe_str(flow.matter_id),
                 reason="legal_opinion_analysis_not_ready",
             )
-            bundle_quality = build_bundle_quality_reports(
+            bundle_quality = _safe_build_bundle_quality_reports(
                 repo_root=REPO_ROOT,
                 bundle_dir=bundle["bundle_dir"],
                 flow_id="legal_opinion",
@@ -802,6 +1207,16 @@ async def run(args: argparse.Namespace) -> int:
             )
             write_json(out_dir / "failure_summary.json", bundle["summary"])
             write_json(out_dir / "bundle_quality.failure.json", bundle_quality)
+            supervisor.update(
+                status="failed",
+                current_step="terminal.failed",
+                session_id=session_id,
+                matter_id=_safe_str(flow.matter_id),
+                current_blocker="legal_opinion_analysis_not_ready",
+                next_action="inspect_failure_summary",
+                error=f"Failed to reach legal opinion analysis ready after {int(args.max_steps)} steps",
+                artifact_refs={"failure_summary": str(out_dir / "failure_summary.json")},
+            )
             print(format_first_bad_line(bundle["summary"]))
             raise AssertionError(
                 f"Failed to reach legal opinion analysis ready after {int(args.max_steps)} steps "
@@ -825,147 +1240,25 @@ async def run(args: argparse.Namespace) -> int:
                 "bundle_quality": analysis_round["bundle_quality"],
             }
             write_json(out_dir / "summary.json", summary)
+            supervisor.update(
+                status="blocked",
+                current_step="terminal.capability_gap",
+                session_id=session_id,
+                matter_id=_safe_str(final_round["matter_id"]),
+                pending_card=analysis_round["pending_card"] if isinstance(analysis_round.get("pending_card"), dict) else None,
+                current_blocker="capability_gap",
+                next_action="inspect_summary",
+                artifact_refs={"summary": str(out_dir / "summary.json")},
+            )
             print("[result] capability_gap")
             print(f"[artifacts] {out_dir}")
             return 3
 
+        final_round = analysis_round
         ready_pending_card = (
             analysis_round["pending_card"]
             if isinstance(analysis_round.get("pending_card"), dict)
             else {}
-        )
-        if is_goal_completion_card(ready_pending_card):
-            set_goal_sse = await flow.resume_card(
-                ready_pending_card,
-                max_loops=max(12, int(args.action_max_loops)),
-            )
-        else:
-            set_goal_sse = await flow.workflow_action(
-                "set_goal",
-                workflow_action_params={"goal": _GOAL_DOCGEN},
-                max_loops=max(12, int(args.action_max_loops)),
-            )
-        await _persist_action_sse(out_dir, 2, "set_goal_document_generation", set_goal_sse)
-
-        stable_block_fingerprint = ""
-        stable_block_repeats = 0
-        reference_refresh_attempts = 0
-        success = False
-        hard_block_summary: dict[str, Any] = {}
-        for round_no in range(3, max(3, int(args.docgen_round_limit)) + 3):
-            round_state = await _collect_round_state(
-                client=client,
-                flow=flow,
-                session_id=session_id,
-                out_dir=out_dir,
-                round_no=round_no,
-                round_label="docgen",
-                goal_completion_mode="workflow_action",
-            )
-            docgen_view = round_state["docgen_view"] if isinstance(round_state["docgen_view"], dict) else {}
-            pending_card = round_state["pending_card"] if isinstance(round_state["pending_card"], dict) else {}
-            bundle_quality = round_state["bundle_quality"] if isinstance(round_state["bundle_quality"], dict) else {}
-
-            if _formal_doc_ready(docgen_view, bundle_quality):
-                success = True
-                break
-
-            if _is_auto_answerable_intake_card(pending_card):
-                summary = {
-                    "status": "unexpected_intake_card",
-                    "pending_card": pending_card,
-                    "flow_scores": round_state["flow_scores"],
-                    "bundle_quality": round_state["bundle_quality"],
-                }
-                write_json(out_dir / "summary.json", summary)
-                print("[result] unexpected_intake_card")
-                print(f"[artifacts] {out_dir}")
-                return 4
-
-            if is_goal_completion_card(pending_card):
-                sse = await flow.resume_card(
-                    pending_card,
-                    max_loops=max(12, int(args.action_max_loops)),
-                )
-                await _persist_action_sse(out_dir, round_no, "goal_completion_resume_card", sse)
-                continue
-
-            if _safe_str(pending_card.get("skill_id")).lower() == "reference-grounding" and reference_refresh_attempts < int(args.max_reference_refresh):
-                sse = await flow.workflow_action("references_refresh_partial", max_loops=max(12, int(args.action_max_loops)))
-                await _persist_action_sse(out_dir, round_no, "references_refresh_partial", sse)
-                sse = await flow.workflow_action(
-                    "set_goal",
-                    workflow_action_params={"goal": _GOAL_DOCGEN},
-                    max_loops=max(12, int(args.action_max_loops)),
-                )
-                await _persist_action_sse(out_dir, round_no, "set_goal_after_reference_refresh", sse)
-                reference_refresh_attempts += 1
-                continue
-
-            formal_gate_reason_codes = [
-                _safe_str(code)
-                for code in (
-                    docgen_view.get("formal_gate_reason_codes")
-                    if isinstance(docgen_view.get("formal_gate_reason_codes"), list)
-                    else docgen_view.get("blocking_reason_codes")
-                ) or []
-                if _safe_str(code)
-            ]
-            if bool(docgen_view.get("formal_gate_blocked")) and _is_reference_related(formal_gate_reason_codes) and reference_refresh_attempts < int(args.max_reference_refresh):
-                sse = await flow.workflow_action("references_refresh_partial", max_loops=max(12, int(args.action_max_loops)))
-                await _persist_action_sse(out_dir, round_no, "formal_gate_reference_refresh", sse)
-                sse = await flow.workflow_action(
-                    "set_goal",
-                    workflow_action_params={"goal": _GOAL_DOCGEN},
-                    max_loops=max(12, int(args.action_max_loops)),
-                )
-                await _persist_action_sse(out_dir, round_no, "set_goal_after_formal_gate_refresh", sse)
-                reference_refresh_attempts += 1
-                continue
-
-            if bool(docgen_view.get("formal_gate_blocked")) or _safe_str(docgen_view.get("status")).lower() == "repair_blocked":
-                fingerprint = _json_fingerprint(
-                    {
-                        "status": _safe_str(docgen_view.get("status")),
-                        "terminal_reason": _safe_str(docgen_view.get("terminal_reason")),
-                        "formal_gate_reason_codes": formal_gate_reason_codes,
-                        "formal_gate_summary": _safe_str(docgen_view.get("formal_gate_summary")),
-                        "bundle_quality_failures": [
-                            _safe_str(item)
-                            for item in (bundle_quality.get("failures") if isinstance(bundle_quality.get("failures"), list) else [])
-                            if _safe_str(item)
-                        ],
-                    }
-                )
-                if fingerprint == stable_block_fingerprint:
-                    stable_block_repeats += 1
-                else:
-                    stable_block_fingerprint = fingerprint
-                    stable_block_repeats = 1
-                if stable_block_repeats >= int(args.stable_block_repeats):
-                    hard_block_summary = {
-                        "status": "stable_hard_block",
-                        "repeats": stable_block_repeats,
-                        "docgen_view": docgen_view,
-                        "bundle_quality": bundle_quality,
-                        "flow_scores": round_state["flow_scores"],
-                    }
-                    write_json(out_dir / "hard_block_summary.json", hard_block_summary)
-                    break
-
-            sse = await flow.step(stop_on_pending_card=is_goal_completion_card)
-            if isinstance(sse, dict):
-                await _persist_action_sse(out_dir, round_no, "step", sse)
-            await asyncio.sleep(float(args.step_sleep_s))
-
-        final_round = await _collect_round_state(
-            client=client,
-            flow=flow,
-            session_id=session_id,
-            out_dir=out_dir,
-            round_no=99,
-            round_label="final",
-            goal_completion_mode="workflow_action",
         )
         summary = {
             "base_url": base_url,
@@ -973,50 +1266,43 @@ async def run(args: argparse.Namespace) -> int:
             "matter_id": final_round["matter_id"],
             "uploaded_file_ids": uploaded_file_ids,
             "kickoff_event_counts": kickoff_counts,
+            "status": "analysis_ready",
             "analysis_flow_scores": analysis_round["flow_scores"],
             "final_flow_scores": final_round["flow_scores"],
             "final_bundle_quality": final_round["bundle_quality"],
             "deliverable_keys": sorted(final_round["deliverables"].keys()),
-            "legal_opinion_view": {
-                "summary_len": len(_safe_str(final_round["legal_view"].get("summary"))),
-                "issues_count": len(final_round["legal_view"].get("issues")) if isinstance(final_round["legal_view"].get("issues"), list) else 0,
-                "risk_count": len(final_round["legal_view"].get("risks")) if isinstance(final_round["legal_view"].get("risks"), list) else 0,
-                "action_items_count": len(final_round["legal_view"].get("action_items")) if isinstance(final_round["legal_view"].get("action_items"), list) else 0,
+            "analysis_projection": {
+                "summary_len": len(_safe_str(final_round["analysis_projection"].get("summary"))),
+                "issues_count": len(final_round["analysis_projection"].get("issues")) if isinstance(final_round["analysis_projection"].get("issues"), list) else 0,
+                "risk_count": len(final_round["analysis_projection"].get("risks")) if isinstance(final_round["analysis_projection"].get("risks"), list) else 0,
+                "action_items_count": len(final_round["analysis_projection"].get("action_items")) if isinstance(final_round["analysis_projection"].get("action_items"), list) else 0,
             },
-            "document_generation_view": final_round["docgen_view"],
-            "reference_refresh_attempts": reference_refresh_attempts,
-            "success": success,
-            "hard_block_summary": hard_block_summary,
+            "document_generation_state": final_round["docgen_state"],
+            "analysis_reference_refresh_attempts": analysis_reference_refresh_attempts,
+            "goal_completion_card_present": is_goal_completion_card(ready_pending_card),
+            "pending_card": ready_pending_card,
+            "success": True,
         }
         write_json(out_dir / "summary.json", summary)
+        supervisor.update(
+            status="completed",
+            current_step="terminal.completed",
+            session_id=session_id,
+            matter_id=_safe_str(final_round["matter_id"]),
+            pending_card=ready_pending_card,
+            next_action="inspect_summary",
+            artifact_refs={"summary": str(out_dir / "summary.json")},
+            extra={"deliverable_keys": sorted(final_round["deliverables"].keys())},
+        )
 
     print("[done] legal opinion workflow completed")
     print(f"[artifacts] {out_dir}")
-    if not success and hard_block_summary:
-        bundle = export_failure_bundle(
-            repo_root=REPO_ROOT,
-            session_id=session_id,
-            matter_id=_safe_str(final_round["matter_id"]),
-            reason="legal_opinion_real_flow_stable_hard_block",
-        )
-        bundle_quality = build_bundle_quality_reports(
-            repo_root=REPO_ROOT,
-            bundle_dir=bundle["bundle_dir"],
-            flow_id="legal_opinion",
-            snapshot=final_round["snapshot"] if isinstance(final_round.get("snapshot"), dict) else {},
-            current_view=final_round["legal_view"] if isinstance(final_round.get("legal_view"), dict) else {},
-            goal_completion_mode="workflow_action",
-        )
-        write_json(out_dir / "failure_summary.json", bundle["summary"])
-        write_json(out_dir / "bundle_quality.failure.json", bundle_quality)
-        print(format_first_bad_line(bundle["summary"]))
-        print("[result] stable_hard_block")
-        return 2
+    print("[result] analysis_ready")
     return 0
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run legal opinion workflow via consultations WS and continue to formal document_generation.")
+    parser = argparse.ArgumentParser(description="Run legal opinion workflow via consultations WS until analysis/report is ready.")
     parser.add_argument("--base-url", default="", help="Gateway base URL, e.g. http://host/api/v1")
     parser.add_argument("--use-gateway", action="store_true", default=False, help="Use gateway mode instead of direct service URLs")
     parser.add_argument("--consultations-base-url", default="", help="Override consultations-service base URL, e.g. http://127.0.0.1:18021/api/v1")
@@ -1031,11 +1317,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kickoff", default=DEFAULT_KICKOFF, help="Initial user query")
     parser.add_argument("--kickoff-max-loops", type=int, default=24, help="Kickoff max_loops")
     parser.add_argument("--max-steps", type=int, default=220, help="Max steps until analysis is ready")
-    parser.add_argument("--action-max-loops", type=int, default=24, help="workflow_action max_loops")
-    parser.add_argument("--docgen-round-limit", type=int, default=40, help="Maximum document_generation rounds")
+    parser.add_argument("--action-max-loops", type=int, default=24, help="requested_documents max_loops")
     parser.add_argument("--max-reference-refresh", type=int, default=2, help="Maximum references_refresh_partial attempts")
-    parser.add_argument("--stable-block-repeats", type=int, default=3, help="Stable hard-block fingerprint threshold")
-    parser.add_argument("--step-sleep-s", type=float, default=1.0, help="Sleep between document_generation rounds")
+    parser.add_argument("--step-sleep-s", type=float, default=1.0, help="Sleep between analysis rounds")
     parser.add_argument("--cards-only", action="store_true", default=False, help="Reserved compatibility flag")
     parser.add_argument("--output-dir", default="", help="Artifacts output directory")
     return parser.parse_args()

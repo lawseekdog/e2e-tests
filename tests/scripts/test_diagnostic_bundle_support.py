@@ -67,3 +67,27 @@ def test_export_failure_bundle_requires_ai_engine_runtime(monkeypatch: pytest.Mo
             matter_id="2",
             reason="unit_test",
         )
+
+
+def test_resolve_ai_engine_env_file_prefers_ai_engine_v2_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    env_path = repo_root / "infra-live" / ".local" / "aliyun-remote.env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text("AI_PLATFORM_URL=http://127.0.0.1:18086\n", encoding="utf-8")
+
+    monkeypatch.delenv("AI_ENGINE_V2_ENV_FILE", raising=False)
+
+    resolved = diagnostic_bundle_support._resolve_ai_engine_env_file(repo_root)
+
+    assert resolved == env_path
+
+
+def test_resolve_ai_engine_export_script_points_to_ai_engine_v2(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    script_path = repo_root / "ai-engine-v2" / "scripts" / "export_debug_bundle.py"
+    script_path.parent.mkdir(parents=True)
+    script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+    resolved = diagnostic_bundle_support._resolve_ai_engine_export_script(repo_root)
+
+    assert resolved == script_path

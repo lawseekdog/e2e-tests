@@ -22,6 +22,7 @@ from .utils import trim, unwrap_api_response
 from .sse import assert_has_user_message
 
 PendingCardStopFn = Callable[[dict[str, Any]], bool]
+ProgressObserver = Callable[[dict[str, Any]], Any]
 
 _DEBUG = str(os.getenv("E2E_FLOW_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
 _PROGRESS = str(os.getenv("E2E_FLOW_PROGRESS", "1") or "").strip().lower() in {"1", "true", "yes"}
@@ -1185,6 +1186,7 @@ class WorkbenchFlow:
     client: Any
     session_id: str
     uploaded_file_ids: list[str] = field(default_factory=list)
+    last_requested_documents: list[dict[str, Any]] = field(default_factory=list)
     overrides: dict[str, Any] = field(default_factory=dict)
     strict_card_driven: bool = _STRICT_CARD_DRIVEN_DEFAULT
     matter_id: str | None = None
@@ -1194,6 +1196,7 @@ class WorkbenchFlow:
     seen_card_signatures: list[str] = field(default_factory=list)
     seen_sse: list[dict[str, Any]] = field(default_factory=list)
     last_sse: dict[str, Any] | None = None
+    progress_observer: ProgressObserver | None = None
     _repeat_unanswerable_signature: str | None = None
     _repeat_unanswerable_count: int = 0
     _repeat_card_signature: str | None = None
@@ -1314,6 +1317,27 @@ class WorkbenchFlow:
         if snapshot.get("deliverables"):
             parts.append(f"deliverables={snapshot.get('deliverables')}")
         _progress(" ".join(parts))
+        if self.progress_observer is not None:
+            observed = self.progress_observer(
+                {
+                    "label": label,
+                    "step_no": step_no,
+                    "max_steps": max_steps,
+                    "session_id": snapshot.get("session"),
+                    "matter_id": snapshot.get("matter"),
+                    "session_status": snapshot.get("status"),
+                    "phase": snapshot.get("phase"),
+                    "phase_status": snapshot.get("phase_status"),
+                    "trace_node": snapshot.get("trace_node"),
+                    "trace_status": snapshot.get("trace_status"),
+                    "deliverables": snapshot.get("deliverables"),
+                    "event_summary": event_summary,
+                    "card": card if isinstance(card, dict) else {},
+                    "snapshot": snapshot,
+                }
+            )
+            if asyncio.iscoroutine(observed):
+                await observed
 
     async def refresh(self) -> None:
         try:
@@ -1467,31 +1491,47 @@ class WorkbenchFlow:
         await self._emit_progress(label=f"nudge:{text[:24]}", sse=sse)
         return sse
 
-    async def workflow_action(
+    async def request_documents(
         self,
-        workflow_action: str,
+        requested_documents: list[dict[str, Any]],
         *,
-        workflow_action_params: dict[str, Any] | None = None,
+        user_query: str = "",
         attachments: list[str] | None = None,
         max_loops: int = 12,
+        silent: bool = True,
         settle_mode: str = "full",
+        label: str | None = None,
     ) -> dict[str, Any]:
+        normalized_requested_documents = [
+            {
+                "document_kind": str((item or {}).get("document_kind") or "").strip(),
+                "instance_key": str((item or {}).get("instance_key") or "").strip(),
+            }
+            for item in requested_documents
+            if isinstance(item, dict) and str((item or {}).get("document_kind") or "").strip()
+        ]
+        if not normalized_requested_documents:
+            raise ValueError("request_documents requires at least one document_kind")
+        self.last_requested_documents = normalized_requested_documents
+        request_label = label or ",".join(item["document_kind"] for item in normalized_requested_documents)
         _debug(
-            f"[flow] workflow_action action={workflow_action!r} params={workflow_action_params or {}} "
-            f"attachments={len(attachments or self.uploaded_file_ids)} max_loops={max_loops}"
+            f"[flow] request_documents requested={normalized_requested_documents!r} "
+            f"attachments={len(attachments or self.uploaded_file_ids)} max_loops={max_loops} "
+            f"settle_mode={settle_mode}"
         )
-        sse = await self.client.workflow_action(
+        sse = await self.client.request_documents(
             self.session_id,
-            workflow_action=workflow_action,
-            workflow_action_params=workflow_action_params or {},
+            requested_documents=normalized_requested_documents,
+            user_query=user_query,
             attachments=attachments or self.uploaded_file_ids,
             max_loops=max_loops,
+            silent=silent,
             settle_mode=settle_mode,
         )
         if isinstance(sse, dict):
             self.last_sse = sse
             self.seen_sse.append(sse)
-        await self._emit_progress(label=f"action:{workflow_action}", sse=sse)
+        await self._emit_progress(label=f"request:{request_label}", sse=sse)
         return sse
 
     async def step(
@@ -1538,9 +1578,16 @@ class WorkbenchFlow:
 
             if skill_id == "reference-grounding" and self._repeat_card_count >= 3:
                 if not self.strict_card_driven:
-                    _debug(f"[flow] reference-grounding remediation workflow_action repeat={self._repeat_card_count}")
+                    if not self.last_requested_documents:
+                        raise AssertionError("reference-grounding remediation requires last_requested_documents")
+                    _debug(f"[flow] reference-grounding remediation request_documents repeat={self._repeat_card_count}")
                     self._last_step_used_nudge = True
-                    return await self.workflow_action("references_refresh_partial", max_loops=12)
+                    return await self.request_documents(
+                        self.last_requested_documents,
+                        max_loops=12,
+                        settle_mode="fire_and_poll",
+                        label="refresh_requested_documents",
+                    )
 
             if _is_unanswerable_card(card):
                 if sig == self._repeat_unanswerable_signature:

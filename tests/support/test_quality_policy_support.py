@@ -124,6 +124,7 @@ def test_build_bundle_quality_reports_writes_summary_and_refs(tmp_path: Path) ->
     assert summary["counts"]["node_count"] == 1
     assert Path(summary["refs"]["summary"]).exists()
     assert summary["worst_node"]["trace_id"] == "trace-1"
+    assert not any(str(reason).startswith("unknown_") for reason in summary["hard_fail_reasons"])
 
 
 def test_document_drafting_quality_policy_matches_dynamic_lanes_and_support_profiles(tmp_path: Path) -> None:
@@ -408,7 +409,7 @@ def test_build_bundle_quality_reports_fails_on_analysis_chain_prompt_and_placeho
     assert any(str(item).startswith("placeholder_profile_output:") for item in reasons)
 
 
-def test_build_bundle_quality_reports_hard_fails_on_unknown_profiles(tmp_path: Path) -> None:
+def test_build_bundle_quality_reports_skips_unknown_profile_hard_fail_without_policy_catalog(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     bundle_dir = tmp_path / "session:unknown-profile"
     bundle_dir.mkdir(parents=True)
@@ -470,4 +471,5 @@ def test_build_bundle_quality_reports_hard_fails_on_unknown_profiles(tmp_path: P
     )
 
     assert summary["passed"] is False
-    assert "unknown_node_profile:custom_uncovered_node" in summary["hard_fail_reasons"]
+    assert "quality_raw_missing" in summary["hard_fail_reasons"]
+    assert "unknown_node_profile:custom_uncovered_node" not in summary["hard_fail_reasons"]

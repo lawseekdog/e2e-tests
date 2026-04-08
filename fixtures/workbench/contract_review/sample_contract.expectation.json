@@ -2,9 +2,7 @@
   "contract_type_id": "construction",
   "review_scope": "full",
   "required_output_keys": [
-    "contract_review_report",
-    "modification_suggestion",
-    "redline_comparison"
+    "contract_review_report"
   ],
   "mandatory_issue_types": [
     "effectiveness",

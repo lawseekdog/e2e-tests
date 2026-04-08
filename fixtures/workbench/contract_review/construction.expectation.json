@@ -1,7 +1,9 @@
 {
   "contract_type_id": "construction",
   "review_scope": "full",
-  "required_output_keys": ["contract_review_report", "modification_suggestion", "redline_comparison"],
+  "required_output_keys": [
+    "contract_review_report"
+  ],
   "mandatory_issue_types": [
     "effectiveness",
     "payment",
@@ -17,5 +19,10 @@
     "dispute_resolution",
     "notice"
   ],
-  "required_section_markers": ["合同审查意见书", "审查范围", "主要问题及修改建议", "声明与保留"]
+  "required_section_markers": [
+    "合同审查意见书",
+    "审查范围",
+    "主要问题及修改建议",
+    "声明与保留"
+  ]
 }

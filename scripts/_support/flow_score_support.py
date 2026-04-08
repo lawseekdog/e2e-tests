@@ -57,7 +57,7 @@ _NODE_HINTS: dict[str, tuple[str, ...]] = {
 }
 
 _CITATION_RE = re.compile(r"《[^》]{2,40}》第[一二三四五六七八九十百千万0-9]{1,8}条")
-_CONTRACT_REVIEW_OUTPUT_KEYS = ("contract_review_report", "modification_suggestion", "redline_comparison")
+_CONTRACT_REVIEW_OUTPUT_KEYS = ("contract_review_report",)
 
 
 def _repo_root() -> Path:
@@ -166,14 +166,8 @@ def _contract_review_expected_output_keys(*, review_scope: str, expectations: di
         if _safe_str(item)
     }
     if expected:
-        return expected
+        return {key for key in expected if key in _CONTRACT_REVIEW_OUTPUT_KEYS} or {"contract_review_report"}
     scope = _safe_str(review_scope).lower()
-    if scope == "quick":
-        return {"contract_review_report"}
-    if scope == "risk":
-        return {"contract_review_report", "modification_suggestion"}
-    if scope in {"redline", "full"}:
-        return set(_CONTRACT_REVIEW_OUTPUT_KEYS)
     return {"contract_review_report"}
 
 

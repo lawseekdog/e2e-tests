@@ -263,7 +263,7 @@ def test_build_flow_scores_enforces_contract_review_v2_expectations() -> None:
     expectations = {
         "contract_type_id": "construction",
         "review_scope": "full",
-        "required_output_keys": ["contract_review_report", "modification_suggestion", "redline_comparison"],
+        "required_output_keys": ["contract_review_report"],
         "mandatory_issue_types": [
             "effectiveness",
             "payment",
@@ -297,8 +297,6 @@ def test_build_flow_scores_enforces_contract_review_v2_expectations() -> None:
         current_view=contract_view,
         deliverables={
             "contract_review_report": {"status": "completed"},
-            "modification_suggestion": {"status": "completed"},
-            "redline_comparison": {"status": "completed"},
         },
         deliverable_text=report_text,
         deliverable_status="completed",

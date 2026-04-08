@@ -1003,11 +1003,13 @@ async def run(args: argparse.Namespace) -> int:
             matter_id=_safe_str(flow.matter_id) or matter_id,
             next_action="await_kickoff_events",
         )
-        kickoff_sse = await flow.nudge(
-            kickoff,
+        kickoff_sse = await flow.request_documents(
+            _requested_documents_for_goal("legal_opinion"),
+            user_query=kickoff,
             attachments=uploaded_file_ids,
             max_loops=max(1, int(args.kickoff_max_loops)),
             settle_mode="fire_and_poll",
+            label="legal_opinion_report",
         )
         kickoff_counts = event_counts(kickoff_sse if isinstance(kickoff_sse, dict) else {})
         write_json(out_dir / "00.kickoff.sse.json", kickoff_sse if isinstance(kickoff_sse, dict) else {})

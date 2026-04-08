@@ -29,8 +29,8 @@ from scripts._support.workflow_real_flow_support import (
     collect_ai_debug_refs,
     configure_direct_service_mode,
     event_counts as _shared_event_counts,
+    fetch_execution_snapshot_by_session as _shared_fetch_execution_snapshot_by_session,
     fetch_workbench_snapshot as _shared_fetch_workbench_snapshot,
-    list_deliverables as _shared_list_deliverables,
     list_session_messages as _shared_list_session_messages,
     load_real_flow_env,
     resolve_output_dir,
@@ -44,15 +44,7 @@ from scripts._support.quality_policy_support import build_bundle_quality_reports
 from scripts._support.run_status import RunStatusSupervisor
 
 
-REQUIRED_DOC_OUTPUT_KEYS = (
-    "contract_review_report",
-    "modification_suggestion",
-    "redline_comparison",
-)
-SUMMARY_OUTPUT_KEYS = (
-    "phase_summary__contract_output",
-    "phase_summary__contract_analyze",
-)
+REQUIRED_DOC_OUTPUT_KEYS = ("contract_review_report",)
 
 DEFAULT_KICKOFF = (
     "请审查已上传合同并输出结构化结论：整体风险等级、合同类型、审查摘要、风险条款清单。"
@@ -63,10 +55,17 @@ FLOW_OVERRIDES = {
     "profile.client_role": "applicant",
     "profile.summary": "合同审查，重点关注付款条件、违约责任、争议解决与免责条款。",
 }
+START_REQUESTED_DOCUMENTS = [
+    {"document_kind": "contract_review_report", "instance_key": ""},
+]
 
 
 def _safe_str(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _start_requested_documents() -> list[dict[str, str]]:
+    return [dict(item) for item in START_REQUESTED_DOCUMENTS]
 
 
 def _select_contract_file(cli_value: str, *, contract_type_id: str) -> Path:
@@ -172,16 +171,175 @@ async def _fetch_snapshot(client: ApiClient, matter_id: str) -> dict[str, Any] |
     return await _shared_fetch_workbench_snapshot(client, matter_id)
 
 
-def _extract_contract_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+async def _fetch_execution_snapshot(session_id: str) -> dict[str, Any] | None:
+    return await _shared_fetch_execution_snapshot_by_session(session_id)
+
+
+def _section_items(view: dict[str, Any], section_type: str) -> list[dict[str, Any]]:
+    sections = view.get("sections") if isinstance(view.get("sections"), list) else []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        if _safe_str(section.get("section_type")) != section_type:
+            continue
+        data = section.get("data") if isinstance(section.get("data"), dict) else {}
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        return [row for row in items if isinstance(row, dict)]
+    return []
+
+
+def _extract_analysis_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
-    analysis = snapshot.get("analysis_state") if isinstance(snapshot.get("analysis_state"), dict) else {}
-    view = analysis.get("contract_review_view") if isinstance(analysis.get("contract_review_view"), dict) else {}
+    view = snapshot.get("analysis_view") if isinstance(snapshot.get("analysis_view"), dict) else {}
     return view if isinstance(view, dict) else {}
 
 
-async def _list_deliverables(client: ApiClient, matter_id: str) -> dict[str, dict[str, Any]]:
-    return await _shared_list_deliverables(client, matter_id)
+def _issue_type_from_title(title: str) -> str:
+    text = _safe_str(title)
+    mappings = (
+        ("payment", ("付款", "工程款", "价款", "结算")),
+        ("tax_invoice", ("发票", "税票")),
+        ("delivery_acceptance", ("验收", "交付")),
+        ("quality", ("质量", "质保", "保证金")),
+        ("change_order", ("变更", "签证")),
+        ("delay", ("工期", "顺延", "延期")),
+        ("liability", ("违约", "责任")),
+        ("indemnity", ("赔偿", "补偿", "免责")),
+        ("termination", ("解除", "终止")),
+        ("compliance", ("招标", "合规", "审批")),
+        ("dispute_resolution", ("争议", "仲裁", "诉讼", "管辖")),
+        ("notice", ("通知", "送达")),
+        ("effectiveness", ("效力", "生效", "冲突")),
+    )
+    for issue_type, keywords in mappings:
+        if any(keyword in text for keyword in keywords):
+            return issue_type
+    return "general"
+
+
+def _risk_rank(level: str) -> int:
+    return {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(_safe_str(level).lower(), 0)
+
+
+def _extract_inline_artifact_body(artifact_refs: Any) -> str:
+    rows = artifact_refs if isinstance(artifact_refs, list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        body = _safe_str(metadata.get("body"))
+        if body:
+            return body
+    return ""
+
+
+def _extract_runtime_deliverables(snapshot: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(snapshot, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    run_status = _safe_str(snapshot.get("status")).lower()
+    rows = snapshot.get("deliverables") if isinstance(snapshot.get("deliverables"), list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        kind = (
+            _safe_str(row.get("deliverable_kind"))
+            or _safe_str(row.get("document_kind"))
+            or _safe_str(payload.get("document_kind"))
+        )
+        if kind:
+            entry = out.setdefault(kind, {"output_key": kind})
+            full_text = _safe_str(payload.get("full_text"))
+            if full_text:
+                entry["full_text"] = full_text
+            title = _safe_str(row.get("title"))
+            if title:
+                entry["title"] = title
+            summary = _safe_str(row.get("summary"))
+            if summary:
+                entry["summary"] = summary
+            if run_status:
+                entry.setdefault("status", run_status)
+        outputs = row.get("outputs") if isinstance(row.get("outputs"), list) else []
+        for output in outputs:
+            if not isinstance(output, dict):
+                continue
+            output_kind = _safe_str(output.get("deliverable_kind")) or _safe_str(output.get("document_kind"))
+            if not output_kind:
+                continue
+            entry = out.setdefault(output_kind, {"output_key": output_kind})
+            status = _safe_str(output.get("render_status")) or _safe_str(row.get("status")) or run_status
+            if status:
+                entry["status"] = status
+            for key in ("file_id", "preview_file_id", "deliverable_id", "document_id", "render_format"):
+                value = _safe_str(output.get(key))
+                if value:
+                    entry[key] = value
+            inline_body = _extract_inline_artifact_body(output.get("artifact_refs"))
+            if inline_body:
+                entry.setdefault("full_text", inline_body)
+            artifact_refs = output.get("artifact_refs") if isinstance(output.get("artifact_refs"), list) else []
+            if artifact_refs:
+                entry["artifact_refs"] = artifact_refs
+    return out
+
+
+def _build_contract_view(
+    snapshot: dict[str, Any] | None,
+    *,
+    contract_type_id: str,
+    review_scope: str,
+) -> dict[str, Any]:
+    analysis_view = _extract_analysis_view(snapshot)
+    if not analysis_view:
+        return {}
+    issues = _section_items(analysis_view, "issues")
+    risks = _section_items(analysis_view, "risks")
+    strategies = _section_items(analysis_view, "strategy_matrix")
+    risk_by_focus: dict[str, dict[str, Any]] = {}
+    for risk in risks:
+        focus_refs = risk.get("focus_refs") if isinstance(risk.get("focus_refs"), list) else []
+        for ref in focus_refs:
+            token = _safe_str(ref)
+            if token and token not in risk_by_focus:
+                risk_by_focus[token] = risk
+    clauses: list[dict[str, Any]] = []
+    for issue in issues:
+        issue_id = _safe_str(issue.get("issue_id")) or f"issue:{len(clauses) + 1}"
+        title = _safe_str(issue.get("issue_title") or issue.get("title")) or issue_id
+        risk = risk_by_focus.get(issue_id, {})
+        authority_refs = [token for token in (issue.get("authority_refs") if isinstance(issue.get("authority_refs"), list) else []) if _safe_str(token)]
+        clauses.append(
+            {
+                "clause_id": issue_id,
+                "title": title,
+                "risk_type": _issue_type_from_title(title),
+                "risk_level": _safe_str(risk.get("level")).lower() or "medium",
+                "analysis": _safe_str(issue.get("analysis")),
+                "anchor_refs": [{"anchor_id": _safe_str(ref)} for ref in (issue.get("evidence_refs") if isinstance(issue.get("evidence_refs"), list) else []) if _safe_str(ref)],
+                "law_ref_ids": authority_refs,
+                "authority_titles": [token for token in (issue.get("authority_titles") if isinstance(issue.get("authority_titles"), list) else []) if _safe_str(token)],
+                "mitigation": _safe_str(risk.get("mitigation")),
+            }
+        )
+    overall_risk_level = "low"
+    for risk in risks:
+        level = _safe_str(risk.get("level")).lower()
+        if _risk_rank(level) >= _risk_rank(overall_risk_level):
+            overall_risk_level = level or overall_risk_level
+    return {
+        "title": _safe_str(analysis_view.get("title")) or "合同审查",
+        "summary": _safe_str(analysis_view.get("summary")),
+        "status": _safe_str(analysis_view.get("status")),
+        "contract_type_id": _safe_str(contract_type_id),
+        "review_scope": _safe_str(review_scope),
+        "overall_risk_level": overall_risk_level,
+        "clauses": clauses,
+        "strategy_options": [row for row in strategies if isinstance(row, dict)],
+        "result_contract_diagnostics": {"status": "valid" if clauses else "invalid"},
+    }
 
 
 async def _list_session_messages(client: ApiClient, session_id: str) -> list[dict[str, Any]]:
@@ -295,7 +453,7 @@ async def run(args: argparse.Namespace) -> int:
             next_action="kickoff",
         )
 
-        kickoff_settle_mode = "first_event" if args.cards_only else "full"
+        kickoff_settle_mode = "fire_and_poll" if args.cards_only else "full"
         supervisor.update(
             status="running",
             current_step="kickoff.submitting",
@@ -303,11 +461,13 @@ async def run(args: argparse.Namespace) -> int:
             matter_id=_safe_str(flow.matter_id) or matter_id,
             next_action="await_kickoff_events",
         )
-        kickoff_sse = await flow.nudge(
-            kickoff,
+        kickoff_sse = await flow.request_documents(
+            _start_requested_documents(),
+            user_query=kickoff,
             attachments=[file_id],
             max_loops=max(1, int(args.kickoff_max_loops)),
             settle_mode=kickoff_settle_mode,
+            label="contract_review_report",
         )
         kickoff_counts = _event_counts(kickoff_sse if isinstance(kickoff_sse, dict) else {})
         print(f"[kickoff] event_counts={kickoff_counts}")
@@ -330,19 +490,17 @@ async def run(args: argparse.Namespace) -> int:
 
         async def _deliverables_ready(f: WorkbenchFlow) -> bool:
             await f.refresh()
-            mid = _safe_str(f.matter_id)
-            if not mid:
+            runtime_snapshot = await _fetch_execution_snapshot(session_id)
+            by_key = _extract_runtime_deliverables(runtime_snapshot)
+            report = by_key.get("contract_review_report") or {}
+            if not report:
                 return False
-            by_key = await _list_deliverables(client, mid)
-            if not all(key in by_key for key in REQUIRED_DOC_OUTPUT_KEYS):
+            status = _safe_str(report.get("status")).lower()
+            if status and status not in {"completed", "ready"}:
                 return False
-            if not any(key in by_key for key in SUMMARY_OUTPUT_KEYS):
-                return False
-            for key in ("contract_review_report", "modification_suggestion", "redline_comparison"):
-                file_ref = _safe_str((by_key.get(key) or {}).get("file_id"))
-                if not file_ref:
-                    return False
-            return True
+            file_ref = _safe_str(report.get("file_id"))
+            inline_text = _safe_str(report.get("full_text"))
+            return bool(file_ref or inline_text)
 
         try:
             await flow.run_until(
@@ -354,7 +512,8 @@ async def run(args: argparse.Namespace) -> int:
             await flow.refresh()
             fail_matter_id = _safe_str(flow.matter_id) or matter_id
             fail_snapshot = await _fetch_snapshot(client, fail_matter_id) if fail_matter_id else {}
-            fail_deliverables = await _list_deliverables(client, fail_matter_id) if fail_matter_id else {}
+            fail_runtime_snapshot = await _fetch_execution_snapshot(session_id)
+            fail_deliverables = _extract_runtime_deliverables(fail_runtime_snapshot)
             fail_messages = await _list_session_messages(client, session_id)
             debug_refs = await collect_ai_debug_refs(
                 client,
@@ -362,7 +521,11 @@ async def run(args: argparse.Namespace) -> int:
                 session_id=session_id,
                 matter_id=fail_matter_id,
             )
-            fail_contract_view = _extract_contract_view(fail_snapshot if isinstance(fail_snapshot, dict) else {})
+            fail_contract_view = _build_contract_view(
+                fail_snapshot if isinstance(fail_snapshot, dict) else {},
+                contract_type_id=contract_type_id,
+                review_scope=review_scope,
+            )
             fail_analysis = (
                 fail_snapshot.get("analysis_state")
                 if isinstance(fail_snapshot, dict) and isinstance(fail_snapshot.get("analysis_state"), dict)
@@ -389,6 +552,8 @@ async def run(args: argparse.Namespace) -> int:
             write_json(out_dir / "deliverables.failure.json", fail_deliverables)
             if isinstance(fail_snapshot, dict) and fail_snapshot:
                 write_json(out_dir / "snapshot.failure.json", fail_snapshot)
+            if isinstance(fail_runtime_snapshot, dict) and fail_runtime_snapshot:
+                write_json(out_dir / "execution_snapshot.failure.json", fail_runtime_snapshot)
             bundle = export_failure_bundle(
                 repo_root=REPO_ROOT,
                 session_id=session_id,
@@ -422,13 +587,20 @@ async def run(args: argparse.Namespace) -> int:
         if not final_matter_id:
             raise RuntimeError("matter_id missing after workflow run")
 
-        deliverables = await _list_deliverables(client, final_matter_id)
+        execution_snapshot = await _fetch_execution_snapshot(session_id)
+        if not isinstance(execution_snapshot, dict) or not execution_snapshot:
+            raise RuntimeError("execution_snapshot_missing")
+        deliverables = _extract_runtime_deliverables(execution_snapshot)
         snapshot = await _fetch_snapshot(client, final_matter_id) or {}
-        contract_view = _extract_contract_view(snapshot)
+        contract_view = _build_contract_view(
+            snapshot,
+            contract_type_id=contract_type_id,
+            review_scope=review_scope,
+        )
         pending_card = await flow.get_pending_card()
 
         report_file_id = _safe_str((deliverables.get("contract_review_report") or {}).get("file_id"))
-        report_text = ""
+        report_text = _safe_str((deliverables.get("contract_review_report") or {}).get("full_text"))
         if report_file_id:
             raw = await client.download_file_bytes(report_file_id)
             report_text = extract_docx_text(raw)
@@ -446,10 +618,8 @@ async def run(args: argparse.Namespace) -> int:
             "uploaded_file_id": file_id,
             "kickoff_event_counts": kickoff_counts,
             "deliverable_keys": sorted(deliverables.keys()),
-            "summary_output_key": next(
-                (key for key in SUMMARY_OUTPUT_KEYS if key in deliverables),
-                "",
-            ),
+            "execution_status": _safe_str(execution_snapshot.get("status")),
+            "execution_phase_id": _safe_str(execution_snapshot.get("current_phase_id")),
             "report_file_id": report_file_id,
             "pending_card": {
                 "skill_id": _safe_str((pending_card or {}).get("skill_id")),
@@ -523,6 +693,7 @@ async def run(args: argparse.Namespace) -> int:
         write_json(out_dir / "flow_scores.json", flow_scores)
         write_json(out_dir / "deliverables.json", deliverables)
         write_json(out_dir / "snapshot.json", snapshot)
+        write_json(out_dir / "execution_snapshot.json", execution_snapshot)
         write_json(out_dir / "diagnostics_summary.json", debug_refs.get("diagnostics_summary") if isinstance(debug_refs.get("diagnostics_summary"), dict) else {})
         write_json(out_dir / "diagnostics_events.json", {"events": debug_refs.get("diagnostics_events") if isinstance(debug_refs.get("diagnostics_events"), list) else []})
         write_json(out_dir / "debug_refs.json", debug_refs)

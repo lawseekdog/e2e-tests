@@ -31,8 +31,4 @@ def test_contract_review_fixture_matrix_covers_all_contract_types() -> None:
         payload = json.loads(expectation_path.read_text(encoding="utf-8"))
         assert payload["contract_type_id"] == contract_type_id
         assert payload["review_scope"] == "full"
-        assert payload["required_output_keys"] == [
-            "contract_review_report",
-            "modification_suggestion",
-            "redline_comparison",
-        ]
+        assert payload["required_output_keys"] == ["contract_review_report"]

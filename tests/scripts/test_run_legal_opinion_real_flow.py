@@ -9,6 +9,7 @@ from scripts.run_legal_opinion_real_flow import (
     _analysis_should_refresh_references,
     _capability_gap_card_matches_overrides,
     _pick_analysis_auto_action,
+    _requested_documents_for_goal,
     _resolve_fixture_paths,
     parse_args,
 )
@@ -91,6 +92,12 @@ def test_parse_args_no_longer_exposes_allow_nudge(monkeypatch) -> None:
     args = parse_args()
 
     assert not hasattr(args, "allow_nudge")
+
+
+def test_requested_documents_for_legal_opinion_goal_uses_report_contract() -> None:
+    assert _requested_documents_for_goal("legal_opinion") == [
+        {"document_kind": "legal_opinion_report", "instance_key": ""},
+    ]
 
 
 def test_analysis_auto_action_prefers_legal_opinion_core_missing() -> None:

@@ -7,8 +7,10 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from dotenv import load_dotenv
+import httpx
 from httpx import HTTPStatusError
 
 from client.api_client import ApiClient
@@ -29,6 +31,8 @@ _REMOTE_SERVICE_PORTS: dict[str, int] = {
 _DEFAULT_LOCAL_CONSULTATIONS_PORT = 18021
 _DEFAULT_LOCAL_MATTER_PORT = 18020
 _DEFAULT_LOCAL_TEMPLATES_PORT = 18022
+_DEFAULT_LOCAL_AI_ENGINE_V2_PORT = 18086
+_DEFAULT_REMOTE_AI_ENGINE_V2_PORT = 18114
 
 
 def safe_str(value: Any) -> str:
@@ -132,6 +136,33 @@ def _local_service_port(env_key: str, default: int) -> int:
 
 def _local_service_api_url(env_key: str, default: int) -> str:
     return api_url("127.0.0.1", _local_service_port(env_key, default))
+
+
+def _normalize_ai_engine_base_url(raw: Any) -> str:
+    token = safe_str(raw).rstrip("/")
+    if token.endswith("/api/v1"):
+        return token[: -len("/api/v1")]
+    return token
+
+
+def _candidate_ai_engine_base_urls() -> tuple[str, ...]:
+    remote_host = (
+        safe_str(os.getenv("LAWSEEKDOG_REMOTE_STACK_HOST"))
+        or safe_str(os.getenv("REMOTE_STACK_HOST"))
+        or _DEFAULT_REMOTE_STACK_HOST
+    )
+    ordered: list[str] = []
+    for raw in (
+        os.getenv("AI_ENGINE_V2_BASE_URL"),
+        os.getenv("AI_ENGINE_V2_LOCAL_BASE_URL"),
+        os.getenv("AI_PLATFORM_URL"),
+        f"http://127.0.0.1:{_DEFAULT_LOCAL_AI_ENGINE_V2_PORT}",
+        f"http://{remote_host}:{_DEFAULT_REMOTE_AI_ENGINE_V2_PORT}",
+    ):
+        normalized = _normalize_ai_engine_base_url(raw)
+        if normalized and normalized not in ordered:
+            ordered.append(normalized)
+    return tuple(ordered)
 
 
 def configure_direct_service_mode(
@@ -418,6 +449,32 @@ async def fetch_workbench_snapshot(client: ApiClient, matter_id: str) -> dict[st
     return payload if isinstance(payload, dict) else None
 
 
+async def fetch_execution_snapshot_by_session(session_id: str) -> dict[str, Any] | None:
+    session_token = safe_str(session_id)
+    if not session_token:
+        return None
+    thread_id = session_token if session_token.startswith("session:") else f"session:{session_token}"
+    thread_token = quote(thread_id, safe="")
+    headers = {"Accept": "application/json"}
+    internal_api_key = safe_str(os.getenv("INTERNAL_API_KEY"))
+    if internal_api_key:
+        headers["X-Internal-Api-Key"] = internal_api_key
+    timeout_s = max(5.0, float(os.getenv("E2E_HTTP_REQUEST_TIMEOUT_S", "45") or 45))
+    async with httpx.AsyncClient(timeout=timeout_s, trust_env=False) as raw_client:
+        for base_url in _candidate_ai_engine_base_urls():
+            url = f"{base_url}/api/v1/internal/executions/by-thread/{thread_token}/snapshot"
+            try:
+                response = await raw_client.get(url, headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+            except Exception:
+                continue
+            data = unwrap_api_response(payload)
+            if isinstance(data, dict) and data:
+                return data
+    return None
+
+
 async def list_session_messages(client: ApiClient, session_id: str) -> list[dict[str, Any]]:
     try:
         resp = await client.get(
@@ -547,6 +604,7 @@ __all__ = [
     "collect_ai_debug_refs",
     "configure_direct_service_mode",
     "event_counts",
+    "fetch_execution_snapshot_by_session",
     "fetch_workbench_snapshot",
     "is_goal_completion_card",
     "list_deliverables",

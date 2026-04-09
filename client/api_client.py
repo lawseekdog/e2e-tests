@@ -92,7 +92,7 @@ class ApiClient:
             CONSULTATIONS: str(os.getenv("E2E_CONSULTATIONS_BASE_URL", "") or "").rstrip("/") or None,
             FILES: str(os.getenv("E2E_FILES_BASE_URL", "") or "").rstrip("/") or None,
             MATTERS: str(os.getenv("E2E_MATTER_BASE_URL", "") or "").rstrip("/") or None,
-            KNOWLEDGE: str(os.getenv("E2E_KNOWLEDGE_BASE_URL", "") or "").rstrip("/") or None,
+            KNOWLEDGE: str(os.getenv("KNOWLEDGE_SERVICE_URL", "") or "").rstrip("/") or None,
             TEMPLATES: str(os.getenv("E2E_TEMPLATES_BASE_URL", "") or "").rstrip("/") or None,
         }
         self.token: str | None = None

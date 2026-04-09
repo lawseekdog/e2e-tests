@@ -45,7 +45,14 @@ from scripts._support.template_draft_real_flow_support import (
 from scripts._support.flow_score_support import build_template_flow_scores
 from scripts._support.diagnostic_bundle_support import export_observability_bundle
 from scripts._support.quality_policy_support import build_bundle_quality_reports
-from scripts._support.workflow_real_flow_support import collect_ai_debug_refs, configure_direct_service_mode, load_real_flow_env, terminate_stale_script_runs
+from scripts._support.workflow_real_flow_support import (
+    collect_ai_debug_refs,
+    configure_direct_service_mode,
+    fetch_execution_snapshot_by_session,
+    fetch_execution_traces_by_session,
+    load_real_flow_env,
+    terminate_stale_script_runs,
+)
 from scripts._support.run_status import RunStatusSupervisor
 
 
@@ -914,6 +921,8 @@ async def run(args: argparse.Namespace) -> int:
     node_timeline: list[dict[str, Any]] = []
     docgen_node_sequence: list[str] = []
     last_docgen_snapshot: dict[str, Any] = {}
+    last_execution_snapshot: dict[str, Any] = {}
+    last_execution_traces: list[dict[str, Any]] = []
     flow: WorkbenchFlow | None = None
     observer: Any = None
 
@@ -1071,12 +1080,13 @@ async def run(args: argparse.Namespace) -> int:
                 pending_card: dict[str, Any] | None = None,
                 deliverable_rows: list[dict[str, Any]] | None = None,
             ) -> dict[str, Any]:
-                nonlocal last_docgen_snapshot, docgen_node_sequence
+                nonlocal last_docgen_snapshot, last_execution_snapshot, last_execution_traces, docgen_node_sequence
                 matter_ref = _safe_str((flow.matter_id if flow is not None else "") or summary.get("matter_id"))
                 session_ref = _safe_str(summary.get("session_id"))
                 errors: dict[str, str] = {}
 
                 session_data: dict[str, Any] = {}
+                execution_snapshot: dict[str, Any] = {}
                 workbench_snapshot: dict[str, Any] = {}
                 workflow_snapshot: dict[str, Any] = {}
                 phase_timeline: dict[str, Any] = {}
@@ -1086,6 +1096,15 @@ async def run(args: argparse.Namespace) -> int:
                 deliverable_rows_effective = [row for row in (deliverable_rows or []) if isinstance(row, dict)]
 
                 if session_ref:
+                    try:
+                        execution_snapshot = await fetch_execution_snapshot_by_session(session_ref) or {}
+                    except Exception as exc:  # noqa: BLE001
+                        errors["execution_snapshot"] = str(exc)
+                    try:
+                        last_execution_traces = await fetch_execution_traces_by_session(session_ref)
+                    except Exception as exc:  # noqa: BLE001
+                        errors["execution_traces"] = str(exc)
+                        last_execution_traces = []
                     try:
                         session_resp = await client.get_session(session_ref)
                         unwrapped = unwrap_api_response(session_resp)
@@ -1215,6 +1234,8 @@ async def run(args: argparse.Namespace) -> int:
                     {
                         "docgen_node_sequence": list(docgen_node_sequence),
                         "latest_docgen_node": current_node,
+                        "execution_status": _safe_str(execution_snapshot.get("status")),
+                        "execution_phase_id": _safe_str(execution_snapshot.get("current_phase_id")),
                         "deliverable_status": _safe_str(deliverable_obj.get("status")),
                         "template_quality_contracts_json_exists": bool(snapshot.get("template_quality_contracts_json_exists")),
                         "docgen_repair_plan_exists": bool(snapshot.get("docgen_repair_plan_exists")),
@@ -1224,11 +1245,14 @@ async def run(args: argparse.Namespace) -> int:
                     }
                 )
                 last_docgen_snapshot = snapshot
+                last_execution_snapshot = execution_snapshot if isinstance(execution_snapshot, dict) else {}
                 supervisor.update(
                     status="running",
                     current_step=f"poll.{trigger}",
                     session_id=_safe_str(summary.get("session_id")),
                     matter_id=_safe_str(summary.get("matter_id")),
+                    execution_snapshot=last_execution_snapshot,
+                    execution_traces=last_execution_traces,
                     pending_card=pending_effective,
                     current_blocker=_safe_str(pending_effective.get("task_key")) if isinstance(pending_effective, dict) else "",
                     next_action="continue_docgen",
@@ -1236,6 +1260,8 @@ async def run(args: argparse.Namespace) -> int:
                     latest_payloads={
                         "pending_card": pending_effective or {},
                         "docgen_snapshot": snapshot,
+                        "execution_snapshot": last_execution_snapshot,
+                        "execution_traces": {"traces": last_execution_traces},
                     },
                     extra={
                         "docgen_node": current_node,
@@ -1829,7 +1855,6 @@ async def run(args: argparse.Namespace) -> int:
                 reason="template_draft_passed",
             )
             bundle_quality = build_bundle_quality_reports(
-                repo_root=REPO_ROOT,
                 bundle_dir=bundle_export["bundle_dir"],
                 flow_id="template_draft",
                 snapshot={},
@@ -1874,6 +1899,8 @@ async def run(args: argparse.Namespace) -> int:
                 current_step="terminal.completed",
                 session_id=_safe_str(summary.get("session_id")),
                 matter_id=_safe_str(summary.get("matter_id")),
+                execution_snapshot=last_execution_snapshot,
+                execution_traces=last_execution_traces,
                 next_action="inspect_summary",
                 artifact_refs={
                     "summary": str(out_dir / "summary.json"),
@@ -1976,7 +2003,6 @@ async def run(args: argparse.Namespace) -> int:
                 reason="template_draft_stopped_after_node",
             )
             bundle_quality = build_bundle_quality_reports(
-                repo_root=REPO_ROOT,
                 bundle_dir=bundle_export["bundle_dir"],
                 flow_id="template_draft",
                 snapshot={},
@@ -2022,6 +2048,8 @@ async def run(args: argparse.Namespace) -> int:
                 current_step="terminal.stopped_after_node",
                 session_id=_safe_str(summary.get("session_id")),
                 matter_id=_safe_str(summary.get("matter_id")),
+                execution_snapshot=last_execution_snapshot,
+                execution_traces=last_execution_traces,
                 current_blocker="stop_after_node",
                 next_action="inspect_summary",
                 artifact_refs={"summary": str(out_dir / "summary.json")},
@@ -2076,7 +2104,6 @@ async def run(args: argparse.Namespace) -> int:
                 reason="template_draft_failed",
             )
             bundle_quality = build_bundle_quality_reports(
-                repo_root=REPO_ROOT,
                 bundle_dir=bundle_export["bundle_dir"],
                 flow_id="template_draft",
                 snapshot={},
@@ -2153,6 +2180,8 @@ async def run(args: argparse.Namespace) -> int:
                 current_step="terminal.failed",
                 session_id=_safe_str(summary.get("session_id")),
                 matter_id=_safe_str(summary.get("matter_id")),
+                execution_snapshot=last_execution_snapshot,
+                execution_traces=last_execution_traces,
                 current_blocker="template_draft_failed",
                 next_action="inspect_summary",
                 error=str(e),

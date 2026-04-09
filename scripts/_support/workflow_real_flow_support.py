@@ -216,7 +216,7 @@ def configure_direct_service_mode(
         )
     )
     resolved_files = safe_str(files_base_url) or safe_str(os.getenv("E2E_FILES_BASE_URL")) or api_url(host, _REMOTE_SERVICE_PORTS["files"])
-    resolved_knowledge = safe_str(knowledge_base_url) or safe_str(os.getenv("E2E_KNOWLEDGE_BASE_URL")) or api_url(host, _REMOTE_SERVICE_PORTS["knowledge"])
+    resolved_knowledge = safe_str(knowledge_base_url) or safe_str(os.getenv("KNOWLEDGE_SERVICE_URL")) or api_url(host, _REMOTE_SERVICE_PORTS["knowledge"])
     resolved_templates = (
         safe_str(templates_base_url)
         or (
@@ -235,7 +235,7 @@ def configure_direct_service_mode(
     os.environ["E2E_CONSULTATIONS_BASE_URL"] = resolved_consultations
     os.environ["E2E_MATTER_BASE_URL"] = resolved_matter
     os.environ["E2E_FILES_BASE_URL"] = resolved_files
-    os.environ["E2E_KNOWLEDGE_BASE_URL"] = resolved_knowledge
+    os.environ["KNOWLEDGE_SERVICE_URL"] = resolved_knowledge
     os.environ["E2E_TEMPLATES_BASE_URL"] = resolved_templates
 
     uid = safe_str(direct_user_id) or safe_str(os.getenv("E2E_DIRECT_USER_ID")) or "2"
@@ -475,6 +475,38 @@ async def fetch_execution_snapshot_by_session(session_id: str) -> dict[str, Any]
     return None
 
 
+async def fetch_execution_traces_by_session(
+    session_id: str,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    session_token = safe_str(session_id)
+    if not session_token:
+        return []
+    thread_id = session_token if session_token.startswith("session:") else f"session:{session_token}"
+    thread_token = quote(thread_id, safe="")
+    headers = {"Accept": "application/json"}
+    internal_api_key = safe_str(os.getenv("INTERNAL_API_KEY"))
+    if internal_api_key:
+        headers["X-Internal-Api-Key"] = internal_api_key
+    timeout_s = max(5.0, float(os.getenv("E2E_HTTP_REQUEST_TIMEOUT_S", "45") or 45))
+    async with httpx.AsyncClient(timeout=timeout_s, trust_env=False) as raw_client:
+        for base_url in _candidate_ai_engine_base_urls():
+            url = f"{base_url}/api/v1/internal/executions/by-thread/{thread_token}/traces"
+            try:
+                response = await raw_client.get(url, params={"limit": max(1, int(limit))}, headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+            except Exception:
+                continue
+            data = unwrap_api_response(payload)
+            traces = data.get("traces") if isinstance(data, dict) and isinstance(data.get("traces"), list) else []
+            rows = [row for row in traces if isinstance(row, dict)]
+            if rows:
+                return rows
+    return []
+
+
 async def list_session_messages(client: ApiClient, session_id: str) -> list[dict[str, Any]]:
     try:
         resp = await client.get(
@@ -605,6 +637,7 @@ __all__ = [
     "configure_direct_service_mode",
     "event_counts",
     "fetch_execution_snapshot_by_session",
+    "fetch_execution_traces_by_session",
     "fetch_workbench_snapshot",
     "is_goal_completion_card",
     "list_deliverables",

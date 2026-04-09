@@ -16,7 +16,6 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 def test_build_bundle_quality_reports_writes_summary_and_refs(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[3]
     bundle_dir = tmp_path / "session:demo"
     bundle_dir.mkdir(parents=True)
     for name in ("failure_summary.json", "execution_traces.json", "timeline.json", "node_trace_timeline.json"):
@@ -109,7 +108,6 @@ def test_build_bundle_quality_reports_writes_summary_and_refs(tmp_path: Path) ->
     )
 
     summary = build_bundle_quality_reports(
-        repo_root=repo_root,
         bundle_dir=str(bundle_dir),
         flow_id="analysis",
         snapshot={
@@ -128,7 +126,6 @@ def test_build_bundle_quality_reports_writes_summary_and_refs(tmp_path: Path) ->
 
 
 def test_document_drafting_quality_policy_matches_dynamic_lanes_and_support_profiles(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[3]
     bundle_dir = tmp_path / "session:template-draft"
     bundle_dir.mkdir(parents=True)
     for name in ("failure_summary.json", "execution_traces.json", "timeline.json", "node_trace_timeline.json"):
@@ -222,7 +219,6 @@ def test_document_drafting_quality_policy_matches_dynamic_lanes_and_support_prof
     )
 
     summary = build_bundle_quality_reports(
-        repo_root=repo_root,
         bundle_dir=str(bundle_dir),
         flow_id="template_draft",
         snapshot={
@@ -284,7 +280,6 @@ def test_merge_bundle_quality_report_and_flow_scores_include_quality_failures() 
 
 
 def test_build_bundle_quality_reports_fails_on_analysis_chain_prompt_and_placeholder_regressions(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[3]
     bundle_dir = tmp_path / "session:analysis-replay"
     bundle_dir.mkdir(parents=True)
     for name in ("failure_summary.json", "execution_traces.json", "timeline.json", "node_trace_timeline.json"):
@@ -390,7 +385,6 @@ def test_build_bundle_quality_reports_fails_on_analysis_chain_prompt_and_placeho
     )
 
     summary = build_bundle_quality_reports(
-        repo_root=repo_root,
         bundle_dir=str(bundle_dir),
         flow_id="analysis",
         snapshot={
@@ -410,7 +404,6 @@ def test_build_bundle_quality_reports_fails_on_analysis_chain_prompt_and_placeho
 
 
 def test_build_bundle_quality_reports_skips_unknown_profile_hard_fail_without_policy_catalog(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[3]
     bundle_dir = tmp_path / "session:unknown-profile"
     bundle_dir.mkdir(parents=True)
     for name in ("failure_summary.json", "execution_traces.json", "timeline.json", "node_trace_timeline.json"):
@@ -459,7 +452,6 @@ def test_build_bundle_quality_reports_skips_unknown_profile_hard_fail_without_po
     _write_jsonl(bundle_dir / "quality" / "raw" / "lanes.jsonl", [])
 
     summary = build_bundle_quality_reports(
-        repo_root=repo_root,
         bundle_dir=str(bundle_dir),
         flow_id="analysis",
         snapshot={

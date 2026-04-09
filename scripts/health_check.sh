@@ -40,7 +40,7 @@ service_base_url() {
     billing-service) printf '%s' "http://${REMOTE_STACK_HOST}:18102/api/v1" ;;
     consultations-service) printf '%s' "${E2E_CONSULTATIONS_BASE_URL:-http://127.0.0.1:18021/api/v1}" ;;
     matter-service) printf '%s' "${E2E_MATTER_BASE_URL:-http://127.0.0.1:18020/api/v1}" ;;
-    knowledge-service) printf '%s' "${E2E_KNOWLEDGE_BASE_URL:-http://${REMOTE_STACK_HOST}:18106/api/v1}" ;;
+    knowledge-service) printf '%s' "${KNOWLEDGE_SERVICE_URL:-http://${REMOTE_STACK_HOST}:18106/api/v1}" ;;
     files-service) printf '%s' "${E2E_FILES_BASE_URL:-http://${REMOTE_STACK_HOST}:18104/api/v1}" ;;
     platform-service) printf '%s' "http://${REMOTE_STACK_HOST}:18111/api/v1" ;;
     templates-service) printf '%s' "${E2E_TEMPLATES_BASE_URL:-http://${REMOTE_STACK_HOST}:18112/api/v1}" ;;

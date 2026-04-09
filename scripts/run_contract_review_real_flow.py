@@ -30,6 +30,7 @@ from scripts._support.workflow_real_flow_support import (
     configure_direct_service_mode,
     event_counts as _shared_event_counts,
     fetch_execution_snapshot_by_session as _shared_fetch_execution_snapshot_by_session,
+    fetch_execution_traces_by_session as _shared_fetch_execution_traces_by_session,
     fetch_workbench_snapshot as _shared_fetch_workbench_snapshot,
     list_session_messages as _shared_list_session_messages,
     load_real_flow_env,
@@ -173,6 +174,10 @@ async def _fetch_snapshot(client: ApiClient, matter_id: str) -> dict[str, Any] |
 
 async def _fetch_execution_snapshot(session_id: str) -> dict[str, Any] | None:
     return await _shared_fetch_execution_snapshot_by_session(session_id)
+
+
+async def _fetch_execution_traces(session_id: str) -> list[dict[str, Any]]:
+    return await _shared_fetch_execution_traces_by_session(session_id)
 
 
 def _section_items(view: dict[str, Any], section_type: str) -> list[dict[str, Any]]:
@@ -487,10 +492,29 @@ async def run(args: argparse.Namespace) -> int:
             matter_id=_safe_str(flow.matter_id) or matter_id,
             next_action="continue_poll",
         )
+        last_runtime_snapshot: dict[str, Any] = {}
 
         async def _deliverables_ready(f: WorkbenchFlow) -> bool:
+            nonlocal last_runtime_snapshot
             await f.refresh()
             runtime_snapshot = await _fetch_execution_snapshot(session_id)
+            runtime_traces = await _fetch_execution_traces(session_id)
+            last_runtime_snapshot = runtime_snapshot if isinstance(runtime_snapshot, dict) else {}
+            runtime_matter_id = _safe_str(f.matter_id) or matter_id
+            runtime_snapshot_view = await _fetch_snapshot(client, runtime_matter_id) if runtime_matter_id else {}
+            runtime_pending_card = await f.get_pending_card()
+            supervisor.update(
+                status="running",
+                current_step="deliverables.waiting",
+                session_id=session_id,
+                matter_id=runtime_matter_id,
+                snapshot=runtime_snapshot_view if isinstance(runtime_snapshot_view, dict) else {},
+                execution_snapshot=last_runtime_snapshot,
+                execution_traces=runtime_traces,
+                pending_card=runtime_pending_card if isinstance(runtime_pending_card, dict) else None,
+                current_blocker=_safe_str((runtime_pending_card or {}).get("task_key")),
+                next_action="continue_poll",
+            )
             by_key = _extract_runtime_deliverables(runtime_snapshot)
             report = by_key.get("contract_review_report") or {}
             if not report:
@@ -513,6 +537,7 @@ async def run(args: argparse.Namespace) -> int:
             fail_matter_id = _safe_str(flow.matter_id) or matter_id
             fail_snapshot = await _fetch_snapshot(client, fail_matter_id) if fail_matter_id else {}
             fail_runtime_snapshot = await _fetch_execution_snapshot(session_id)
+            fail_runtime_traces = await _fetch_execution_traces(session_id)
             fail_deliverables = _extract_runtime_deliverables(fail_runtime_snapshot)
             fail_messages = await _list_session_messages(client, session_id)
             debug_refs = await collect_ai_debug_refs(
@@ -561,7 +586,6 @@ async def run(args: argparse.Namespace) -> int:
                 reason="contract_review_real_flow_failed",
             )
             bundle_quality = build_bundle_quality_reports(
-                repo_root=REPO_ROOT,
                 bundle_dir=bundle["bundle_dir"],
                 flow_id="contract_review",
                 snapshot=fail_snapshot if isinstance(fail_snapshot, dict) else {},
@@ -575,6 +599,9 @@ async def run(args: argparse.Namespace) -> int:
                 current_step="terminal.failed",
                 session_id=session_id,
                 matter_id=fail_matter_id,
+                snapshot=fail_snapshot if isinstance(fail_snapshot, dict) else {},
+                execution_snapshot=fail_runtime_snapshot if isinstance(fail_runtime_snapshot, dict) else None,
+                execution_traces=fail_runtime_traces,
                 current_blocker="contract_review_real_flow_failed",
                 next_action="inspect_failure_summary",
                 error=str(e),
@@ -588,6 +615,7 @@ async def run(args: argparse.Namespace) -> int:
             raise RuntimeError("matter_id missing after workflow run")
 
         execution_snapshot = await _fetch_execution_snapshot(session_id)
+        execution_traces = await _fetch_execution_traces(session_id)
         if not isinstance(execution_snapshot, dict) or not execution_snapshot:
             raise RuntimeError("execution_snapshot_missing")
         deliverables = _extract_runtime_deliverables(execution_snapshot)
@@ -646,7 +674,6 @@ async def run(args: argparse.Namespace) -> int:
         )
         observability = await collect_flow_observability(client, matter_id=final_matter_id, session_id=session_id)
         bundle_quality = build_bundle_quality_reports(
-            repo_root=REPO_ROOT,
             bundle_dir=bundle_export["bundle_dir"],
             flow_id="contract_review",
             snapshot=snapshot,
@@ -704,8 +731,11 @@ async def run(args: argparse.Namespace) -> int:
             current_step="terminal.completed",
             session_id=session_id,
             matter_id=final_matter_id,
-            next_action="inspect_summary",
+            snapshot=snapshot,
+            execution_snapshot=execution_snapshot,
+            execution_traces=execution_traces,
             pending_card=pending_card,
+            next_action="inspect_summary",
             artifact_refs={
                 "summary": str(out_dir / "summary.json"),
                 "deliverables": str(out_dir / "deliverables.json"),
@@ -713,6 +743,7 @@ async def run(args: argparse.Namespace) -> int:
             extra={
                 "deliverable_keys": sorted(deliverables.keys()),
                 "report_file_id": report_file_id,
+                "last_runtime_snapshot_status": _safe_str(last_runtime_snapshot.get("status")),
             },
         )
 

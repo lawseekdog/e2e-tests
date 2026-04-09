@@ -15,9 +15,6 @@ def _resolve_ai_engine_python(repo_root: Path) -> Path:
     candidates = (
         repo_root / "ai-engine-v2" / ".venv" / "bin" / "python",
         repo_root / "ai-engine-v2" / ".venv312" / "bin" / "python",
-        repo_root / ".venv" / "bin" / "python",
-        repo_root / "ai-engine" / ".venv312" / "bin" / "python",
-        repo_root / "ai-engine" / ".venv" / "bin" / "python",
     )
     for path in candidates:
         if path.exists() and path.is_file():
@@ -31,7 +28,6 @@ def _resolve_ai_engine_env_file(repo_root: Path) -> Path:
         path
         for path in (
             Path(configured).expanduser() if configured else None,
-            repo_root / "ai-engine-v2" / ".local" / "local-ai-engine-stack.env",
             repo_root / "infra-live" / ".local" / "aliyun-remote.env",
             repo_root / "infra-live" / ".local" / "env.local",
         )

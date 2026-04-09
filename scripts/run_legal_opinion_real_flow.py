@@ -35,6 +35,8 @@ from scripts._support.workflow_real_flow_support import (
     collect_ai_debug_refs,
     configure_direct_service_mode,
     event_counts,
+    fetch_execution_snapshot_by_session,
+    fetch_execution_traces_by_session,
     fetch_workbench_snapshot,
     is_goal_completion_card,
     list_deliverables,
@@ -112,7 +114,6 @@ def _safe_export_failure_bundle(*, repo_root: Path, session_id: str, matter_id: 
 
 def _safe_build_bundle_quality_reports(
     *,
-    repo_root: Path,
     bundle_dir: str,
     flow_id: str,
     snapshot: dict[str, Any] | None,
@@ -135,7 +136,6 @@ def _safe_build_bundle_quality_reports(
         }
     try:
         return build_bundle_quality_reports(
-            repo_root=repo_root,
             bundle_dir=token,
             flow_id=flow_id,
             snapshot=snapshot,
@@ -809,6 +809,8 @@ async def _collect_round_state(
     await flow.refresh()
     matter_id = _safe_str(flow.matter_id)
     snapshot = await fetch_workbench_snapshot(client, matter_id) if matter_id else {}
+    execution_snapshot = await fetch_execution_snapshot_by_session(session_id)
+    execution_traces = await fetch_execution_traces_by_session(session_id)
     analysis_projection = _extract_legal_opinion_projection(snapshot)
     docgen_state = _extract_document_generation_state(snapshot)
     pending_card = await flow.get_pending_card()
@@ -835,7 +837,6 @@ async def _collect_round_state(
         deliverable_status=deliverable_status,
     )
     quality_summary = _safe_build_bundle_quality_reports(
-        repo_root=REPO_ROOT,
         bundle_dir=bundle_export["bundle_dir"],
         flow_id="legal_opinion",
         snapshot=snapshot,
@@ -874,6 +875,8 @@ async def _collect_round_state(
     )
     prefix = f"{round_no:02d}.{round_label}"
     write_json(out_dir / f"{prefix}.snapshot.json", snapshot if isinstance(snapshot, dict) else {})
+    write_json(out_dir / f"{prefix}.execution_snapshot.json", execution_snapshot if isinstance(execution_snapshot, dict) else {})
+    write_json(out_dir / f"{prefix}.execution_traces.json", {"traces": execution_traces if isinstance(execution_traces, list) else []})
     write_json(out_dir / f"{prefix}.analysis_projection.json", analysis_projection)
     write_json(out_dir / f"{prefix}.document_generation_state.json", docgen_state)
     write_json(out_dir / f"{prefix}.deliverables.json", deliverables)
@@ -894,6 +897,8 @@ async def _collect_round_state(
     return {
         "matter_id": matter_id,
         "snapshot": snapshot,
+        "execution_snapshot": execution_snapshot,
+        "execution_traces": execution_traces,
         "analysis_projection": analysis_projection,
         "docgen_state": docgen_state,
         "pending_card": pending_card,
@@ -1047,6 +1052,8 @@ async def run(args: argparse.Namespace) -> int:
                     current_step="terminal.capability_gap",
                     session_id=session_id,
                     matter_id=_safe_str(flow.matter_id),
+                    snapshot=gap_round["snapshot"] if isinstance(gap_round.get("snapshot"), dict) else {},
+                    execution_snapshot=gap_round["execution_snapshot"] if isinstance(gap_round.get("execution_snapshot"), dict) else None,
                     pending_card=gap_round["pending_card"] if isinstance(gap_round.get("pending_card"), dict) else kickoff_card,
                     current_blocker="capability_gap",
                     next_action="inspect_summary",
@@ -1082,6 +1089,11 @@ async def run(args: argparse.Namespace) -> int:
                 round_label="analysis_poll",
                 goal_completion_mode="card",
             )
+            analysis_execution_snapshot = (
+                analysis_round.get("execution_snapshot")
+                if isinstance(analysis_round.get("execution_snapshot"), dict)
+                else {}
+            )
             current_progress_token = _json_fingerprint(
                 {
                     "task": _safe_str(analysis_round["snapshot"].get("analysis_state", {}).get("current_task_id"))
@@ -1100,11 +1112,36 @@ async def run(args: argparse.Namespace) -> int:
             if current_progress_token != analysis_progress_token:
                 analysis_progress_token = current_progress_token
                 analysis_action_cooldown = 0
-            if _analysis_round_ready(analysis_round):
+            analysis_pending_card = analysis_round["pending_card"] if isinstance(analysis_round.get("pending_card"), dict) else {}
+            analysis_ready = _analysis_round_ready(analysis_round)
+            analysis_projection_row = (
+                analysis_round["analysis_projection"]
+                if isinstance(analysis_round.get("analysis_projection"), dict)
+                else {}
+            )
+            supervisor.update(
+                status="ready" if analysis_ready else "running",
+                current_step="poll.analysis_ready",
+                session_id=session_id,
+                matter_id=_safe_str(flow.matter_id),
+                snapshot=analysis_round["snapshot"] if isinstance(analysis_round.get("snapshot"), dict) else {},
+                execution_snapshot=analysis_execution_snapshot,
+                execution_traces=analysis_round["execution_traces"] if isinstance(analysis_round.get("execution_traces"), list) else None,
+                pending_card=analysis_pending_card,
+                current_blocker=_safe_str(analysis_pending_card.get("task_key")) or ("analysis_not_ready" if not analysis_ready else ""),
+                next_action="collect_final_outputs" if analysis_ready else "continue_poll",
+                extra={
+                    "deliverable_keys": sorted((analysis_round.get("deliverables") or {}).keys()),
+                    "issues_count": len(analysis_projection_row.get("issues")) if isinstance(analysis_projection_row.get("issues"), list) else 0,
+                    "risk_count": len(analysis_projection_row.get("risks")) if isinstance(analysis_projection_row.get("risks"), list) else 0,
+                    "action_items_count": len(analysis_projection_row.get("action_items")) if isinstance(analysis_projection_row.get("action_items"), list) else 0,
+                },
+            )
+            if analysis_ready:
                 break
             analysis_snapshot = analysis_round.get("snapshot")
             analysis_projection = analysis_round.get("analysis_projection")
-            pending_card = analysis_round["pending_card"] if isinstance(analysis_round.get("pending_card"), dict) else {}
+            pending_card = analysis_pending_card
             if _is_auto_answerable_intake_card(pending_card):
                 summary = {
                     "status": "unexpected_intake_card",
@@ -1118,6 +1155,9 @@ async def run(args: argparse.Namespace) -> int:
                     current_step="terminal.unexpected_intake_card",
                     session_id=session_id,
                     matter_id=_safe_str(flow.matter_id),
+                    snapshot=analysis_round["snapshot"] if isinstance(analysis_round.get("snapshot"), dict) else {},
+                    execution_snapshot=analysis_execution_snapshot,
+                    execution_traces=analysis_round["execution_traces"] if isinstance(analysis_round.get("execution_traces"), list) else None,
                     pending_card=pending_card,
                     current_blocker="unexpected_intake_card",
                     next_action="inspect_summary",
@@ -1200,7 +1240,6 @@ async def run(args: argparse.Namespace) -> int:
                 reason="legal_opinion_analysis_not_ready",
             )
             bundle_quality = _safe_build_bundle_quality_reports(
-                repo_root=REPO_ROOT,
                 bundle_dir=bundle["bundle_dir"],
                 flow_id="legal_opinion",
                 snapshot=await fetch_workbench_snapshot(client, _safe_str(flow.matter_id)) if _safe_str(flow.matter_id) else {},
@@ -1209,11 +1248,15 @@ async def run(args: argparse.Namespace) -> int:
             )
             write_json(out_dir / "failure_summary.json", bundle["summary"])
             write_json(out_dir / "bundle_quality.failure.json", bundle_quality)
+            fail_execution_snapshot = await fetch_execution_snapshot_by_session(session_id)
+            fail_execution_traces = await fetch_execution_traces_by_session(session_id)
             supervisor.update(
                 status="failed",
                 current_step="terminal.failed",
                 session_id=session_id,
                 matter_id=_safe_str(flow.matter_id),
+                execution_snapshot=fail_execution_snapshot,
+                execution_traces=fail_execution_traces,
                 current_blocker="legal_opinion_analysis_not_ready",
                 next_action="inspect_failure_summary",
                 error=f"Failed to reach legal opinion analysis ready after {int(args.max_steps)} steps",
@@ -1246,7 +1289,10 @@ async def run(args: argparse.Namespace) -> int:
                 status="blocked",
                 current_step="terminal.capability_gap",
                 session_id=session_id,
-                matter_id=_safe_str(final_round["matter_id"]),
+                matter_id=_safe_str(analysis_round["matter_id"]),
+                snapshot=analysis_round["snapshot"] if isinstance(analysis_round.get("snapshot"), dict) else {},
+                execution_snapshot=analysis_round["execution_snapshot"] if isinstance(analysis_round.get("execution_snapshot"), dict) else None,
+                execution_traces=analysis_round["execution_traces"] if isinstance(analysis_round.get("execution_traces"), list) else None,
                 pending_card=analysis_round["pending_card"] if isinstance(analysis_round.get("pending_card"), dict) else None,
                 current_blocker="capability_gap",
                 next_action="inspect_summary",
@@ -1283,14 +1329,23 @@ async def run(args: argparse.Namespace) -> int:
             "analysis_reference_refresh_attempts": analysis_reference_refresh_attempts,
             "goal_completion_card_present": is_goal_completion_card(ready_pending_card),
             "pending_card": ready_pending_card,
+            "execution_status": _safe_str((final_round.get("execution_snapshot") or {}).get("status")),
+            "execution_phase_id": _safe_str((final_round.get("execution_snapshot") or {}).get("current_phase_id")),
             "success": True,
         }
         write_json(out_dir / "summary.json", summary)
+        write_json(
+            out_dir / "execution_snapshot.json",
+            final_round["execution_snapshot"] if isinstance(final_round.get("execution_snapshot"), dict) else {},
+        )
         supervisor.update(
             status="completed",
             current_step="terminal.completed",
             session_id=session_id,
             matter_id=_safe_str(final_round["matter_id"]),
+            snapshot=final_round["snapshot"] if isinstance(final_round.get("snapshot"), dict) else {},
+            execution_snapshot=final_round["execution_snapshot"] if isinstance(final_round.get("execution_snapshot"), dict) else None,
+            execution_traces=final_round["execution_traces"] if isinstance(final_round.get("execution_traces"), list) else None,
             pending_card=ready_pending_card,
             next_action="inspect_summary",
             artifact_refs={"summary": str(out_dir / "summary.json")},

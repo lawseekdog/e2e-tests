@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -162,110 +161,40 @@ def resolve_quality_context(
     return merged
 
 
-def _deep_merge_policy(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    out = deepcopy(base)
-    for key, value in patch.items():
-        if key == "extends":
-            continue
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = _deep_merge_policy(out[key], value)
-            continue
-        out[key] = deepcopy(value)
-    return out
+def _default_quality_policy(context: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "policy_version": "quality_policy.v1",
+        "selectors": {
+            "flow_id": _safe_str(context.get("flow_id")),
+            "service_type_ids": [_safe_str(context.get("service_type_id"))] if _safe_str(context.get("service_type_id")) else [],
+            "contract_type_ids": [],
+            "opinion_subtypes": [],
+        },
+        "node_profiles": {},
+        "skill_profiles": {},
+        "lane_profiles": {},
+        "score_weights": {
+            "bundle": {
+                "unexpected_card_score": 0.25,
+                "node_path_score": 0.25,
+                "snapshot_progress_score": 0.2,
+                "deliverable_quality_score": 0.3,
+            }
+        },
+        "hard_fail_rules": [
+            "missing_bundle_top_level_contract",
+            "quality_raw_missing",
+            "observability_contract_missing_reason_code",
+        ],
+        "warn_rules": [
+            "human_input_required",
+            "recovered_after_retry",
+        ],
+    }
 
 
-def _bundles_root(repo_root: Path) -> Path:
-    return repo_root / "ai-engine" / "src" / "domain" / "workbench" / "bundles"
-
-
-def _resolve_policy_path(*, repo_root: Path, family: str, bundle_key: str, relative_path: str) -> Path:
-    root = _bundles_root(repo_root)
-    family_root = (root / _safe_str(family).lower()).resolve()
-    base_dir = (family_root / _safe_str(bundle_key).lower()).resolve()
-    rel = _safe_str(relative_path)
-    path = (family_root / rel[len("@family/") :]).resolve() if rel.startswith("@family/") else (base_dir / rel).resolve()
-    allowed_root = family_root if rel.startswith("@family/") else base_dir
-    if path != allowed_root and allowed_root not in path.parents:
-        raise ValueError(f"quality_policy_out_of_root:{family}:{bundle_key}:{relative_path}")
-    return path
-
-
-def _load_quality_policy_doc(
-    *,
-    repo_root: Path,
-    family: str,
-    bundle_key: str,
-    relative_path: str,
-    seen: set[Path] | None = None,
-) -> dict[str, Any]:
-    path = _resolve_policy_path(repo_root=repo_root, family=family, bundle_key=bundle_key, relative_path=relative_path)
-    visited = seen if isinstance(seen, set) else set()
-    if path in visited:
-        raise ValueError(f"quality_policy_cycle:{family}:{bundle_key}:{path}")
-    visited.add(path)
-    payload = _read_json(path)
-    merged: dict[str, Any] = {}
-    extends = payload.get("extends")
-    extend_rows = [extends] if isinstance(extends, str) else [row for row in extends if isinstance(row, str)] if isinstance(extends, list) else []
-    for row in extend_rows:
-        merged = _deep_merge_policy(
-            merged,
-            _load_quality_policy_doc(
-                repo_root=repo_root,
-                family=family,
-                bundle_key=bundle_key,
-                relative_path=_safe_str(row),
-                seen=visited,
-            ),
-        )
-    return _deep_merge_policy(merged, payload)
-
-
-def load_quality_policy(*, repo_root: Path, context: dict[str, Any]) -> dict[str, Any]:
-    family = _safe_str(context.get("bundle_family"))
-    bundle_key = _safe_str(context.get("bundle_key"))
-    manifest_path = _bundles_root(repo_root) / family / bundle_key / "manifest.json"
-    if not family or not bundle_key or not manifest_path.exists():
-        return {
-            "policy_version": "quality_policy.v1",
-            "selectors": {
-                "flow_id": _safe_str(context.get("flow_id")),
-                "service_type_ids": [_safe_str(context.get("service_type_id"))] if _safe_str(context.get("service_type_id")) else [],
-                "contract_type_ids": [],
-                "opinion_subtypes": [],
-            },
-            "node_profiles": {},
-            "skill_profiles": {},
-            "lane_profiles": {},
-            "score_weights": {
-                "bundle": {
-                    "unexpected_card_score": 0.25,
-                    "node_path_score": 0.25,
-                    "snapshot_progress_score": 0.2,
-                    "deliverable_quality_score": 0.3,
-                }
-            },
-            "hard_fail_rules": [
-                "missing_bundle_top_level_contract",
-                "quality_raw_missing",
-                "observability_contract_missing_reason_code",
-            ],
-            "warn_rules": [
-                "human_input_required",
-                "recovered_after_retry",
-            ],
-        }
-    manifest = _read_json(manifest_path)
-    capabilities = _as_dict(manifest.get("capabilities"))
-    relative_path = _safe_str(capabilities.get("quality_policy"))
-    if not relative_path:
-        return {}
-    return _load_quality_policy_doc(
-        repo_root=repo_root,
-        family=family,
-        bundle_key=bundle_key,
-        relative_path=relative_path,
-    )
+def load_quality_policy(*, context: dict[str, Any]) -> dict[str, Any]:
+    return _default_quality_policy(context)
 
 
 def _match_prefixes(value: str, prefixes: list[Any]) -> bool:
@@ -516,7 +445,6 @@ def _quality_refs(bundle_dir: Path) -> dict[str, str]:
 
 def build_bundle_quality_reports(
     *,
-    repo_root: Path,
     bundle_dir: str,
     flow_id: str,
     snapshot: dict[str, Any] | None,
@@ -531,7 +459,7 @@ def build_bundle_quality_reports(
         current_view=current_view,
         goal_completion_mode=goal_completion_mode,
     )
-    policy = load_quality_policy(repo_root=repo_root, context=context)
+    policy = load_quality_policy(context=context)
     raw_dir = bundle_path / "quality" / "raw"
     node_rows = _read_jsonl(raw_dir / "nodes.jsonl")
     skill_rows = _read_jsonl(raw_dir / "skills.jsonl")

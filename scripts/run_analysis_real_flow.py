@@ -22,6 +22,8 @@ from scripts._support.workflow_real_flow_support import (
     collect_ai_debug_refs,
     configure_direct_service_mode,
     event_counts,
+    fetch_execution_snapshot_by_session,
+    fetch_execution_traces_by_session,
     fetch_workbench_snapshot,
     is_goal_completion_card,
     list_deliverables,
@@ -321,6 +323,8 @@ def _write_run_status(
     matter_id: str,
     wait_round: int,
     snapshot: dict[str, Any] | None,
+    execution_snapshot: dict[str, Any] | None,
+    execution_traces: list[dict[str, Any]] | None,
     pending_card: dict[str, Any] | None,
     analysis_view: dict[str, Any] | None,
     pricing_view: dict[str, Any] | None,
@@ -347,6 +351,8 @@ def _write_run_status(
         session_id=_safe_str(session_id),
         matter_id=_safe_str(matter_id),
         snapshot=snapshot_obj,
+        execution_snapshot=execution_snapshot if isinstance(execution_snapshot, dict) else None,
+        execution_traces=execution_traces if isinstance(execution_traces, list) else None,
         pending_card=pending_card,
         current_blocker=",".join(readiness.get("missing_requirements") or []),
         next_action="collect_final_outputs" if bool(readiness.get("ready")) else "continue_poll",
@@ -359,6 +365,8 @@ def _write_run_status(
             "analysis_view": analysis_obj,
             "pricing_plan_view": pricing_obj,
             "document_generation_state": docgen_obj,
+            "execution_snapshot": execution_snapshot if isinstance(execution_snapshot, dict) else {},
+            "execution_traces": execution_traces if isinstance(execution_traces, list) else [],
             "pending_card": _compact_pending_card(pending_card),
         },
         extra={
@@ -534,6 +542,8 @@ async def run(args: argparse.Namespace) -> int:
             matter_id=_safe_str(flow.matter_id),
             wait_round=wait_round,
             snapshot={},
+            execution_snapshot=await fetch_execution_snapshot_by_session(session_id),
+            execution_traces=await fetch_execution_traces_by_session(session_id),
             pending_card=None,
             analysis_view={},
             pricing_view={},
@@ -568,6 +578,8 @@ async def run(args: argparse.Namespace) -> int:
                         matter_id="",
                         wait_round=wait_round,
                         snapshot={},
+                        execution_snapshot=await fetch_execution_snapshot_by_session(session_id),
+                        execution_traces=await fetch_execution_traces_by_session(session_id),
                         pending_card=None,
                         analysis_view={},
                         pricing_view={},
@@ -591,6 +603,8 @@ async def run(args: argparse.Namespace) -> int:
 
                 pending = await flow.get_pending_card()
                 snapshot = await fetch_workbench_snapshot(client, flow.matter_id)
+                execution_snapshot = await fetch_execution_snapshot_by_session(session_id)
+                execution_traces = await fetch_execution_traces_by_session(session_id)
                 analysis_view = _extract_analysis_view(snapshot)
                 pricing_view = _extract_pricing_view(snapshot)
                 docgen_state = _extract_document_generation_state(snapshot)
@@ -610,6 +624,8 @@ async def run(args: argparse.Namespace) -> int:
                         matter_id=_safe_str(flow.matter_id),
                         wait_round=wait_round,
                         snapshot=snapshot,
+                        execution_snapshot=execution_snapshot,
+                        execution_traces=execution_traces,
                         pending_card=pending,
                         analysis_view=analysis_view,
                         pricing_view=pricing_view,
@@ -641,6 +657,8 @@ async def run(args: argparse.Namespace) -> int:
                     matter_id=_safe_str(flow.matter_id),
                     wait_round=wait_round,
                     snapshot=snapshot,
+                    execution_snapshot=execution_snapshot,
+                    execution_traces=execution_traces,
                     pending_card=pending,
                     analysis_view=analysis_view,
                     pricing_view=pricing_view,
@@ -703,6 +721,8 @@ async def run(args: argparse.Namespace) -> int:
         except Exception as exc:
             await flow.refresh()
             fail_snapshot = await fetch_workbench_snapshot(client, _safe_str(flow.matter_id)) if flow.matter_id else {}
+            fail_execution_snapshot = await fetch_execution_snapshot_by_session(session_id)
+            fail_execution_traces = await fetch_execution_traces_by_session(session_id)
             fail_messages = await list_session_messages(client, session_id)
             debug_refs = await collect_ai_debug_refs(
                 client,
@@ -735,6 +755,8 @@ async def run(args: argparse.Namespace) -> int:
                 matter_id=_safe_str(flow.matter_id),
                 wait_round=wait_round,
                 snapshot=fail_snapshot if isinstance(fail_snapshot, dict) else {},
+                execution_snapshot=fail_execution_snapshot,
+                execution_traces=fail_execution_traces,
                 pending_card=await flow.get_pending_card(),
                 analysis_view=_extract_analysis_view(fail_snapshot if isinstance(fail_snapshot, dict) else {}),
                 pricing_view=_extract_pricing_view(fail_snapshot if isinstance(fail_snapshot, dict) else {}),
@@ -760,7 +782,6 @@ async def run(args: argparse.Namespace) -> int:
                     reason="analysis_real_flow_failed",
                 )
                 bundle_quality = build_bundle_quality_reports(
-                    repo_root=REPO_ROOT,
                     bundle_dir=bundle["bundle_dir"],
                     flow_id="analysis",
                     snapshot=fail_snapshot if isinstance(fail_snapshot, dict) else {},
@@ -783,6 +804,8 @@ async def run(args: argparse.Namespace) -> int:
             raise RuntimeError("matter_id missing after workflow run")
 
         snapshot = await fetch_workbench_snapshot(client, final_matter_id) or {}
+        execution_snapshot = await fetch_execution_snapshot_by_session(session_id)
+        execution_traces = await fetch_execution_traces_by_session(session_id)
         analysis_view = _extract_analysis_view(snapshot)
         pricing_view = _extract_pricing_view(snapshot)
         docgen_state = _extract_document_generation_state(snapshot)
@@ -812,7 +835,6 @@ async def run(args: argparse.Namespace) -> int:
         )
         observability = await collect_flow_observability(client, matter_id=final_matter_id, session_id=session_id)
         bundle_quality = build_bundle_quality_reports(
-            repo_root=REPO_ROOT,
             bundle_dir=bundle_export["bundle_dir"],
             flow_id="analysis",
             snapshot=snapshot,
@@ -890,6 +912,8 @@ async def run(args: argparse.Namespace) -> int:
             matter_id=final_matter_id,
             wait_round=wait_round,
             snapshot=snapshot,
+            execution_snapshot=execution_snapshot,
+            execution_traces=execution_traces,
             pending_card=pending_card,
             analysis_view=analysis_view,
             pricing_view=pricing_view,
@@ -909,6 +933,7 @@ async def run(args: argparse.Namespace) -> int:
         write_json(out_dir / "deliverables.json", {"deliverables": deliverables})
         write_json(out_dir / "deliverables.latest.json", {"deliverables": deliverables})
         write_json(out_dir / "messages.json", {"messages": messages})
+        write_json(out_dir / "execution_snapshot.json", execution_snapshot if isinstance(execution_snapshot, dict) else {})
         write_json(out_dir / "diagnostics_summary.json", debug_refs.get("diagnostics_summary") if isinstance(debug_refs.get("diagnostics_summary"), dict) else {})
         write_json(out_dir / "diagnostics_events.json", {"events": debug_refs.get("diagnostics_events") if isinstance(debug_refs.get("diagnostics_events"), list) else []})
         write_json(out_dir / "debug_refs.json", debug_refs)

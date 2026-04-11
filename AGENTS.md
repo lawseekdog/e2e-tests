@@ -46,3 +46,13 @@
   - `./.venv/bin/python scripts/run_legal_opinion_real_flow.py --cards-only`
   - `./.venv/bin/python scripts/run_template_draft_real_flow.py --template-id <TEMPLATE_ID> --cards-only`
 - pytest 仅保留最小 support/unit：`./.venv/bin/pytest tests/support/test_flow_runner_unit.py -q`
+
+## 多智能体并行改造约定（强制）
+
+- 默认优先并行：任务可拆分时，按脚本、fixture、support 模块、验证入口切成独立子任务并行推进，不要把可并行改造串行化。
+- 默认模型：子智能体默认使用 `gpt-5.4` 且 `reasoning_effort = medium`；只有复杂链路排查时才单独提高推理强度。
+- 先定边界再开工：先定义每个子智能体负责的脚本集合、环境依赖、验证口径、输出产物，禁止多个子智能体同时改同一条真链路脚本。
+- 子智能体负责到底：在自己的边界内完成根因定位、脚本改造、必要验证与结果回传，不交半截子诊断。
+- 主智能体只做主控面：负责统一现场、拆分任务、集成改动与最终验收，不重复做子智能体已承接的脚本改造。
+- 谁改谁验证：修改哪个真链路脚本，就负责跑对应最小充分验证，不把验证全部回退给主智能体兜底。
+- 命中 legacy 一次性清掉：命中旧 kickoff、旧 stream、旧 resume、旧 deliverable 参数时，默认直接删除或硬报错，不保留兼容入口。

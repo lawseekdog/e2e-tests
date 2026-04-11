@@ -3,21 +3,27 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 from scripts.run_legal_opinion_real_flow import (
     _analysis_allows_auto_review_card,
-    _analysis_auto_review_card_target,
-    _analysis_should_refresh_references,
+    _analysis_auto_focus_blocker_target,
     _capability_gap_card_matches_overrides,
     _pick_analysis_auto_action,
-    _requested_documents_for_goal,
+    LEGAL_OPINION_CHAT_RUN,
     _resolve_fixture_paths,
     parse_args,
 )
 
+pytestmark = pytest.mark.skip_seed_bootstrap
+
 
 def test_capability_gap_card_matches_supported_overrides() -> None:
     card = {
-        "skill_id": "legal-opinion-capability-gap",
+        "type": "awaiting_review",
+        "interruption_id": "awaiting_review:legal_opinion_capability_gap",
+        "reason_kind": "missing_input",
+        "reason_code": "legal_opinion_capability_gap",
         "questions": [
             {
                 "field_key": "profile.opinion_topic_primary",
@@ -48,7 +54,10 @@ def test_capability_gap_card_matches_supported_overrides() -> None:
 
 def test_capability_gap_card_rejects_unsupported_overrides() -> None:
     card = {
-        "skill_id": "legal-opinion-capability-gap",
+        "type": "awaiting_review",
+        "interruption_id": "awaiting_review:legal_opinion_capability_gap",
+        "reason_kind": "missing_input",
+        "reason_code": "legal_opinion_capability_gap",
         "questions": [
             {
                 "field_key": "profile.opinion_topic_primary",
@@ -94,22 +103,25 @@ def test_parse_args_no_longer_exposes_allow_nudge(monkeypatch) -> None:
     assert not hasattr(args, "allow_nudge")
 
 
-def test_requested_documents_for_legal_opinion_goal_uses_report_contract() -> None:
-    assert _requested_documents_for_goal("legal_opinion") == [
-        {"document_kind": "legal_opinion_report", "instance_key": ""},
-    ]
+def test_legal_opinion_uses_explicit_chat_run_contract() -> None:
+    assert LEGAL_OPINION_CHAT_RUN == {
+        "entry_mode": "direct_drafting",
+        "service_type_id": "legal_opinion",
+        "delivery_goal": "formal_opinion",
+        "target_document_kind": "legal_opinion",
+        "supporting_document_kinds": [],
+    }
 
 
 def test_analysis_auto_action_prefers_legal_opinion_core_missing() -> None:
     legal_view = {
         "status": "pending",
-        "next_actions": [
-            {
-                "goal": "legal_opinion",
-                "type": "open_review_card",
+            "next_actions": [
+                {
+                "type": "focus_blocker",
                 "auto_trigger": True,
                 "payload": {
-                    "action": "open_review_card",
+                    "action": "focus_blocker",
                     "target": "legal_opinion_analyze",
                     "reason_codes": ["legal_opinion_core_missing"],
                 },
@@ -121,74 +133,7 @@ def test_analysis_auto_action_prefers_legal_opinion_core_missing() -> None:
 
     assert action
     assert action["payload"]["target"] == "legal_opinion_analyze"
-    assert _analysis_should_refresh_references(snapshot={}, analysis_projection=legal_view) is False
-    assert _analysis_auto_review_card_target(action) == "legal_opinion_analyze"
-
-
-def test_analysis_allows_reference_refresh_only_after_core_ready() -> None:
-    snapshot = {
-        "analysis_state": {
-            "next_actions": [],
-            "active_scope_id": "analysis:litigation",
-            "goal_scopes": {
-                "analysis:litigation": {
-                    "references": {
-                        "meta": {"status": "blocked", "reason_codes": ["authority_pending"]},
-                    }
-                }
-            },
-            "references_diagnostics_summary": {"final_reason": "authority_pending"},
-        }
-    }
-    legal_view = {
-        "summary": "已形成初步法律意见摘要",
-        "issues": ["尾款抗辩"],
-        "next_actions": [],
-    }
-
-    assert _analysis_should_refresh_references(snapshot=snapshot, analysis_projection=legal_view) is True
-
-
-def test_analysis_allows_reference_refresh_when_references_stage_is_explicitly_blocked() -> None:
-    snapshot = {
-        "analysis_state": {
-            "current_subgraph": "analysis",
-            "current_task_id": "references_finalize",
-            "active_scope_id": "analysis:litigation",
-            "goal_scopes": {
-                "analysis:litigation": {
-                    "references": {
-                        "meta": {
-                            "status": "blocked",
-                            "reason_codes": ["references_grounding_law_rows_missing"],
-                        }
-                    }
-                }
-            },
-            "references_diagnostics_summary": {
-                "final_reason": "retrieval_no_hit",
-            },
-        }
-    }
-    legal_view = {
-        "status": "pending",
-        "summary": "",
-        "issues": [],
-        "next_actions": [
-            {
-                "goal": "legal_opinion",
-                "type": "open_review_card",
-                "auto_trigger": True,
-                "payload": {
-                    "action": "open_review_card",
-                    "target": "legal_opinion_analyze",
-                    "reason_codes": ["legal_opinion_core_missing"],
-                },
-            }
-        ],
-    }
-
-    assert _analysis_should_refresh_references(snapshot=snapshot, analysis_projection=legal_view) is True
+    assert _analysis_auto_focus_blocker_target(action) == "legal_opinion_analyze"
 
 
 def test_analysis_auto_review_card_waits_while_evidence_pipeline_is_running() -> None:

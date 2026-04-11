@@ -540,8 +540,11 @@ async def list_deliverables(client: ApiClient, matter_id: str) -> dict[str, dict
 def is_goal_completion_card(card: dict[str, Any] | None) -> bool:
     if not isinstance(card, dict):
         return False
-    if safe_str(card.get("skill_id")).lower() != "goal-completion":
-        return False
+    interruption_key = safe_str(card.get("interruption_key")).lower()
+    reason_code = safe_str(card.get("reason_code")).lower()
+    product_type = safe_str(card.get("product_type")).lower()
+    if interruption_key == "goal_completion" or reason_code == "goal_completion" or product_type == "goal_completion":
+        return True
     for row in (card.get("questions") if isinstance(card.get("questions"), list) else []):
         if not isinstance(row, dict):
             continue

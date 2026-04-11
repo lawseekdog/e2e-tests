@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import pytest
+
 from scripts.run_contract_review_real_flow import (
     _build_contract_view,
     _extract_runtime_deliverables,
-    _start_requested_documents,
+    _start_chat_run,
 )
 
+pytestmark = pytest.mark.skip_seed_bootstrap
 
-def test_start_requested_documents_use_contract_review_report() -> None:
-    assert _start_requested_documents() == [
-        {"document_kind": "contract_review_report", "instance_key": ""},
-    ]
+
+def test_start_chat_run_uses_contract_review_report() -> None:
+    assert _start_chat_run() == {
+        "entry_mode": "direct_drafting",
+        "service_type_id": "contract_review",
+        "delivery_goal": "contract_review",
+        "target_document_kind": "contract_review_report",
+        "supporting_document_kinds": [],
+    }
 
 
 def test_extract_runtime_deliverables_prefers_execution_snapshot_payload() -> None:
@@ -27,7 +35,7 @@ def test_extract_runtime_deliverables_prefers_execution_snapshot_payload() -> No
                     },
                 },
                 {
-                    "product_type": "artifact_render",
+                    "product_type": "deliverable_artifact",
                     "outputs": [
                         {
                             "deliverable_kind": "contract_review_report",

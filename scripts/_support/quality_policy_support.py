@@ -24,6 +24,10 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _is_missing_input_reason(reason_kind: Any) -> bool:
+    return _safe_str(reason_kind).lower() == "missing_input"
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -77,8 +81,6 @@ def _flow_from_service_type(service_type_id: str, bundle_family: str) -> str:
         return "legal_opinion"
     if token == "contract_review" or family == "contract_review":
         return "contract_review"
-    if token == "document_drafting" or family == "document_drafting":
-        return "template_draft"
     return "analysis"
 
 
@@ -110,9 +112,6 @@ def _derive_quality_context(
     elif service_type_id.lower() == "contract_review":
         bundle_family = "contract_review"
         bundle_key = contract_type_id or "other"
-    elif flow_id == "template_draft" or service_type_id.lower() == "document_drafting":
-        bundle_family = "document_drafting"
-        bundle_key = "document_drafting_general"
     elif rule_bundle:
         bundle_family = _safe_str(rule_bundle.get("bundle_family")) or "analysis"
         bundle_key = _safe_str(rule_bundle.get("bundle_key"))
@@ -187,7 +186,7 @@ def _default_quality_policy(context: dict[str, Any]) -> dict[str, Any]:
             "observability_contract_missing_reason_code",
         ],
         "warn_rules": [
-            "human_input_required",
+            "missing_input_blocker",
             "recovered_after_retry",
         ],
     }
@@ -216,12 +215,12 @@ def _select_node_profile(policy: dict[str, Any], row: dict[str, Any]) -> tuple[s
     return "", {}
 
 
-def _status_score(status: str, *, blocked_human_input: bool = False, recovered: bool = False) -> int:
+def _status_score(status: str, *, blocked_missing_input: bool = False, recovered: bool = False) -> int:
     token = _safe_str(status).lower()
     if token == "failed":
         return 0
     if token == "blocked":
-        return 55 if blocked_human_input else 45
+        return 55 if blocked_missing_input else 45
     if token == "retry":
         return 85 if recovered else 70
     return 100
@@ -235,9 +234,9 @@ def _score_node(row: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
     if status == "failed":
         score = 0
         reasons.append("status=failed")
-    elif status == "blocked" and bool(row.get("human_input_required")):
-        score -= _safe_int(penalties.get("blocked_human_input_required"), 45)
-        reasons.append("blocked_human_input_required")
+    elif status == "blocked" and _is_missing_input_reason(row.get("reason_kind")):
+        score -= _safe_int(penalties.get("blocked_missing_input"), 45)
+        reasons.append("blocked_missing_input")
     elif status == "retry" and bool(row.get("recovered_after_retry")):
         score -= _safe_int(penalties.get("retry_recovered"), 15)
         reasons.append("retry_recovered")
@@ -272,7 +271,7 @@ def _score_node(row: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
             reasons.append(f"missing_fact:{_safe_str(fact_name)}")
     score = max(0, min(100, score))
     severity = "pass"
-    if status == "blocked" and bool(row.get("human_input_required")):
+    if status == "blocked" and _is_missing_input_reason(row.get("reason_kind")):
         severity = "block"
     elif status == "failed" or score < 60:
         severity = "fail"
@@ -309,7 +308,7 @@ def _score_skill(row: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]
         w = float(weight or 0)
         weighted_score += _status_score(
             status,
-            blocked_human_input=_safe_str(row.get("final_reason_code")) == "human_input_required",
+            blocked_missing_input=_is_missing_input_reason(row.get("final_reason_kind")),
             recovered=_safe_int(row.get("retry_count")) > 0 and _safe_str(row.get("final_action")) in {"continue", "ask_user"},
         ) * w
         used_weight += w
@@ -388,10 +387,13 @@ def _score_lane(row: dict[str, Any], node_reports: list[dict[str, Any]], skill_r
     matching_nodes = [item for item in node_reports if _safe_str(item.get("task_id")) == _safe_str(row.get("task_id"))]
     skill_average = int(round(sum(_safe_int(item.get("score"), 100) for item in matching_skills) / float(len(matching_skills)))) if matching_skills else 100
     unresolved_failed = any(_safe_str(item.get("severity")) == "fail" and not bool(item.get("recovered_after_retry")) for item in matching_nodes)
-    blocked_human = any(bool(item.get("human_input_required")) and _safe_str(item.get("status")) == "blocked" for item in matching_nodes)
+    blocked_missing_input = any(
+        _safe_str(item.get("status")) == "blocked" and _is_missing_input_reason(item.get("reason_kind"))
+        for item in matching_nodes
+    )
     if unresolved_failed:
         blocker_score = 0
-    elif blocked_human:
+    elif blocked_missing_input:
         blocker_score = 70
     else:
         blocker_score = 100
@@ -411,12 +413,12 @@ def _score_lane(row: dict[str, Any], node_reports: list[dict[str, Any]], skill_r
     ))
     if unresolved_failed:
         score = min(score, 59)
-    elif blocked_human:
+    elif blocked_missing_input:
         score = max(60, min(score, 75))
     severity = "pass"
     if unresolved_failed or score < 60:
         severity = "fail"
-    elif blocked_human:
+    elif blocked_missing_input:
         severity = "block"
     elif score < 85:
         severity = "warn"

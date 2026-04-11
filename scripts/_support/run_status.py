@@ -21,16 +21,57 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def compact_pending_card(card: dict[str, Any] | None) -> dict[str, Any]:
+def compact_blocker_card(card: dict[str, Any] | None) -> dict[str, Any]:
     pending = card if isinstance(card, dict) else {}
     questions = pending.get("questions") if isinstance(pending.get("questions"), list) else []
     return {
-        "id": safe_str(pending.get("id")),
-        "skill_id": safe_str(pending.get("skill_id")),
-        "task_key": safe_str(pending.get("task_key")),
-        "review_type": safe_str(pending.get("review_type")),
+        "interruption_id": safe_str(pending.get("interruption_id")),
+        "type": safe_str(pending.get("type")),
+        "reason_kind": safe_str(pending.get("reason_kind")),
+        "reason_code": safe_str(pending.get("reason_code")),
         "question_count": len(questions),
     }
+
+
+def compact_blocker(blocker: Any) -> dict[str, Any]:
+    if isinstance(blocker, dict):
+        row = blocker
+    else:
+        summary = safe_str(blocker)
+        if not summary:
+            return {}
+        row = {"summary": summary}
+    out: dict[str, Any] = {}
+    for key in (
+        "type",
+        "interruption_id",
+        "interruption_key",
+        "reason_kind",
+        "reason_code",
+        "title",
+        "summary",
+        "prompt",
+        "product_type",
+        "status",
+        "source",
+    ):
+        token = safe_str(row.get(key))
+        if token:
+            out[key] = token
+    return out
+
+
+def blocker_label(blocker: Any) -> str:
+    row = compact_blocker(blocker)
+    kind = safe_str(row.get("type"))
+    ident = safe_str(
+        row.get("interruption_id")
+        or row.get("interruption_key")
+        or row.get("reason_code")
+    )
+    if kind and ident:
+        return f"{kind}:{ident}"
+    return safe_str(row.get("summary")) or safe_str(row.get("title")) or kind
 
 
 def _workflow_payload(execution_snapshot: dict[str, Any] | None) -> dict[str, Any]:
@@ -54,17 +95,22 @@ def _latest_completed_phase(workflow: dict[str, Any]) -> tuple[str, str]:
     return last_phase, last_label
 
 
-def _current_phase_from_snapshot(snapshot: dict[str, Any]) -> tuple[str, str]:
-    analysis = snapshot.get("analysis_state") if isinstance(snapshot.get("analysis_state"), dict) else {}
-    runtime = analysis.get("workbench_runtime") if isinstance(analysis.get("workbench_runtime"), dict) else {}
-    phase = safe_str(
-        analysis.get("current_phase")
-        or snapshot.get("current_phase")
-        or snapshot.get("current_phase_id")
-        or runtime.get("current_phase")
-    )
-    label = safe_str(snapshot.get("current_phase_name"))
-    return phase, label
+def _phase_from_workflow(workflow: dict[str, Any]) -> tuple[str, str]:
+    phases = workflow.get("phases") if isinstance(workflow.get("phases"), list) else []
+    current_rows = [row for row in phases if isinstance(row, dict) and row.get("current") is True]
+    if len(current_rows) != 1:
+        raise ValueError(f"workflow_current_phase_invalid:expected_single_current:count={len(current_rows)}")
+    row = current_rows[0]
+    phase_id = safe_str(row.get("phase_id") or row.get("id"))
+    phase_label = safe_str(row.get("label") or row.get("name"))
+    if not phase_id:
+        raise ValueError("workflow_current_phase_invalid:missing_phase_id")
+    return phase_id, phase_label
+
+
+def _phase_from_snapshot(snapshot: dict[str, Any]) -> tuple[str, str]:
+    workflow = _workflow_payload(snapshot)
+    return _phase_from_workflow(workflow)
 
 
 def _trace_phase_token(row: dict[str, Any]) -> str:
@@ -83,7 +129,7 @@ def _latest_trace_progress(execution_traces: list[dict[str, Any]] | None) -> dic
         return {
             "current_task_id": "",
             "current_node": "",
-            "current_phase": "",
+            "phase_id": "",
             "current_subgraph": "",
             "last_completed_phase": "",
         }
@@ -101,13 +147,13 @@ def _latest_trace_progress(execution_traces: list[dict[str, Any]] | None) -> dic
         if phase:
             last_completed_phase = phase
 
-    current_phase = _trace_phase_token(current_row)
+    phase_id = _trace_phase_token(current_row)
     current_node = safe_str(current_row.get("node_name") or current_row.get("node_id"))
     return {
         "current_task_id": safe_str(current_row.get("node_id")),
         "current_node": current_node,
-        "current_phase": current_phase,
-        "current_subgraph": current_phase,
+        "phase_id": phase_id,
+        "current_subgraph": phase_id,
         "last_completed_phase": last_completed_phase,
     }
 
@@ -122,8 +168,8 @@ def extract_runtime_progress(
         return {
             "current_task_id": "",
             "current_node": "",
-            "current_phase": "",
-            "current_phase_label": "",
+            "phase_id": "",
+            "phase_label": "",
             "current_subgraph": "",
             "execution_status": "",
             "last_completed_phase": "",
@@ -135,22 +181,9 @@ def extract_runtime_progress(
     identity = analysis.get("identity") if isinstance(analysis.get("identity"), dict) else {}
     runtime = analysis.get("workbench_runtime") if isinstance(analysis.get("workbench_runtime"), dict) else {}
     trace_progress = _latest_trace_progress(execution_traces)
-    current_phase, current_phase_label = _current_phase_from_snapshot(snapshot_obj)
-    if workflow:
-        current_phase = safe_str(
-            workflow.get("current_phase_id")
-            or (execution_snapshot or {}).get("current_phase_id")
-            or current_phase
-        )
-        current_phase_label = safe_str(
-            workflow.get("current_phase_label")
-            or ((execution_snapshot or {}).get("phase") or {}).get("name")
-            or (execution_snapshot or {}).get("current_phase_name")
-            or current_phase_label
-        )
+    phase_source = execution_snapshot if isinstance(execution_snapshot, dict) and workflow else snapshot_obj
+    phase_id, phase_label = _phase_from_snapshot(phase_source)
     last_completed_phase, last_completed_phase_label = _latest_completed_phase(workflow)
-    if not current_phase and trace_progress["current_phase"]:
-        current_phase = trace_progress["current_phase"]
     current_subgraph = safe_str(
         analysis.get("current_subgraph")
         or workflow.get("current_subgraph")
@@ -171,8 +204,8 @@ def extract_runtime_progress(
     return {
         "current_task_id": current_task_id,
         "current_node": current_node,
-        "current_phase": current_phase,
-        "current_phase_label": current_phase_label,
+        "phase_id": phase_id,
+        "phase_label": phase_label,
         "current_subgraph": current_subgraph,
         "execution_status": safe_str(
             (execution_snapshot or {}).get("status")
@@ -195,21 +228,18 @@ def format_run_status_line(payload: dict[str, Any] | None) -> str:
     bits = [
         f"flow={safe_str(row.get('flow_id')) or '-'}",
         f"status={safe_str(row.get('status')) or '-'}",
-        f"step={safe_str(row.get('current_step')) or '-'}",
+        f"progress={safe_str(row.get('progress_label')) or '-'}",
     ]
     session_id = safe_str(row.get("session_id"))
     matter_id = safe_str(row.get("matter_id"))
     execution_status = safe_str(row.get("execution_status"))
-    current_phase = safe_str(row.get("current_phase"))
-    current_phase_label = safe_str(row.get("current_phase_label"))
+    phase_id = safe_str(row.get("phase_id"))
+    phase_label = safe_str(row.get("phase_label"))
     current_subgraph = safe_str(row.get("current_subgraph"))
     current_node = safe_str(row.get("current_node"))
     last_completed_phase = safe_str(row.get("last_completed_phase"))
-    blocker = safe_str(row.get("current_blocker"))
+    blocker = blocker_label(row.get("current_blocker"))
     next_action = safe_str(row.get("next_action"))
-    pending = row.get("pending_card") if isinstance(row.get("pending_card"), dict) else {}
-    pending_skill = safe_str(pending.get("skill_id"))
-    pending_task = safe_str(pending.get("task_key"))
     error = safe_str(row.get("error"))
     if session_id:
         bits.append(f"session={session_id}")
@@ -217,18 +247,16 @@ def format_run_status_line(payload: dict[str, Any] | None) -> str:
         bits.append(f"matter={matter_id}")
     if execution_status:
         bits.append(f"exec={execution_status}")
-    if current_phase:
-        bits.append(f"phase={current_phase}")
-    if current_phase_label:
-        bits.append(f"phase_name={current_phase_label}")
+    if phase_id:
+        bits.append(f"phase={phase_id}")
+    if phase_label:
+        bits.append(f"phase_name={phase_label}")
     if current_subgraph:
         bits.append(f"subgraph={current_subgraph}")
     if current_node:
         bits.append(f"node={current_node}")
     if last_completed_phase:
         bits.append(f"last_ok={last_completed_phase}")
-    if pending_skill or pending_task:
-        bits.append(f"pending={pending_skill or pending_task}")
     if blocker:
         bits.append(f"blocker={blocker}")
     if error:
@@ -267,14 +295,14 @@ class RunStatusSupervisor:
         self,
         *,
         status: str,
-        current_step: str,
+        progress_label: str,
         session_id: str = "",
         matter_id: str = "",
         snapshot: dict[str, Any] | None = None,
         execution_snapshot: dict[str, Any] | None = None,
         execution_traces: list[dict[str, Any]] | None = None,
-        pending_card: dict[str, Any] | None = None,
-        current_blocker: str = "",
+        blocker_card: dict[str, Any] | None = None,
+        current_blocker: Any = None,
         next_action: str = "",
         wait_round: int | None = None,
         seen_cards: int | None = None,
@@ -301,23 +329,23 @@ class RunStatusSupervisor:
             "contract_version": "live_run_status.v2",
             "flow_id": safe_str(self.flow_id),
             "status": safe_str(status),
-            "current_step": safe_str(current_step),
+            "progress_label": safe_str(progress_label),
             "session_id": safe_str(session_id),
             "matter_id": safe_str(matter_id),
             "current_task_id": progress["current_task_id"],
             "current_node": progress["current_node"],
-            "current_phase": progress["current_phase"],
-            "current_phase_label": progress["current_phase_label"],
+            "phase_id": progress["phase_id"],
+            "phase_label": progress["phase_label"],
             "current_subgraph": progress["current_subgraph"],
             "execution_status": progress["execution_status"],
             "last_completed_phase": progress["last_completed_phase"],
             "last_completed_phase_label": progress["last_completed_phase_label"],
-            "current_blocker": safe_str(current_blocker),
+            "current_blocker": compact_blocker(current_blocker),
             "next_action": safe_str(next_action),
             "wait_round": int(wait_round or 0),
             "seen_cards": int(seen_cards or 0),
             "seen_sse_rounds": int(seen_sse_rounds or 0),
-            "pending_card": compact_pending_card(pending_card),
+            "blocker_card": compact_blocker_card(blocker_card),
             "error": safe_str(error),
             "artifacts": artifacts,
             "started_at": self.started_at,
@@ -327,14 +355,14 @@ class RunStatusSupervisor:
             payload["execution_snapshot_digest"] = {
                 "status": safe_str(execution_snapshot.get("status")),
                 "progress_pct": execution_snapshot.get("progress_pct"),
-                "current_phase_id": safe_str(execution_snapshot.get("current_phase_id")),
-                "current_phase_name": safe_str(execution_snapshot.get("current_phase_name")),
+                "phase_id": progress["phase_id"],
+                "phase_label": progress["phase_label"],
             }
         if execution_traces:
             latest_trace = _latest_trace_progress(execution_traces)
             payload["execution_traces_digest"] = {
                 "trace_count": len([row for row in execution_traces if isinstance(row, dict)]),
-                "current_phase": latest_trace["current_phase"],
+                "phase_id": latest_trace["phase_id"],
                 "current_node": latest_trace["current_node"],
                 "last_completed_phase": latest_trace["last_completed_phase"],
             }
@@ -351,10 +379,12 @@ class RunStatusSupervisor:
         row = event if isinstance(event, dict) else {}
         label = safe_str(row.get("label")) or "flow.progress"
         snapshot = row.get("snapshot") if isinstance(row.get("snapshot"), dict) else {}
-        blocker = ""
+        blocker: Any = row.get("current_blocker")
+        if not isinstance(blocker, dict):
+            blocker = snapshot.get("current_blocker") if isinstance(snapshot.get("current_blocker"), dict) else {}
         next_action = "continue_workflow"
         if label.startswith("waiting:"):
-            blocker = safe_str(label.split(":", 1)[1])
+            blocker = blocker or {"summary": safe_str(label.split(":", 1)[1])}
             next_action = "continue_poll"
         elif label.startswith("ready:"):
             next_action = "collect_final_outputs"
@@ -362,15 +392,15 @@ class RunStatusSupervisor:
             next_action = "await_resume_effect"
         elif label.startswith("nudge:"):
             next_action = "await_session_progress"
-        elif label.startswith("request:"):
-            next_action = "await_requested_documents"
+        elif label.startswith("chat_run:"):
+            next_action = "await_chat_run_effect"
         self.update(
             status="running",
-            current_step=label,
+            progress_label=label,
             session_id=safe_str(row.get("session_id")),
             matter_id=safe_str(row.get("matter_id")),
             snapshot=snapshot,
-            pending_card=row.get("card") if isinstance(row.get("card"), dict) else None,
+            blocker_card=row.get("blocker") if isinstance(row.get("blocker"), dict) else None,
             current_blocker=blocker,
             next_action=next_action,
             extra={

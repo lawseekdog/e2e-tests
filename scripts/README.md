@@ -7,7 +7,6 @@
 - `run_analysis_real_flow.py`
 - `run_contract_review_real_flow.py`
 - `run_legal_opinion_real_flow.py`
-- `run_template_draft_real_flow.py`
 
 辅助目录：
 
@@ -21,4 +20,3 @@
 - 顶层不放说明型 README，不放支持模块，不放 fixture 文件
 - 上述正式入口均按“kickoff 一次，后续只答卡不发继续”约束收口
 - `--allow-nudge` 只保留为隐藏兼容参数；正式用法只文档化 `--cards-only`
-- 模板起草通过 `requested_documents` 直接启动，启动后仍按 cards-only 驱动

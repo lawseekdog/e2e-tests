@@ -55,5 +55,5 @@ async def test_login_uses_auth_service_gateway_prefix(monkeypatch: pytest.Monkey
 
 def test_submitted_ack_uses_message_type_specific_event_names() -> None:
     assert _submitted_ack("resume") == ("resume_submitted", "resume submitted")
-    assert _submitted_ack("actions") == ("action_submitted", "action submitted")
+    assert _submitted_ack("input") == ("input_submitted", "input submitted")
     assert _submitted_ack("chat") == ("chat_submitted", "chat submitted")

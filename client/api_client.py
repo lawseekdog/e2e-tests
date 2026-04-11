@@ -24,7 +24,7 @@ KNOWLEDGE = "/knowledge-service"
 TEMPLATES = "/templates-service"
 
 _WS_DEBUG = str(os.getenv("E2E_WS_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
-_WS_BREAK_ON_CARD = str(os.getenv("E2E_WS_BREAK_ON_CARD", "1") or "").strip().lower() in {"1", "true", "yes"}
+_WS_BREAK_ON_BLOCKER = str(os.getenv("E2E_WS_BREAK_ON_BLOCKER", "1") or "").strip().lower() in {"1", "true", "yes"}
 
 
 def _resolve_ws_proxy() -> str | bool | None:
@@ -65,17 +65,17 @@ def _resolve_ws_protocol_ping_interval() -> float | None:
     return value if value > 0 else None
 
 
-def _extract_pending_card_id(card: dict[str, Any] | None) -> str:
-    if not isinstance(card, dict):
+def _extract_interruption_id(action: dict[str, Any] | None) -> str:
+    if not isinstance(action, dict):
         return ""
-    return str(card.get("id") or "").strip()
+    return str(action.get("interruption_id") or "").strip()
 
 
 def _submitted_ack(msg_type: str) -> tuple[str, str]:
     normalized = str(msg_type or "").strip().lower()
     return {
         "resume": ("resume_submitted", "resume submitted"),
-        "actions": ("action_submitted", "action submitted"),
+        "input": ("input_submitted", "input submitted"),
         "chat": ("chat_submitted", "chat submitted"),
     }.get(normalized, ("request_submitted", "request submitted"))
 
@@ -280,7 +280,8 @@ class ApiClient:
                     early_settle_events = {
                         "progress",
                         "task_start",
-                        "card",
+                        "awaiting_review",
+                        "blocked",
                         "result",
                         "error",
                         "end",
@@ -330,8 +331,8 @@ class ApiClient:
                                         summary = str(evt_data.get("node") or evt_data.get("name") or "")
                                     elif evt == "progress":
                                         summary = str(evt_data.get("phase") or evt_data.get("message") or "")
-                                    elif evt == "card":
-                                        summary = str(evt_data.get("skill_id") or evt_data.get("title") or "")
+                                    elif evt in {"awaiting_review", "blocked"}:
+                                        summary = str(evt_data.get("interruption_id") or evt_data.get("title") or "")
                                     elif evt in {"error", "end"}:
                                         summary = str(evt_data.get("message") or evt_data.get("output") or "")
                                 print(f"[ws] {evt} {summary}".strip(), flush=True)
@@ -341,7 +342,7 @@ class ApiClient:
                             if settle_mode in {"first_event", "fire_and_poll"} and evt in early_settle_events:
                                 break
 
-                            if evt == "card" and _WS_BREAK_ON_CARD:
+                            if evt in {"awaiting_review", "blocked"} and _WS_BREAK_ON_BLOCKER:
                                 break
 
                             if evt in {"end", "complete"}:
@@ -531,7 +532,6 @@ class ApiClient:
         matter_id: str | None = None,
         file_ids: list[str] | None = None,
         client_role: str | None = None,
-        cause_of_action_code: str | None = None,
     ) -> dict[str, Any]:
         """Create a consultation session (hard-cut: sessions are matter-backed).
 
@@ -549,7 +549,6 @@ class ApiClient:
         if t:
             payload["title"] = t
 
-        cause_code = str(cause_of_action_code or "").strip() or None
         transient_codes = {404, 409, 429, 500, 502, 503, 504}
 
         async def _verify_matter_exists(mid_to_check: str) -> bool:
@@ -581,7 +580,6 @@ class ApiClient:
                     service_type_id=st,
                     title=t or None,
                     file_ids=normalized_file_ids,
-                    cause_of_action_code=cause_code,
                     client_role=role,
                 )
                 mid_candidate = str(
@@ -631,7 +629,11 @@ class ApiClient:
         session_id: str,
         user_query: str,
         attachments: list[str] | None = None,
-        requested_documents: list[dict[str, Any]] | None = None,
+        entry_mode: str | None = None,
+        service_type_id: str | None = None,
+        delivery_goal: str | None = None,
+        target_document_kind: str | None = None,
+        supporting_document_kinds: list[str] | None = None,
         max_loops: int | None = None,
         silent: bool | None = None,
         settle_mode: str = "full",
@@ -640,8 +642,16 @@ class ApiClient:
             "user_query": user_query,
             "attachments": attachments or [],
         }
-        if requested_documents:
-            data["requested_documents"] = requested_documents
+        if entry_mode is not None:
+            data["entry_mode"] = str(entry_mode)
+        if service_type_id is not None:
+            data["service_type_id"] = str(service_type_id)
+        if delivery_goal is not None:
+            data["delivery_goal"] = str(delivery_goal)
+        if target_document_kind is not None:
+            data["target_document_kind"] = str(target_document_kind)
+        if supporting_document_kinds is not None:
+            data["supporting_document_kinds"] = [str(kind) for kind in supporting_document_kinds]
         if max_loops is not None:
             data["max_loops"] = max_loops
         if silent is not None:
@@ -656,14 +666,12 @@ class ApiClient:
             settle_mode=settle_mode,
         )
 
-    async def get_pending_card(self, session_id: str) -> dict[str, Any]:
-        # pending_card is a high-frequency poll endpoint; keep it short so transient
-        # upstream stalls do not freeze flow progression.
-        timeout_s = float(os.getenv("E2E_PENDING_CARD_TIMEOUT_S", "30") or 30)
-        get_retries = int(os.getenv("E2E_PENDING_CARD_GET_RETRIES", "1") or 1)
+    async def get_blocker(self, session_id: str) -> dict[str, Any]:
+        timeout_s = float(os.getenv("E2E_BLOCKER_TIMEOUT_S", "30") or 30)
+        get_retries = int(os.getenv("E2E_BLOCKER_GET_RETRIES", "1") or 1)
         return await self._request(
             "GET",
-            f"{CONSULTATIONS}/consultations/sessions/{session_id}/pending_card",
+            f"{CONSULTATIONS}/consultations/sessions/{session_id}/blocker",
             timeout=timeout_s,
             get_retries=max(1, get_retries),
         )
@@ -759,14 +767,14 @@ class ApiClient:
         self,
         session_id: str,
         answers_or_payload: dict[str, Any] | list[dict[str, Any]],
-        pending_card: dict[str, Any] | None = None,
+        blocker: dict[str, Any] | None = None,
         max_loops: int | None = None,
-        card_id: str | None = None,
+        interruption_id: str | None = None,
         settle_mode: str = "full",
     ) -> dict[str, Any]:
-        resolved_card_id = str(card_id or "").strip() or _extract_pending_card_id(pending_card)
-        if not resolved_card_id:
-            raise ValueError("resume requires pending card id (card_id)")
+        resolved_interruption_id = str(interruption_id or "").strip() or _extract_interruption_id(blocker)
+        if not resolved_interruption_id:
+            raise ValueError("resume requires interruption_id")
 
         if isinstance(answers_or_payload, dict):
             raw_answers = answers_or_payload.get("answers")
@@ -780,9 +788,9 @@ class ApiClient:
 
         data: dict[str, Any] = {
             "answers": answers,
-            "card_id": resolved_card_id,
+            "interruption_id": resolved_interruption_id,
         }
-        _ = pending_card
+        _ = blocker
         if max_loops is not None:
             data["max_loops"] = int(max_loops)
         ws_path = f"{CONSULTATIONS}/consultations/sessions/{session_id}/ws"
@@ -795,11 +803,15 @@ class ApiClient:
             settle_mode=settle_mode,
         )
 
-    async def request_documents(
+    async def start_chat_run(
         self,
         session_id: str,
         *,
-        requested_documents: list[dict[str, Any]],
+        entry_mode: str,
+        service_type_id: str,
+        delivery_goal: str,
+        target_document_kind: str | None = None,
+        supporting_document_kinds: list[str] | None = None,
         user_query: str = "",
         attachments: list[str] | None = None,
         max_loops: int | None = None,
@@ -810,7 +822,11 @@ class ApiClient:
             session_id,
             user_query,
             attachments=attachments,
-            requested_documents=requested_documents,
+            entry_mode=entry_mode,
+            service_type_id=service_type_id,
+            delivery_goal=delivery_goal,
+            target_document_kind=target_document_kind,
+            supporting_document_kinds=supporting_document_kinds or [],
             max_loops=max_loops,
             silent=silent,
             settle_mode=settle_mode,
@@ -822,13 +838,10 @@ class ApiClient:
         *,
         service_type_id: str,
         title: str | None = None,
-        cause_of_action_code: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"service_type_id": str(service_type_id)}
         if title is not None:
             payload["title"] = str(title)
-        if cause_of_action_code is not None:
-            payload["cause_of_action_code"] = str(cause_of_action_code)
         return await self.post(
             f"{CONSULTATIONS}/consultations/sessions/{session_id}/service-type",
             payload,
@@ -912,7 +925,6 @@ class ApiClient:
         service_type_id: str,
         title: str | None = None,
         file_ids: list[str] | None = None,
-        cause_of_action_code: str | None = None,
         matter_category: str | None = None,
         client_role: str | None = None,
     ) -> dict[str, Any]:
@@ -924,8 +936,6 @@ class ApiClient:
         data: dict[str, Any] = {"title": t, "service_type_id": st}
         if file_ids:
             data["file_ids"] = [str(x).strip() for x in file_ids if str(x).strip()]
-        if cause_of_action_code:
-            data["cause_of_action_code"] = str(cause_of_action_code).strip()
         if matter_category:
             data["matter_category"] = str(matter_category).strip()
         if client_role:

@@ -22,6 +22,7 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
 LAWYER_USERNAME = os.getenv("LAWYER_USERNAME", "lawyer1")
 LAWYER_PASSWORD = os.getenv("LAWYER_PASSWORD", "lawyer123456")
+_SEED_BOOTSTRAP_DONE = False
 
 
 async def _ensure_seed_packages() -> None:
@@ -75,9 +76,26 @@ async def _ensure_seed_packages() -> None:
             return
 
 
-@pytest.fixture(scope="session", autouse=True)
-async def seed_system_resources():
+def _should_skip_seed_bootstrap(request: pytest.FixtureRequest) -> bool:
+    if request.node.get_closest_marker("skip_seed_bootstrap") is not None:
+        return True
+    raw_path = getattr(request.node, "path", None)
+    if raw_path is None:
+        raw_path = getattr(request.node, "fspath", None)
+    if raw_path is None:
+        return False
+    return "/tests/support/" in Path(str(raw_path)).resolve().as_posix()
+
+
+@pytest.fixture(autouse=True)
+async def seed_system_resources(request: pytest.FixtureRequest):
+    global _SEED_BOOTSTRAP_DONE
+    if _should_skip_seed_bootstrap(request):
+        return
+    if _SEED_BOOTSTRAP_DONE:
+        return
     await _ensure_seed_packages()
+    _SEED_BOOTSTRAP_DONE = True
 
 
 @pytest.fixture

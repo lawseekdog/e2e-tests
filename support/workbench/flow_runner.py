@@ -21,7 +21,7 @@ import httpx
 from .utils import trim, unwrap_api_response
 from .sse import assert_has_user_message
 
-PendingCardStopFn = Callable[[dict[str, Any]], bool]
+BlockerStopFn = Callable[[dict[str, Any]], bool]
 ProgressObserver = Callable[[dict[str, Any]], Any]
 
 _DEBUG = str(os.getenv("E2E_FLOW_DEBUG", "") or "").strip().lower() in {"1", "true", "yes"}
@@ -60,6 +60,21 @@ def _progress(msg: str) -> None:
         print(msg, flush=True)
 
 
+def extract_last_blocker_from_sse(sse: dict[str, Any]) -> dict[str, Any] | None:
+    raw_events = sse.get("events")
+    events: list[Any] = list(raw_events) if isinstance(raw_events, list) else []
+    for idx in range(len(events) - 1, -1, -1):
+        it = events[idx]
+        if not isinstance(it, dict):
+            continue
+        if it.get("event") not in {"awaiting_review", "blocked"}:
+            continue
+        data = it.get("data")
+        if isinstance(data, dict) and data:
+            return data
+    return None
+
+
 def extract_last_card_from_sse(sse: dict[str, Any]) -> dict[str, Any] | None:
     raw_events = sse.get("events")
     events: list[Any] = list(raw_events) if isinstance(raw_events, list) else []
@@ -67,7 +82,7 @@ def extract_last_card_from_sse(sse: dict[str, Any]) -> dict[str, Any] | None:
         it = events[idx]
         if not isinstance(it, dict):
             continue
-        if it.get("event") != "card":
+        if str(it.get("event") or "").strip() != "card":
             continue
         data = it.get("data")
         if isinstance(data, dict) and data:
@@ -81,6 +96,61 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _compact_blocker(value: Any) -> dict[str, str]:
+    blocker = _as_dict(value)
+    if not blocker:
+        return {}
+    out: dict[str, str] = {}
+    for key in (
+        "type",
+        "interruption_id",
+        "interruption_key",
+        "reason_kind",
+        "reason_code",
+        "title",
+        "summary",
+        "prompt",
+        "product_type",
+        "status",
+    ):
+        token = str(blocker.get(key) or "").strip()
+        if token:
+            out[key] = token
+    return out
+
+
+def _resolve_current_phase_row(phases_value: Any) -> dict[str, Any]:
+    phases = _as_list(phases_value)
+    current_rows = [row for row in phases if isinstance(row, dict) and row.get("current") is True]
+    if len(current_rows) != 1:
+        raise AssertionError(f"workflow phases must contain exactly one current=true phase, got {len(current_rows)}")
+    current_row = current_rows[0]
+    phase_id = str(current_row.get("phase_id") or current_row.get("id") or "").strip()
+    if not phase_id:
+        raise AssertionError("workflow current phase is missing phase_id/id")
+    return current_row
+
+
+def _blocker_label(blocker: dict[str, Any] | None) -> str:
+    row = blocker if isinstance(blocker, dict) else {}
+    kind = str(row.get("type") or "").strip()
+    ident = (
+        str(
+            row.get("interruption_id")
+            or row.get("interruption_key")
+            or row.get("reason_code")
+            or ""
+        ).strip()
+    )
+    if kind and ident:
+        return f"{kind}:{ident}"
+    return (
+        str(row.get("summary") or "").strip()
+        or str(row.get("title") or "").strip()
+        or kind
+    )
 
 
 def _extract_runtime_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any]:
@@ -111,7 +181,6 @@ def _snapshot_pending_task_count(snapshot: dict[str, Any] | None) -> int | None:
         candidates.extend(
             [
                 runtime.get("pending_task_count"),
-                runtime.get("pending_card_count"),
             ]
         )
 
@@ -142,17 +211,22 @@ def _snapshot_awaiting_user_input(snapshot: dict[str, Any] | None) -> bool | Non
     return None
 
 
-def _is_goal_completion_card(card: dict[str, Any]) -> bool:
-    skill_id = str(card.get("skill_id") or "").strip().lower()
-    task_key = str(card.get("task_key") or "").strip().lower()
-    return skill_id == "goal-completion" or task_key == "goal_completion"
+def _is_goal_completion_blocker(blocker: dict[str, Any]) -> bool:
+    interruption_key = str(blocker.get("interruption_key") or "").strip().lower()
+    reason_code = str(blocker.get("reason_code") or "").strip().lower()
+    product_type = str(blocker.get("product_type") or "").strip().lower()
+    return (
+        interruption_key == "goal_completion"
+        or reason_code == "goal_completion"
+        or product_type == "goal_completion"
+    )
 
 
-def _pending_card_intercept_sse(card: dict[str, Any]) -> dict[str, Any]:
+def _blocker_intercept_sse(blocker: dict[str, Any]) -> dict[str, Any]:
     return {
-        "events": [{"event": "card", "data": card}],
-        "pending_card": card,
-        "output": "pending card intercepted",
+        "events": [{"event": str(blocker.get("type") or "awaiting_review"), "data": blocker}],
+        "current_blocker": blocker,
+        "output": "blocker intercepted",
     }
 
 
@@ -210,7 +284,8 @@ def _is_effective_resume_sse(sse: dict[str, Any] | None) -> bool:
             "resume_submitted",
             "progress",
             "task_start",
-            "card",
+            "awaiting_review",
+            "blocked",
             "result",
             "error",
             "end",
@@ -220,12 +295,12 @@ def _is_effective_resume_sse(sse: dict[str, Any] | None) -> bool:
     return False
 
 
-def _is_skill_error_confirm_card(card: dict[str, Any] | None) -> bool:
-    if not isinstance(card, dict):
+def _is_skill_error_confirm_card(blocker: dict[str, Any] | None) -> bool:
+    if not isinstance(blocker, dict):
         return False
     return (
-        str(card.get("skill_id") or "").strip() == "skill-error-analysis"
-        and str(card.get("review_type") or "").strip().lower() == "confirm"
+        str(blocker.get("reason_code") or "").strip() == "skill_error_analysis"
+        and str(blocker.get("reason_kind") or "").strip().lower() == "human_confirmation"
     )
 
 
@@ -432,18 +507,6 @@ def _resolve_override_value(field_key: str, overrides: dict[str, Any]) -> Any | 
 _MISSING_FIELDS_LIST_RE = re.compile(r"缺口字段[:：]\s*(\[[^\]]+\])")
 _MISSING_FIELD_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+")
 
-_DOC_DRAFT_TARGET_DEFAULT_TEMPLATE_IDS: dict[str, str] = {
-    "contract_review_report": "215",
-    "modification_suggestion": "270",
-    "redline_comparison": "277",
-}
-
-_DOC_DRAFT_TARGET_ORDER: tuple[str, ...] = (
-    "contract_review_report",
-    "modification_suggestion",
-    "redline_comparison",
-)
-
 
 def _parse_missing_fields(text: str) -> list[str]:
     raw = str(text or "").strip()
@@ -490,14 +553,19 @@ def _infer_missing_fields_from_card(card: dict[str, Any]) -> list[str]:
     return _parse_missing_fields(merged)
 
 
-def _card_text_blob(card: dict[str, Any], *, include_task_key: bool = False) -> str:
+def _card_text_blob(card: dict[str, Any], *, include_blocker_identity: bool = False) -> str:
     if not isinstance(card, dict) or not card:
         return ""
     parts: list[str] = []
-    if include_task_key:
-        task_key = str(card.get("task_key") or "").strip()
-        if task_key:
-            parts.append(task_key)
+    for key in ("title", "summary", "prompt"):
+        token = str(card.get(key) or "").strip()
+        if token:
+            parts.append(token)
+    if include_blocker_identity:
+        for key in ("interruption_id", "interruption_key", "reason_kind", "reason_code", "product_type"):
+            token = str(card.get(key) or "").strip()
+            if token:
+                parts.append(token)
     raw_questions = card.get("questions")
     questions: list[Any] = list(raw_questions) if isinstance(raw_questions, list) else []
     for row in questions:
@@ -508,292 +576,6 @@ def _card_text_blob(card: dict[str, Any], *, include_task_key: bool = False) -> 
             if token:
                 parts.append(token)
     return " ".join(parts).strip()
-
-
-def _fallback_answer_for_missing_field(field_key: str, uploaded_file_ids: list[str]) -> Any | None:
-    fk = str(field_key or "").strip()
-    if not fk:
-        return None
-
-    if fk in {"attachment_file_ids", "profile.attachment_file_ids"} or fk.endswith("attachment_file_ids"):
-        return uploaded_file_ids
-    if fk.endswith("file_ids"):
-        return uploaded_file_ids
-    if fk in {"profile.review_scope", "review_scope"}:
-        # contract-intake V2 enforces exact enum values.
-        return "full"
-    if fk in {"profile.summary"}:
-        return "张三起诉李四民间借贷纠纷，借款10万元到期未还，请求返还本金及利息。"
-    if fk in {"profile.contract_type_id"}:
-        return "construction"
-    if fk in {"profile.document_type"}:
-        return "民事起诉状"
-    if fk in {"profile.court_name"}:
-        return "北京市海淀区人民法院"
-    if fk in {"profile.facts"}:
-        return "2023年1月15日张三向李四转账10万元，约定一年内归还；到期后多次催收仍未还款。"
-    if fk in {"profile.claims"}:
-        return "请求判令李四返还借款本金10万元并支付逾期利息。"
-    if fk in {"profile.plaintiff", "profile.plaintiff.name"}:
-        return "张三"
-    if fk in {"profile.defendant", "profile.defendant.name"}:
-        return "李四"
-    if fk in {"data.search.query"}:
-        return "民间借贷 借条 转账记录 聊天记录 逾期还款 利息支持 最高人民法院 民间借贷司法解释"
-    if fk.endswith((".reviewed", ".approved", ".confirmed", ".accepted")):
-        return True
-    if fk.startswith("profile."):
-        return "请基于现有材料继续推进并输出结构化结论。"
-    return "请基于现有材料继续推进。"
-
-
-def _is_doc_draft_recovery_card(card: dict[str, Any]) -> bool:
-    if not isinstance(card, dict) or not card:
-        return False
-    if str(card.get("skill_id") or "").strip() != "skill-error-analysis":
-        return False
-    task_key = str(card.get("task_key") or "").strip().lower()
-    prompt = _card_text_blob(card).lower()
-    return (
-        "doc_draft" in task_key
-        or "doc_generation" in task_key
-        or "document_drafts" in prompt
-        or "document-draft" in prompt
-    )
-
-
-def _extract_doc_draft_targets(card: dict[str, Any]) -> list[tuple[str, str]]:
-    prompt = _card_text_blob(card)
-    prompt_lower = prompt.lower()
-    task_key = str(card.get("task_key") or "").strip().lower()
-    found: dict[str, str] = {}
-    for key, template_id in re.findall(r"([a-z_]+)\((\d+)\)", prompt):
-        output_key = str(key or "").strip()
-        tid = str(template_id or "").strip()
-        if output_key in _DOC_DRAFT_TARGET_DEFAULT_TEMPLATE_IDS and tid:
-            found[output_key] = tid
-
-    if found:
-        out_found: list[tuple[str, str]] = []
-        for output_key in _DOC_DRAFT_TARGET_ORDER:
-            tid = found.get(output_key)
-            if tid:
-                out_found.append((output_key, tid))
-        return out_found
-
-    contract_context = (
-        any(k in prompt_lower for k in _DOC_DRAFT_TARGET_DEFAULT_TEMPLATE_IDS)
-        or "contract_review" in task_key
-        or "modification_suggestion" in task_key
-        or "redline" in task_key
-    )
-    if not contract_context:
-        return []
-
-    out: list[tuple[str, str]] = []
-    for output_key in _DOC_DRAFT_TARGET_ORDER:
-        out.append((output_key, found.get(output_key) or _DOC_DRAFT_TARGET_DEFAULT_TEMPLATE_IDS[output_key]))
-    return out
-
-
-def _pad_min_text(text: str, min_len: int, pad_token: str = " detail") -> str:
-    base = str(text or "").strip()
-    if len(base) >= int(min_len):
-        return base
-    need = int(min_len) - len(base)
-    token = pad_token if pad_token else " detail"
-    repeated = (token * ((need // len(token)) + 2))[:need]
-    return base + repeated
-
-
-def _build_contract_review_report_variables() -> dict[str, Any]:
-    review_scope_notes = _pad_min_text(
-        "Scope covers 14.3款, 15条, 16.2款, 7.5.7款, 18条 with focus on payment timing, review timing, and bond return. "
-        "Fact anchors: 进度款, 19705.5, 2025-12-16.",
-        120,
-    )
-    contract_overview = _pad_min_text(
-        "Overview: amount 19705.5, term 2025-12-16 to 2026-01-15. "
-        "14.3款 pays 70% after approval, 15条 has no strict overdue effect, 16.2款 keeps 3% bond. "
-        "Main risk is delayed cashflow and asymmetric delay liability.",
-        180,
-    )
-    risk_items = _pad_min_text(
-        "1. 第14.3款 late pay risk. 法律依据：《民法典》第509条。\n"
-        "2. 第15条 review delay risk. 法律依据：《民法典》第510条。\n"
-        "3. 第16.2款 bond return unclear. 法律依据：《民法典》第509条。\n"
-        "4. 第7.5.7款 one-sided delay penalty. 法律依据：《民法典》第577条。",
-        260,
-    )
-    modification_suggestions = _pad_min_text(
-        "1. 第14.3款 建议修改为：7-day verify and next-7-day pay.\n"
-        "2. 第15条 建议修改为：28-day reply and overdue equals acceptance.\n"
-        "3. 第16.2款 建议修改为：return 3% bond within 30 days after defect period.\n"
-        "4. 第7.5.7款 建议修改为：penalty only for contractor-attributable delay.",
-        220,
-    )
-    negotiation_priorities = _pad_min_text(
-        "Priority: close 14.3款+15条 timing first, then 7.5.7款+16.2款 balance. Red line: no unlimited review delay.",
-        80,
-    )
-    signing_checklist = _pad_min_text(
-        "Checklist: verify 19705.5, date range, 14.3款 payment clock, 15条 review clock, 16.2款 return trigger.",
-        60,
-    )
-    performance_notes = _pad_min_text(
-        "Keep signed logs and 24h written notices for change events. 声明与保留: negotiation use only; final decision depends on new evidence.",
-        60,
-    )
-
-    return {
-        "review_scope_notes": review_scope_notes,
-        "contract_overview": contract_overview,
-        "risk_items": risk_items,
-        "modification_suggestions": modification_suggestions,
-        "negotiation_priorities": negotiation_priorities,
-        "signing_checklist": signing_checklist,
-        "performance_notes": performance_notes,
-        "lawyer_name": "张晓杰",
-        "law_firm": "LawSeekDog 律师团队",
-        "year": "2026",
-        "month": "03",
-        "day": "01",
-        "counter_argument_response": "counter-view answered",
-        "action_steps": "steps fixed",
-        "professional_notice": "notice",
-    }
-
-
-def _build_modification_suggestion_variables() -> dict[str, Any]:
-    overall = _pad_min_text(
-        "Overall: 14.3款/15条 timing is weak, 7.5.7款 liability is asymmetric, and 16.2款 return trigger is vague. "
-        "法律依据：《民法典》第509条。",
-        120,
-    )
-    suggestions = _pad_min_text(
-        "1. 第14.3款 建议修改为：7-day verify and next-7-day pay.\n"
-        "2. 第15条 建议修改为：28-day reply and overdue equals acceptance.\n"
-        "3. 第7.5.7款 建议修改为：penalty only for contractor-attributable delay.\n"
-        "4. 第16.2款 建议修改为：return 3% bond in 30 days after defect period.\n"
-        "5. 第18条 建议修改为：15-day negotiation plus evidence-list exchange.\n"
-        "6. keep 进度款 path aligned with 19705.5 and 2025-12-16 timeline.",
-        220,
-    )
-
-    return {
-        "overall_opinion": overall,
-        "suggestions": suggestions,
-        "lawyer_name": "张晓杰",
-        "law_firm": "LawSeekDog 律师团队",
-        "year": "2026",
-        "month": "03",
-        "day": "01",
-    }
-
-
-def _build_redline_comparison_variables() -> dict[str, Any]:
-    scope_note = _pad_min_text(
-        "Scope compares 14.3款, 15条, 7.5.7款, 18条 before sign-off. 法律依据：《民法典》第509条。",
-        40,
-    )
-    comparison_table = (
-        "| 条款位置 | 原文 | 建议改写 | 处理结论 |\n"
-        "|---|---|---|---|\n"
-        "| 第14.3款 | 核定后支付70%进度款 | 7日核定、核定后7日付款 | 必须修改 |\n"
-        "| 第15条 | 结算审核无逾期后果 | 28日内反馈，逾期视为无异议 | 必须修改 |\n"
-        "| 第7.5.7款 | 承包人延误即违约 | 仅承包人可归责延误承担违约 | 必须修改 |\n"
-        "| 第18条 | 协商后诉讼 | 先协商15日并交换证据目录 | 建议修改 |"
-    )
-    comparison_table = _pad_min_text(comparison_table, 200, " note")
-    risk_note = _pad_min_text(
-        "Without amendment, 进度款 delay and liability imbalance remain. "
-        "Lock 14.3款 and 15条 first. 法律依据：《民法典》第509条。",
-        40,
-    )
-
-    return {
-        "scope_note": scope_note,
-        "comparison_table": comparison_table,
-        "risk_note": risk_note,
-        "lawyer_name": "张晓杰",
-        "law_firm": "LawSeekDog 律师团队",
-        "year": "2026",
-        "month": "03",
-        "day": "01",
-    }
-
-
-def _build_doc_draft_recovery_answers(card: dict[str, Any], existing_answers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    existing_keys = {
-        str(item.get("field_key") or "").strip()
-        for item in existing_answers
-        if isinstance(item, dict)
-    }
-
-    task_key = str(card.get("task_key") or "").strip().lower()
-
-    draft_by_key = {
-        "contract_review_report": _build_contract_review_report_variables(),
-        "modification_suggestion": _build_modification_suggestion_variables(),
-        "redline_comparison": _build_redline_comparison_variables(),
-    }
-
-    drafts: list[dict[str, Any]] = []
-    target_output_keys: list[str] = []
-    for output_key, template_id in _extract_doc_draft_targets(card):
-        target_output_keys.append(output_key)
-        variables = draft_by_key.get(output_key)
-        if not isinstance(variables, dict) or not variables:
-            continue
-        drafts.append(
-            {
-                "output_key": output_key,
-                "template_id": str(template_id or "").strip(),
-                "variables": variables,
-            }
-        )
-
-    target_output_keys = [k for k in target_output_keys if str(k or "").strip()]
-
-    if not drafts and target_output_keys:
-        for output_key in target_output_keys:
-            variables = draft_by_key.get(output_key)
-            if not isinstance(variables, dict) or not variables:
-                continue
-            default_template_id = str(
-                _DOC_DRAFT_TARGET_DEFAULT_TEMPLATE_IDS.get(output_key, "")
-            ).strip()
-            if not default_template_id:
-                continue
-            drafts.append(
-                {
-                    "output_key": output_key,
-                    "template_id": default_template_id,
-                    "variables": variables,
-                }
-            )
-
-    extra_answers: list[dict[str, Any]] = []
-    if "doc_generation" in task_key:
-        if "data.work_product.document_drafts" not in existing_keys and drafts:
-            extra_answers.append(
-                {"field_key": "data.work_product.document_drafts", "value": drafts}
-            )
-        if "data.work_product.drafts_ready" not in existing_keys and drafts:
-            extra_answers.append(
-                {"field_key": "data.work_product.drafts_ready", "value": True}
-            )
-        return extra_answers
-
-    if "data.work_product.document_drafts" not in existing_keys and drafts:
-        extra_answers.append(
-            {"field_key": "data.work_product.document_drafts", "value": drafts}
-        )
-    if "data.work_product.drafts_ready" not in existing_keys and drafts:
-        extra_answers.append(
-            {"field_key": "data.work_product.drafts_ready", "value": True}
-        )
-    return extra_answers
 
 
 def _coerce_select_value_from_semantic_hint(hint: Any, options: list[Any] | None) -> Any | None:
@@ -853,7 +635,6 @@ def auto_answer_card(
     overrides = overrides or {}
     uploaded_file_ids = [str(x).strip() for x in (uploaded_file_ids or []) if str(x).strip()]
 
-    skill_id = str(card.get("skill_id") or "").strip()
     questions = card.get("questions")
     questions = questions if isinstance(questions, list) else []
     allowed_field_keys: set[str] = set()
@@ -1005,10 +786,10 @@ def auto_answer_card(
             elif fk == "data.search.query":
                 value = "民间借贷 借条 转账记录 聊天记录 逾期还款 利息支持 最高人民法院 民间借贷司法解释"
             else:
-                value = default if has_default else (_fallback_answer_for_missing_field(fk, uploaded_file_ids) if required else None)
+                value = default if has_default else None
 
         if value is None and required:
-            value = _fallback_answer_for_missing_field(fk, uploaded_file_ids)
+            raise AssertionError(f"pending_card_required_answer_missing:{fk}")
 
         # For optional questions, omit the answer entirely if we don't have a value.
         # This avoids sending `null` into strict field validators (e.g. attachment_file_ids must be a list).
@@ -1026,51 +807,20 @@ def auto_answer_card(
             if fk in answered:
                 continue
             override_value = _resolve_override_value(fk, overrides)
-            value = override_value if override_value is not None else _fallback_answer_for_missing_field(fk, uploaded_file_ids)
+            value = override_value
             if value is None:
                 continue
             _append_answer(fk, value)
-
-    # Compatibility aliases:
-    # Some environments still read legacy top-level fields, but strict card
-    # validation rejects any field_key not present in questions. Only add an
-    # alias when that alias key is explicitly asked by the current card.
-    alias_map = {
-        "profile.client_role": "client_role",
-        "profile.service_type_id": "service_type_id",
-    }
-    existing_keys = {
-        str(it.get("field_key") or "").strip()
-        for it in answers
-        if isinstance(it, dict)
-    }
-    for src, dst in alias_map.items():
-        if src not in existing_keys or dst in existing_keys:
-            continue
-        if dst not in allowed_field_keys:
-            continue
-        src_val = None
-        for it in answers:
-            if not isinstance(it, dict):
-                continue
-            if str(it.get("field_key") or "").strip() != src:
-                continue
-            src_val = it.get("value")
-            break
-        if src_val is None:
-            continue
-        answers.append({"field_key": dst, "value": src_val})
-
-    if _is_doc_draft_recovery_card(card):
-        answers.extend(_build_doc_draft_recovery_answers(card, answers))
 
     return {"answers": answers}
 
 
 def card_signature(card: dict[str, Any]) -> str:
-    skill = str(card.get("skill_id") or "").strip()
-    task = str(card.get("task_key") or "").strip()
-    review = str(card.get("review_type") or "").strip()
+    interruption_type = str(card.get("type") or "").strip()
+    interruption_id = str(card.get("interruption_id") or "").strip()
+    interruption_key = str(card.get("interruption_key") or "").strip()
+    reason_kind = str(card.get("reason_kind") or "").strip()
+    reason_code = str(card.get("reason_code") or "").strip()
     raw_questions = card.get("questions")
     qs: list[Any] = raw_questions if isinstance(raw_questions, list) else []
     sigs: list[str] = []
@@ -1081,7 +831,18 @@ def card_signature(card: dict[str, Any]) -> str:
         it = str(q.get("input_type") or q.get("question_type") or "").strip().lower()
         if fk:
             sigs.append(f"{fk}|{it}")
-    raw = json.dumps({"skill": skill, "task": task, "review": review, "questions": sigs}, ensure_ascii=False, sort_keys=True)
+    raw = json.dumps(
+        {
+            "type": interruption_type,
+            "interruption_id": interruption_id,
+            "interruption_key": interruption_key,
+            "reason_kind": reason_kind,
+            "reason_code": reason_code,
+            "questions": sigs,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     # Short hash for log readability.
     import hashlib
 
@@ -1100,8 +861,8 @@ def _is_unanswerable_card(card: dict[str, Any]) -> bool:
 def _is_goal_completion_card(card: dict[str, Any]) -> bool:
     if not isinstance(card, dict) or not card:
         return False
-    if str(card.get("skill_id") or "").strip().lower() != "goal-completion":
-        return False
+    if _is_goal_completion_blocker(card):
+        return True
     for row in (card.get("questions") if isinstance(card.get("questions"), list) else []):
         if not isinstance(row, dict):
             continue
@@ -1114,7 +875,7 @@ def _compact_card_debug(card: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(card, dict):
         return {}
     out: dict[str, Any] = {}
-    for key in ("skill_id", "task_key", "review_type"):
+    for key in ("type", "interruption_id", "interruption_key", "reason_kind", "reason_code", "product_type"):
         value = str(card.get(key) or "").strip()
         if value:
             out[key] = value
@@ -1147,7 +908,7 @@ def _compact_sse_events(sse: dict[str, Any] | None) -> str:
 def _remediation_nudge_for_unanswerable_card(card: dict[str, Any]) -> str | None:
     if not isinstance(card, dict) or not card:
         return None
-    prompt = _card_text_blob(card, include_task_key=True)
+    prompt = _card_text_blob(card, include_blocker_identity=True)
     s = prompt.strip()
     if not s:
         return None
@@ -1186,7 +947,7 @@ class WorkbenchFlow:
     client: Any
     session_id: str
     uploaded_file_ids: list[str] = field(default_factory=list)
-    last_requested_documents: list[dict[str, Any]] = field(default_factory=list)
+    last_chat_run: dict[str, Any] = field(default_factory=dict)
     overrides: dict[str, Any] = field(default_factory=dict)
     strict_card_driven: bool = _STRICT_CARD_DRIVEN_DEFAULT
     matter_id: str | None = None
@@ -1212,13 +973,15 @@ class WorkbenchFlow:
         except Exception:
             return None
 
-    async def _runtime_progress_snapshot(self) -> dict[str, str]:
-        snapshot: dict[str, str] = {
+    async def _runtime_progress_snapshot(self) -> dict[str, Any]:
+        snapshot: dict[str, Any] = {
             "session": self.session_id,
             "matter": str(self.matter_id or "").strip(),
             "status": str(self.session_status or "").strip(),
             "phase": "",
             "phase_status": "",
+            "current_blocker": {},
+            "blocker_label": "",
             "trace_node": "",
             "trace_status": "",
             "deliverables": "",
@@ -1226,22 +989,21 @@ class WorkbenchFlow:
         if not self.matter_id:
             return snapshot
 
-        try:
-            phase_resp = await self.client.get_matter_phase_timeline(self.matter_id)
-            phase_data = unwrap_api_response(phase_resp)
-            if isinstance(phase_data, dict):
-                snapshot["phase"] = str(phase_data.get("current_phase") or phase_data.get("currentPhase") or "").strip()
-                raw_phases = phase_data.get("phases")
-                phases: list[Any] = list(raw_phases) if isinstance(raw_phases, list) else []
-                for item in phases:
-                    if not isinstance(item, dict):
-                        continue
-                    phase_id = str(item.get("id") or "").strip()
-                    if phase_id and phase_id == snapshot["phase"]:
-                        snapshot["phase_status"] = str(item.get("status") or "").strip()
-                        break
-        except Exception:
-            pass
+        workflow_snapshot = await self._get_workflow_snapshot()
+        if isinstance(workflow_snapshot, dict):
+            blockers_view = _as_dict(workflow_snapshot.get("blockers_view"))
+            current_blocker = _compact_blocker(blockers_view.get("current_blocker"))
+            if current_blocker:
+                snapshot["current_blocker"] = current_blocker
+                snapshot["blocker_label"] = _blocker_label(current_blocker)
+
+        phase_resp = await self.client.get_matter_phase_timeline(self.matter_id)
+        phase_data = unwrap_api_response(phase_resp)
+        if isinstance(phase_data, dict):
+            raw_phases = phase_data.get("phases")
+            phase_row = _resolve_current_phase_row(raw_phases)
+            snapshot["phase"] = str(phase_row.get("phase_id") or phase_row.get("id") or "").strip()
+            snapshot["phase_status"] = str(phase_row.get("status") or "").strip()
 
         try:
             trace_resp = await self.client.list_traces(self.matter_id, limit=1)
@@ -1280,7 +1042,7 @@ class WorkbenchFlow:
         label: str,
         step_no: int | None = None,
         max_steps: int | None = None,
-        card: dict[str, Any] | None = None,
+        blocker: dict[str, Any] | None = None,
         sse: dict[str, Any] | None = None,
     ) -> None:
         snapshot = await self._runtime_progress_snapshot()
@@ -1306,11 +1068,13 @@ class WorkbenchFlow:
                 parts.append(f"trace={trace}:{trace_status}")
             else:
                 parts.append(f"trace={trace}")
-        if card:
-            skill = str(card.get("skill_id") or "").strip()
-            task = str(card.get("task_key") or "").strip()
-            if skill or task:
-                parts.append(f"card={skill}/{task}".rstrip("/"))
+        if snapshot.get("blocker_label"):
+            parts.append(f"blocker={snapshot.get('blocker_label')}")
+        if blocker:
+            blocker_type = str(blocker.get("type") or "").strip()
+            interruption_id = str(blocker.get("interruption_id") or "").strip()
+            if blocker_type or interruption_id:
+                parts.append(f"blocker_event={blocker_type}/{interruption_id}".rstrip("/"))
         event_summary = _compact_sse_events(sse)
         if event_summary:
             parts.append(f"events={event_summary}")
@@ -1328,11 +1092,12 @@ class WorkbenchFlow:
                     "session_status": snapshot.get("status"),
                     "phase": snapshot.get("phase"),
                     "phase_status": snapshot.get("phase_status"),
+                    "current_blocker": snapshot.get("current_blocker"),
                     "trace_node": snapshot.get("trace_node"),
                     "trace_status": snapshot.get("trace_status"),
                     "deliverables": snapshot.get("deliverables"),
                     "event_summary": event_summary,
-                    "card": card if isinstance(card, dict) else {},
+                    "blocker": blocker if isinstance(blocker, dict) else {},
                     "snapshot": snapshot,
                 }
             )
@@ -1365,11 +1130,11 @@ class WorkbenchFlow:
                     _debug(f"[flow] session bound matter_id={mid}")
                 self.matter_id = mid
 
-    async def get_pending_card(self) -> dict[str, Any] | None:
+    async def get_current_blocker(self) -> dict[str, Any] | None:
         if self.session_archived:
             return None
         try:
-            resp = await self.client.get_pending_card(self.session_id)
+            resp = await self.client.get_blocker(self.session_id)
         except httpx.HTTPStatusError as e:
             code = e.response.status_code if e.response is not None else None
             if code == 400 and e.response is not None:
@@ -1377,37 +1142,38 @@ class WorkbenchFlow:
                 if "会话已归档" in body:
                     self.session_archived = True
                     self.session_status = "archived"
-                    _debug("[flow] pending card blocked: session archived")
+                    _debug("[flow] blocker fetch blocked: session archived")
                     return None
             if code in {400, 404, 409, 429, 500, 502, 503, 504}:
-                _debug(f"[flow] pending card unavailable status={code}")
+                _debug(f"[flow] blocker unavailable status={code}")
                 return None
             raise
         except httpx.RequestError:
-            _debug("[flow] pending card request error")
+            _debug("[flow] blocker request error")
             return None
-        card = unwrap_api_response(resp)
-        if isinstance(card, dict) and card:
+        blocker = unwrap_api_response(resp)
+        if isinstance(blocker, dict) and blocker:
             _debug(
-                f"[flow] pending card skill_id={card.get('skill_id')} task_key={card.get('task_key')} review_type={card.get('review_type')}"
+                f"[flow] blocker type={blocker.get('type')} interruption_id={blocker.get('interruption_id')} "
+                f"reason={blocker.get('reason_kind')}:{blocker.get('reason_code')}"
             )
-        return card if isinstance(card, dict) and card else None
+        return blocker if isinstance(blocker, dict) and blocker else None
 
-    async def actionable_card_from_sse(self, sse: dict[str, Any] | None) -> dict[str, Any] | None:
-        card = extract_last_card_from_sse(sse or {})
-        if not isinstance(card, dict) or not card:
+    async def actionable_blocker_from_sse(self, sse: dict[str, Any] | None) -> dict[str, Any] | None:
+        blocker = extract_last_blocker_from_sse(sse or {})
+        if not isinstance(blocker, dict) or not blocker:
             return None
-        authoritative = await self.get_pending_card()
+        authoritative = await self.get_current_blocker()
         if authoritative:
             return None
-        return card
+        return blocker
 
-    async def resume_card(self, card: dict[str, Any], *, max_loops: int | None = None) -> dict[str, Any]:
+    async def resume_blocker(self, blocker: dict[str, Any], *, max_loops: int | None = None) -> dict[str, Any]:
         # Keep an audit trail for assertions/debugging.
-        self.seen_cards.append(card)
-        self.seen_card_signatures.append(card_signature(card))
+        self.seen_cards.append(blocker)
+        self.seen_card_signatures.append(card_signature(blocker))
         if _DEBUG:
-            raw_questions = card.get("questions")
+            raw_questions = blocker.get("questions")
             qs: list[Any] = list(raw_questions) if isinstance(raw_questions, list) else []
             fields = [
                 {
@@ -1418,21 +1184,21 @@ class WorkbenchFlow:
                 if isinstance(q, dict)
             ]
             _debug(
-                f"[flow] card detail skill={card.get('skill_id')} task={card.get('task_key')} "
+                f"[flow] blocker detail type={blocker.get('type')} interruption={blocker.get('interruption_id')} "
                 f"fields={fields}"
             )
-        answer_payload = auto_answer_card(card, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
+        answer_payload = auto_answer_card(blocker, overrides=self.overrides, uploaded_file_ids=self.uploaded_file_ids)
         _debug(
-            f"[flow] resume card {card.get('skill_id')} answers={len(answer_payload.get('answers') or [])} "
+            f"[flow] resume blocker {blocker.get('interruption_id')} answers={len(answer_payload.get('answers') or [])} "
             f"payload={answer_payload}"
         )
         resolved_max_loops = _RESUME_MAX_LOOPS if max_loops is None else max(1, int(max_loops))
-        settle_mode = "fire_and_poll" if _is_skill_error_confirm_card(card) else "first_event"
+        settle_mode = "fire_and_poll" if _is_skill_error_confirm_card(blocker) else "first_event"
         resume_task = asyncio.create_task(
             self.client.resume(
                 self.session_id,
                 answer_payload,
-                pending_card=card,
+                blocker=blocker,
                 max_loops=resolved_max_loops,
                 settle_mode=settle_mode,
             )
@@ -1463,7 +1229,7 @@ class WorkbenchFlow:
         if isinstance(sse, dict):
             self.last_sse = sse
             self.seen_sse.append(sse)
-        await self._emit_progress(label=f"resume:{settle_mode}", card=card, sse=sse)
+        await self._emit_progress(label=f"resume:{settle_mode}", blocker=blocker, sse=sse)
         return sse
 
     async def nudge(
@@ -1491,10 +1257,14 @@ class WorkbenchFlow:
         await self._emit_progress(label=f"nudge:{text[:24]}", sse=sse)
         return sse
 
-    async def request_documents(
+    async def start_chat_run(
         self,
-        requested_documents: list[dict[str, Any]],
         *,
+        entry_mode: str,
+        service_type_id: str,
+        delivery_goal: str,
+        target_document_kind: str | None = None,
+        supporting_document_kinds: list[str] | None = None,
         user_query: str = "",
         attachments: list[str] | None = None,
         max_loops: int = 12,
@@ -1502,26 +1272,47 @@ class WorkbenchFlow:
         settle_mode: str = "full",
         label: str | None = None,
     ) -> dict[str, Any]:
-        normalized_requested_documents = [
-            {
-                "document_kind": str((item or {}).get("document_kind") or "").strip(),
-                "instance_key": str((item or {}).get("instance_key") or "").strip(),
-            }
-            for item in requested_documents
-            if isinstance(item, dict) and str((item or {}).get("document_kind") or "").strip()
+        normalized_entry_mode = str(entry_mode or "").strip()
+        normalized_service_type_id = str(service_type_id or "").strip()
+        normalized_delivery_goal = str(delivery_goal or "").strip()
+        normalized_target_document_kind = str(target_document_kind or "").strip()
+        normalized_supporting_document_kinds = [
+            str(kind or "").strip()
+            for kind in (supporting_document_kinds or [])
+            if str(kind or "").strip()
         ]
-        if not normalized_requested_documents:
-            raise ValueError("request_documents requires at least one document_kind")
-        self.last_requested_documents = normalized_requested_documents
-        request_label = label or ",".join(item["document_kind"] for item in normalized_requested_documents)
+        if normalized_entry_mode not in {"analysis", "direct_drafting"}:
+            raise ValueError("start_chat_run requires entry_mode in {'analysis','direct_drafting'}")
+        if not normalized_service_type_id:
+            raise ValueError("start_chat_run requires service_type_id")
+        if not normalized_delivery_goal:
+            raise ValueError("start_chat_run requires delivery_goal")
+        if normalized_entry_mode == "analysis" and normalized_target_document_kind:
+            raise ValueError("analysis chat run must not carry target_document_kind")
+        if normalized_entry_mode == "direct_drafting" and not normalized_target_document_kind:
+            raise ValueError("direct_drafting chat run requires target_document_kind")
+        self.last_chat_run = {
+            "entry_mode": normalized_entry_mode,
+            "service_type_id": normalized_service_type_id,
+            "delivery_goal": normalized_delivery_goal,
+            "target_document_kind": normalized_target_document_kind,
+            "supporting_document_kinds": normalized_supporting_document_kinds,
+        }
+        request_label = label or (
+            normalized_target_document_kind or normalized_delivery_goal or normalized_service_type_id
+        )
         _debug(
-            f"[flow] request_documents requested={normalized_requested_documents!r} "
+            f"[flow] start_chat_run matter_bootstrap={self.last_chat_run!r} "
             f"attachments={len(attachments or self.uploaded_file_ids)} max_loops={max_loops} "
             f"settle_mode={settle_mode}"
         )
-        sse = await self.client.request_documents(
+        sse = await self.client.start_chat_run(
             self.session_id,
-            requested_documents=normalized_requested_documents,
+            entry_mode=normalized_entry_mode,
+            service_type_id=normalized_service_type_id,
+            delivery_goal=normalized_delivery_goal,
+            target_document_kind=normalized_target_document_kind or None,
+            supporting_document_kinds=normalized_supporting_document_kinds,
             user_query=user_query,
             attachments=attachments or self.uploaded_file_ids,
             max_loops=max_loops,
@@ -1531,22 +1322,22 @@ class WorkbenchFlow:
         if isinstance(sse, dict):
             self.last_sse = sse
             self.seen_sse.append(sse)
-        await self._emit_progress(label=f"request:{request_label}", sse=sse)
+        await self._emit_progress(label=f"chat_run:{request_label}", sse=sse)
         return sse
 
     async def step(
         self,
         *,
-        stop_on_pending_card: PendingCardStopFn | None = None,
+        stop_on_blocker: BlockerStopFn | None = None,
     ) -> dict[str, Any] | None:
-        """Process one pending card if exists; otherwise wait passively."""
+        """Process one blocker if present; otherwise wait passively."""
         await self.refresh()
         if self.session_archived:
             # Avoid any chat/resume operations once the session is archived; keep run_until polling only.
             return {"events": [{"event": "session_archived"}], "output": "session archived"}
-        card = await self.get_pending_card()
+        card = await self.get_current_blocker()
         if not card and isinstance(self.last_sse, dict):
-            card = await self.actionable_card_from_sse(self.last_sse)
+            card = await self.actionable_blocker_from_sse(self.last_sse)
         if card:
             self._last_step_used_nudge = False
             sig = card_signature(card)
@@ -1565,28 +1356,32 @@ class WorkbenchFlow:
                         f"repeat={len(recent)}, card={debug_card}"
                     )
 
-            if stop_on_pending_card is not None and stop_on_pending_card(card):
+            if stop_on_blocker is not None and stop_on_blocker(card):
                 _debug(
-                    f"[flow] stop_on_pending_card skill_id={card.get('skill_id')} "
-                    f"task_key={card.get('task_key')}"
+                    f"[flow] stop_on_blocker interruption_id={card.get('interruption_id')} "
+                    f"type={card.get('type')}"
                 )
                 self.seen_cards.append(card)
                 self.seen_card_signatures.append(sig)
-                return _pending_card_intercept_sse(card)
+                return _blocker_intercept_sse(card)
 
-            skill_id = str(card.get("skill_id") or "").strip()
+            reason_code = str(card.get("reason_code") or "").strip()
 
-            if skill_id == "reference-grounding" and self._repeat_card_count >= 3:
+            if reason_code == "retrieval_low_coverage" and self._repeat_card_count >= 3:
                 if not self.strict_card_driven:
-                    if not self.last_requested_documents:
-                        raise AssertionError("reference-grounding remediation requires last_requested_documents")
-                    _debug(f"[flow] reference-grounding remediation request_documents repeat={self._repeat_card_count}")
+                    if not self.last_chat_run:
+                        raise AssertionError("retrieval_low_coverage remediation requires last_chat_run")
+                    _debug(f"[flow] retrieval_low_coverage remediation start_chat_run repeat={self._repeat_card_count}")
                     self._last_step_used_nudge = True
-                    return await self.request_documents(
-                        self.last_requested_documents,
+                    return await self.start_chat_run(
+                        entry_mode=str(self.last_chat_run.get("entry_mode") or ""),
+                        service_type_id=str(self.last_chat_run.get("service_type_id") or ""),
+                        delivery_goal=str(self.last_chat_run.get("delivery_goal") or ""),
+                        target_document_kind=str(self.last_chat_run.get("target_document_kind") or "") or None,
+                        supporting_document_kinds=list(self.last_chat_run.get("supporting_document_kinds") or []),
                         max_loops=12,
                         settle_mode="fire_and_poll",
-                        label="refresh_requested_documents",
+                        label="refresh_chat_run",
                     )
 
             if _is_unanswerable_card(card):
@@ -1604,8 +1399,8 @@ class WorkbenchFlow:
             else:
                 self._repeat_unanswerable_signature = None
                 self._repeat_unanswerable_count = 0
-            _debug(f"[flow] resume card skill_id={card.get('skill_id')} task_key={card.get('task_key')}")
-            return await self.resume_card(card)
+            _debug(f"[flow] resume blocker interruption_id={card.get('interruption_id')} type={card.get('type')}")
+            return await self.resume_blocker(card)
         self._repeat_card_signature = None
         self._repeat_card_count = 0
         self._repeat_unanswerable_signature = None
@@ -1620,7 +1415,7 @@ class WorkbenchFlow:
         max_steps: int = 40,
         step_sleep_s: float = 0.0,
         description: str = "target condition",
-        stop_on_pending_card: PendingCardStopFn | None = None,
+        stop_on_blocker: BlockerStopFn | None = None,
     ) -> None:
         """Advance the workflow until predicate(flow) is truthy (sync/async)."""
         step_no = 0
@@ -1638,7 +1433,7 @@ class WorkbenchFlow:
             await self._emit_progress(label=f"waiting:{description}", step_no=step_no, max_steps=max_steps)
             _debug(f"[flow] step {step_no}/{max_steps} waiting for {description} (session_id={self.session_id}, matter_id={self.matter_id})")
             sse = await self.step(
-                stop_on_pending_card=stop_on_pending_card,
+                stop_on_blocker=stop_on_blocker,
             )
             if sse is None:
                 await asyncio.sleep(max(_SESSION_BUSY_BACKOFF_S, 0.8))
@@ -1658,14 +1453,14 @@ class WorkbenchFlow:
         raise AssertionError(f"Failed to reach {description} after {max_steps} steps (session_id={self.session_id}, matter_id={self.matter_id})")
 
 
-async def wait_for_initial_card(flow: WorkbenchFlow, *, timeout_s: float = 60.0) -> dict[str, Any]:
-    """Wait until the workflow produces a pending card (intake/confirm/etc)."""
+async def wait_for_initial_blocker(flow: WorkbenchFlow, *, timeout_s: float = 60.0) -> dict[str, Any]:
+    """Wait until the workflow produces a blocker."""
     deadline = time.time() + float(timeout_s)
     last: dict[str, Any] | None = None
     while time.time() < deadline:
         await flow.refresh()
-        last = await flow.get_pending_card()
+        last = await flow.get_current_blocker()
         if last:
             return last
         await asyncio.sleep(1.0)
-    raise AssertionError(f"Timed out waiting for initial card (timeout={timeout_s}s, session_id={flow.session_id})")
+    raise AssertionError(f"Timed out waiting for initial blocker (timeout={timeout_s}s, session_id={flow.session_id})")

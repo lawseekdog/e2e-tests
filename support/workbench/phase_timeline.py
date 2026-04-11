@@ -83,7 +83,7 @@ def assert_has_deliverable(phase_tl: dict[str, Any], *, output_key: str) -> None
         if not fid:
             raise AssertionError(f"phase_timeline deliverable missing fileId: {d}")
         st = str(d.get("status") or "").strip()
-        if st and st not in {"completed", "done"}:
+        if st and st not in {"draft", "review_pending", "approved", "published"}:
             raise AssertionError(f"phase_timeline deliverable status unexpected: {d}")
         return
     raise AssertionError(f"phase_timeline missing deliverable output_key={want!r}. Have={sorted(deliverable_output_keys(phase_tl))}")

@@ -44,7 +44,6 @@
   - `./.venv/bin/python scripts/run_analysis_real_flow.py --cards-only`
   - `./.venv/bin/python scripts/run_contract_review_real_flow.py --cards-only`
   - `./.venv/bin/python scripts/run_legal_opinion_real_flow.py --cards-only`
-  - `./.venv/bin/python scripts/run_template_draft_real_flow.py --template-id <TEMPLATE_ID> --cards-only`
 - pytest 仅保留最小 support/unit：`./.venv/bin/pytest tests/support/test_flow_runner_unit.py -q`
 
 ## 多智能体并行改造约定（强制）

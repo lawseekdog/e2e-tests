@@ -38,22 +38,20 @@ def _section_items(view: dict[str, Any], section_type: str) -> list[dict[str, An
     return []
 
 
-_ALLOWED_REVIEW_TYPES = {"clarify", "select", "confirm", "phase_done"}
 _ATTACHMENT_FIELD = "case.file_refs.pending_upload_file_ids"
-_FORBIDDEN_SKILL_IDS = {"skill-error-analysis"}
+_ALLOWED_BLOCKER_TYPES = {"awaiting_review", "blocked"}
+_FORBIDDEN_REASON_CODES = {"skill_error_analysis"}
 
 _FLOW_CARD_POLICY: dict[str, dict[str, Any]] = {
     "analysis": {"allowed_data_groups": {"search", "evidence", "workbench"}},
     "contract_review": {"allowed_data_groups": {"work_product", "workbench"}},
     "legal_opinion": {"allowed_data_groups": {"search", "evidence", "workbench"}},
-    "template_draft": {"allowed_data_groups": {"work_product", "workbench"}},
 }
 
 _NODE_HINTS: dict[str, tuple[str, ...]] = {
-    "analysis": ("grounding", "reasoning", "artifact_render"),
-    "contract_review": ("contract", "document", "render", "sync"),
-    "legal_opinion": ("legal_opinion", "opinion", "goal_completion"),
-    "template_draft": ("intake", "compose", "render", "sync", "finish"),
+    "analysis": ("source_pack", "authority_bundle", "issue_matrix", "document_blueprint"),
+    "contract_review": ("contract_review", "authority_bundle", "issue_matrix", "document_blueprint", "render_deliverable"),
+    "legal_opinion": ("legal_opinion", "authority_bundle", "issue_matrix", "document_blueprint", "render_deliverable"),
 }
 
 _CITATION_RE = re.compile(r"《[^》]{2,40}》第[一二三四五六七八九十百千万0-9]{1,8}条")
@@ -142,6 +140,20 @@ def _bundle_round_timeline(*, session_id: str, timeline: dict[str, Any], traces:
         "entries": entries,
         "total": len(entries),
     }
+
+
+def _current_phase_from_snapshot_view(snapshot: dict[str, Any]) -> tuple[str, str]:
+    snap = snapshot if isinstance(snapshot, dict) else {}
+    workflow = _as_dict(snap.get("workflow"))
+    current_rows = [row for row in _as_list(workflow.get("phases")) if isinstance(row, dict) and row.get("current") is True]
+    if len(current_rows) != 1:
+        raise ValueError(f"workflow_current_phase_invalid:expected_single_current:count={len(current_rows)}")
+    row = current_rows[0]
+    phase_id = _safe_str(row.get("phase_id") or row.get("id"))
+    phase_label = _safe_str(row.get("label") or row.get("name"))
+    if not phase_id:
+        raise ValueError("workflow_current_phase_invalid:missing_phase_id")
+    return phase_id, phase_label
 
 
 def _analysis_counts(view: dict[str, Any]) -> tuple[int, int, int]:
@@ -330,32 +342,36 @@ def score_unexpected_cards(
     *,
     flow_id: str,
     seen_cards: list[dict[str, Any]] | None,
-    pending_card: dict[str, Any] | None = None,
+    current_blocker: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cards = [dict(card) for card in (seen_cards or []) if isinstance(card, dict)]
-    if isinstance(pending_card, dict) and pending_card:
-        cards.append(dict(pending_card))
+    if isinstance(current_blocker, dict) and current_blocker:
+        cards.append(dict(current_blocker))
 
     unexpected_cards: list[dict[str, Any]] = []
     warnings: list[str] = []
     for card in cards:
-        skill_id = _safe_str(card.get("skill_id")).lower()
-        task_key = _safe_str(card.get("task_key"))
-        review_type = _safe_str(card.get("review_type")).lower()
+        interruption_type = _safe_str(card.get("type")).lower()
+        interruption_id = _safe_str(card.get("interruption_id"))
+        interruption_key = _safe_str(card.get("interruption_key"))
+        reason_kind = _safe_str(card.get("reason_kind")).lower()
+        reason_code = _safe_str(card.get("reason_code")).lower()
         reasons: list[str] = []
-        if skill_id in _FORBIDDEN_SKILL_IDS:
-            reasons.append(f"forbidden_skill:{skill_id}")
-        if review_type and review_type not in _ALLOWED_REVIEW_TYPES:
-            reasons.append(f"unexpected_review_type:{review_type}")
+        if interruption_type and interruption_type not in _ALLOWED_BLOCKER_TYPES:
+            reasons.append(f"unexpected_type:{interruption_type}")
+        if reason_code in _FORBIDDEN_REASON_CODES:
+            reasons.append(f"forbidden_reason_code:{reason_code}")
         reasons.extend(_card_field_issues(flow_id=flow_id, card=card))
-        if skill_id and not reasons and skill_id not in {"goal-completion", "system:kickoff"}:
-            warnings.append(f"unclassified_skill:{skill_id}")
+        if interruption_key and not reasons and interruption_key != "goal_completion":
+            warnings.append(f"unclassified_interruption:{interruption_key}")
         if reasons:
             unexpected_cards.append(
                 {
-                    "skill_id": skill_id,
-                    "task_key": task_key,
-                    "review_type": review_type,
+                    "type": interruption_type,
+                    "interruption_id": interruption_id,
+                    "interruption_key": interruption_key,
+                    "reason_kind": reason_kind,
+                    "reason_code": reason_code,
                     "reasons": reasons,
                 }
             )
@@ -407,7 +423,7 @@ def _collect_node_tokens(observability: dict[str, Any] | None) -> tuple[list[str
         for row in entries:
             if not isinstance(row, dict):
                 continue
-            for key in ("event_type", "status", "phase", "node_name", "skill_name", "step_id"):
+            for key in ("event_type", "status", "phase", "phase_id", "node_name", "skill_name"):
                 token = _safe_str(row.get(key)).lower()
                 if token:
                     tokens.append(token)
@@ -416,9 +432,6 @@ def _collect_node_tokens(observability: dict[str, Any] | None) -> tuple[list[str
                 token = _safe_str(payload.get(key)).lower()
                 if token:
                     tokens.append(token)
-            step_id = _safe_str(row.get("step_id")).lower()
-            if ":" in step_id:
-                tokens.extend(part for part in step_id.split(":") if part)
 
     return tokens, trace_count, phase_count, produced_keys
 
@@ -483,7 +496,7 @@ def score_snapshot_progress(
     current_view: dict[str, Any] | None,
     aux_views: dict[str, Any] | None = None,
     deliverables: dict[str, dict[str, Any]] | None = None,
-    pending_card: dict[str, Any] | None = None,
+    current_blocker: dict[str, Any] | None = None,
     contract_review_expectations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     snap = snapshot if isinstance(snapshot, dict) else {}
@@ -494,19 +507,15 @@ def score_snapshot_progress(
     failures: list[str] = []
     score = 0
 
+    derived_phase, _derived_phase_label = _current_phase_from_snapshot_view(snap)
     current_node = _safe_str(
         analysis_state.get("current_node")
-        or analysis_state.get("current_phase_id")
-        or analysis_state.get("current_step_id")
         or analysis_state.get("current_product_type")
     )
-    current_phase = _safe_str(
-        analysis_state.get("current_phase")
-        or analysis_state.get("current_phase_id")
-        or analysis_state.get("current_phase_name")
-        or snap.get("current_phase")
+    phase_id = _safe_str(
+        derived_phase
     )
-    if current_node or current_phase:
+    if current_node or phase_id:
         score += 15
     else:
         failures.append("snapshot_missing_current_node_phase")
@@ -522,12 +531,12 @@ def score_snapshot_progress(
     else:
         failures.append("view_contract_invalid")
 
-    pending = pending_card if isinstance(pending_card, dict) else {}
-    pending_skill = _safe_str(pending.get("skill_id")).lower()
-    if not pending or pending_skill == "goal-completion":
+    blocker = current_blocker if isinstance(current_blocker, dict) else {}
+    blocker_type = _safe_str(blocker.get("type")).lower()
+    if not blocker or blocker_type == "awaiting_review":
         score += 10
     else:
-        failures.append(f"unfinished_pending_card:{pending_skill or 'unknown'}")
+        failures.append(f"unfinished_blocker:{blocker_type or 'unknown'}")
 
     if flow_id == "analysis":
         issues, strategies, risks = _analysis_counts(view)
@@ -623,7 +632,7 @@ def score_snapshot_progress(
         "failures": failures,
         "summary_len": summary_len,
         "current_node": current_node,
-        "current_phase": current_phase,
+        "phase_id": phase_id,
     }
 
 
@@ -669,7 +678,7 @@ def _score_analysis_output_quality(*, current_view: dict[str, Any], aux_views: d
 def _score_contract_review_output_quality(
     *,
     text: str,
-    deliverable_status: str,
+    artifact_status: str,
     current_view: dict[str, Any],
     gold_text: str = "",
     contract_review_expectations: dict[str, Any] | None = None,
@@ -689,8 +698,8 @@ def _score_contract_review_output_quality(
         failures.append(str(exc))
     benchmark = score_contract_review_docx_benchmark(content, gold_text=_safe_str(gold_text))
     failures.extend(list(benchmark.hard_gate_failures))
-    if _safe_str(deliverable_status).lower() not in {"completed", "archived", "done"}:
-        failures.append(f"deliverable_status:{deliverable_status or 'missing'}")
+    if _safe_str(artifact_status).lower() not in {"draft", "review_pending", "approved", "published"}:
+        failures.append(f"artifact_status:{artifact_status or 'missing'}")
     missing_markers = _missing_section_markers(content, contract_review_expectations)
     if missing_markers:
         failures.append(f"contract_review_section_markers_missing:{','.join(missing_markers)}")
@@ -712,11 +721,11 @@ def build_legal_opinion_formal_ready_report(
     current_view: dict[str, Any] | None,
     aux_views: dict[str, Any] | None = None,
     deliverable_text: str = "",
-    deliverable_status: str = "",
+    artifact_status: str = "",
 ) -> dict[str, Any]:
     view = current_view if isinstance(current_view, dict) else {}
     aux = aux_views if isinstance(aux_views, dict) else {}
-    docgen_state = _as_dict(aux.get("document_generation_state"))
+    typed_render_state = _as_dict(aux.get("typed_render_state"))
     content = _safe_str(deliverable_text)
     title = _safe_str(view.get("title"))
     summary = _safe_str(view.get("summary"))
@@ -735,14 +744,11 @@ def build_legal_opinion_formal_ready_report(
     actions = len(_as_list(view.get("action_items")))
     material_gaps = [_safe_str(item) for item in _as_list(view.get("material_gaps")) if _safe_str(item)]
     fact_gaps = [_safe_str(item) for item in _as_list(view.get("fact_gaps")) if _safe_str(item)]
-    formal_gate_blocked = bool(docgen_state.get("formal_gate_blocked"))
+    formal_gate_blocked = bool(typed_render_state.get("formal_gate_blocked"))
     formal_gate_reason_codes = [
         _safe_str(code)
-        for code in _as_list(docgen_state.get("formal_gate_reason_codes"))
+        for code in _as_list(typed_render_state.get("formal_gate_reason_codes"))
         if _safe_str(code)
-    ]
-    formal_gate_actions = [
-        row for row in _as_list(docgen_state.get("formal_gate_actions")) if isinstance(row, dict)
     ]
     pollution_hits = [
         token
@@ -778,28 +784,23 @@ def build_legal_opinion_formal_ready_report(
         failures.append(f"legal_opinion_pollution:{','.join(pollution_hits)}")
     if formal_gate_blocked:
         if formal_gate_reason_codes:
-            score += 10
+            score += 20
         else:
             failures.append("formal_gate_reason_codes_missing")
-        if formal_gate_actions:
-            score += 10
-        else:
-            failures.append("formal_gate_actions_missing")
-    elif docgen_state:
+    elif typed_render_state:
         score += 20
     else:
-        failures.append("document_generation_state_missing")
-    if _safe_str(deliverable_status).lower() in {"completed", "archived", "done"}:
+        failures.append("typed_render_state_missing")
+    if _safe_str(artifact_status).lower() in {"draft", "review_pending", "approved", "published"}:
         score += 10
     elif content:
-        failures.append(f"deliverable_status:{deliverable_status or 'missing'}")
+        failures.append(f"artifact_status:{artifact_status or 'missing'}")
 
     return {
         "score": min(100, score),
         "passed": score >= 75 and not failures,
         "failures": failures,
         "blocking_reason_codes": formal_gate_reason_codes,
-        "required_actions": formal_gate_actions,
         "details": {
             "confirmed_count": len(confirmed_rows),
             "risk_count": risks,
@@ -815,7 +816,7 @@ def build_legal_opinion_formal_ready_report(
 def _score_legal_opinion_output_quality(
     *,
     text: str,
-    deliverable_status: str,
+    artifact_status: str,
     current_view: dict[str, Any],
     gold_text: str = "",
     aux_views: dict[str, Any] | None = None,
@@ -825,7 +826,7 @@ def _score_legal_opinion_output_quality(
         current_view=current_view,
         aux_views=aux_views,
         deliverable_text=content,
-        deliverable_status=deliverable_status,
+        artifact_status=artifact_status,
     )
     if not content:
         issues = len(_as_list(_as_dict(current_view).get("issues")))
@@ -853,8 +854,8 @@ def _score_legal_opinion_output_quality(
         failures.append(str(exc))
     benchmark = score_legal_opinion_docx_benchmark(content, gold_text=_safe_str(gold_text))
     failures.extend(list(benchmark.hard_gate_failures))
-    if _safe_str(deliverable_status).lower() not in {"completed", "archived", "done"}:
-        failures.append(f"deliverable_status:{deliverable_status or 'missing'}")
+    if _safe_str(artifact_status).lower() not in {"draft", "review_pending", "approved", "published"}:
+        failures.append(f"artifact_status:{artifact_status or 'missing'}")
     return {
         "score": int(round((benchmark.score * 0.65) + (int(formal_ready.get("score") or 0) * 0.35))),
         "passed": benchmark.passed and bool(formal_ready.get("passed")) and not failures,
@@ -875,7 +876,7 @@ def score_deliverable_quality(
     *,
     flow_id: str,
     text: str = "",
-    deliverable_status: str = "",
+    artifact_status: str = "",
     current_view: dict[str, Any] | None = None,
     aux_views: dict[str, Any] | None = None,
     gold_text: str = "",
@@ -888,7 +889,7 @@ def score_deliverable_quality(
     if flow_id == "contract_review":
         return _score_contract_review_output_quality(
             text=text,
-            deliverable_status=deliverable_status,
+            artifact_status=artifact_status,
             current_view=view,
             gold_text=gold_text,
             contract_review_expectations=contract_review_expectations,
@@ -896,7 +897,7 @@ def score_deliverable_quality(
     if flow_id == "legal_opinion":
         return _score_legal_opinion_output_quality(
             text=text,
-            deliverable_status=deliverable_status,
+            artifact_status=artifact_status,
             current_view=view,
             gold_text=gold_text,
             aux_views=aux,
@@ -908,20 +909,20 @@ def build_flow_scores(
     *,
     flow_id: str,
     seen_cards: list[dict[str, Any]] | None,
-    pending_card: dict[str, Any] | None,
+    current_blocker: dict[str, Any] | None,
     snapshot: dict[str, Any] | None,
     current_view: dict[str, Any] | None,
     aux_views: dict[str, Any] | None = None,
     deliverables: dict[str, dict[str, Any]] | None = None,
     deliverable_text: str = "",
-    deliverable_status: str = "",
+    artifact_status: str = "",
     gold_text: str = "",
     contract_review_expectations: dict[str, Any] | None = None,
     observability: dict[str, Any] | None = None,
     bundle_quality_summary: dict[str, Any] | None = None,
     goal_completion_mode: str = "",
 ) -> dict[str, Any]:
-    unexpected = score_unexpected_cards(flow_id=flow_id, seen_cards=seen_cards, pending_card=pending_card)
+    unexpected = score_unexpected_cards(flow_id=flow_id, seen_cards=seen_cards, current_blocker=current_blocker)
     node_path = score_node_path(
         flow_id=flow_id,
         observability=observability,
@@ -934,13 +935,13 @@ def build_flow_scores(
         current_view=current_view,
         aux_views=aux_views,
         deliverables=deliverables,
-        pending_card=pending_card,
+        current_blocker=current_blocker,
         contract_review_expectations=contract_review_expectations,
     )
     deliverable_quality = score_deliverable_quality(
         flow_id=flow_id,
         text=deliverable_text,
-        deliverable_status=deliverable_status,
+        artifact_status=artifact_status,
         current_view=current_view,
         aux_views=aux_views,
         gold_text=gold_text,
@@ -977,122 +978,7 @@ def build_flow_scores(
     }
 
 
-def build_template_flow_scores(
-    *,
-    cards: list[dict[str, Any]] | None,
-    pending_card: dict[str, Any] | None,
-    node_timeline: list[dict[str, Any]] | None,
-    summary: dict[str, Any] | None,
-    last_docgen_snapshot: dict[str, Any] | None,
-    dialogue_quality: dict[str, Any] | None,
-    document_quality: dict[str, Any] | None,
-    bundle_quality_summary: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    unexpected = score_unexpected_cards(flow_id="template_draft", seen_cards=cards, pending_card=pending_card)
-    rows = [row for row in (node_timeline or []) if isinstance(row, dict)]
-    node_set = {_safe_str(row.get("docgen_node")).lower() for row in rows if _safe_str(row.get("docgen_node"))}
-    node_set.update(
-        {
-            _safe_str(item).lower()
-            for item in _as_list(_as_dict(summary).get("docgen_node_sequence"))
-            if _safe_str(item)
-        }
-    )
-    expected_nodes = {"intake", "compose", "render", "sync", "finish"}
-    matched_nodes = sorted(node_set & expected_nodes)
-    node_path_score = {
-        "score": int(round((len(matched_nodes) / float(len(expected_nodes))) * 100)) if expected_nodes else 100,
-        "passed": len(matched_nodes) >= 4,
-        "matched_hints": matched_nodes,
-        "missing_hints": sorted(expected_nodes - node_set),
-        "trace_count": len(rows),
-        "distinct_node_token_count": len(node_set),
-        "phase_count": 0,
-        "produced_output_keys": [],
-        "quality_summary_ref": _as_dict(_as_dict(bundle_quality_summary).get("refs")).get("summary"),
-        "worst_node": _as_dict(bundle_quality_summary).get("worst_node") if isinstance(_as_dict(bundle_quality_summary).get("worst_node"), dict) else {},
-        "worst_skill": _as_dict(bundle_quality_summary).get("worst_skill") if isinstance(_as_dict(bundle_quality_summary).get("worst_skill"), dict) else {},
-        "worst_lane": _as_dict(bundle_quality_summary).get("worst_lane") if isinstance(_as_dict(bundle_quality_summary).get("worst_lane"), dict) else {},
-        "collection_errors": {},
-    }
-    snapshot_obj = last_docgen_snapshot if isinstance(last_docgen_snapshot, dict) else {}
-    deliverable = _as_dict(snapshot_obj.get("deliverable"))
-    snapshot_failures: list[str] = []
-    snapshot_score = 0
-    has_terminal_quality_review = (
-        _safe_str(_as_dict(summary).get("latest_docgen_node")).lower() == "finish"
-        and _safe_str(deliverable.get("status")).lower() in {"completed", "archived", "done"}
-        and bool(_safe_str(snapshot_obj.get("quality_review_decision")))
-    )
-    if _safe_str(snapshot_obj.get("current_task_id")) or _safe_str(snapshot_obj.get("current_phase")):
-        snapshot_score += 20
-    else:
-        snapshot_failures.append("snapshot_missing_current_task_phase")
-    if _safe_str(_as_dict(summary).get("latest_docgen_node")):
-        snapshot_score += 20
-    else:
-        snapshot_failures.append("docgen_node_missing")
-    if bool(snapshot_obj.get("template_quality_contracts_json_exists")) or has_terminal_quality_review:
-        snapshot_score += 20
-    else:
-        snapshot_failures.append("template_quality_contracts_missing")
-    if _safe_str(deliverable.get("status")).lower() in {"completed", "archived", "done"}:
-        snapshot_score += 20
-    else:
-        snapshot_failures.append("deliverable_not_terminal")
-    if _safe_str(snapshot_obj.get("quality_review_decision")):
-        snapshot_score += 20
-    else:
-        snapshot_failures.append("quality_review_decision_missing")
-    snapshot_progress = {
-        "score": snapshot_score,
-        "passed": snapshot_score >= 80 and not snapshot_failures,
-        "failures": snapshot_failures,
-        "summary_len": 0,
-        "current_node": _safe_str(_as_dict(summary).get("latest_docgen_node")),
-        "current_phase": _safe_str(snapshot_obj.get("current_phase")),
-    }
-    dialogue = dialogue_quality if isinstance(dialogue_quality, dict) else {}
-    document = document_quality if isinstance(document_quality, dict) else {}
-    deliverable_score = int(round((40 if bool(dialogue.get("pass")) else 0) + (60 if bool(document.get("pass")) else 0)))
-    deliverable_failures: list[str] = []
-    if not bool(dialogue.get("pass")):
-        deliverable_failures.append("dialogue_quality_failed")
-    if not bool(document.get("pass")):
-        deliverable_failures.append("document_quality_failed")
-    deliverable_quality = {
-        "score": deliverable_score,
-        "passed": not deliverable_failures,
-        "failures": deliverable_failures,
-        "details": {
-            "dialogue_quality_pass": bool(dialogue.get("pass")),
-            "document_quality_pass": bool(document.get("pass")),
-            "citation_count": int(document.get("citation_count") or 0) if isinstance(document.get("citation_count"), (int, float)) else 0,
-            "fact_coverage_score": float(document.get("fact_coverage_score") or 0.0) if isinstance(document.get("fact_coverage_score"), (int, float)) else 0.0,
-        },
-    }
-    overall_score = int(round(unexpected["score"] * 0.20 + node_path_score["score"] * 0.25 + snapshot_progress["score"] * 0.20 + deliverable_quality["score"] * 0.35))
-    overall_failures = [
-        *(deliverable_failures),
-        *(snapshot_failures),
-        *[",".join(_as_list(row.get("reasons"))) for row in _as_list(unexpected.get("unexpected_cards")) if isinstance(row, dict)],
-        *[f"quality:{_safe_str(item)}" for item in _as_list(_as_dict(bundle_quality_summary).get("hard_fail_reasons")) if _safe_str(item)],
-    ]
-    return {
-        "unexpected_card_score": unexpected,
-        "node_path_score": node_path_score,
-        "snapshot_progress_score": snapshot_progress,
-        "deliverable_quality_score": deliverable_quality,
-        "overall_e2e_score": {
-            "score": overall_score,
-            "passed": bool(unexpected.get("passed")) and bool(node_path_score.get("passed")) and bool(snapshot_progress.get("passed")) and bool(deliverable_quality.get("passed")) and not _as_list(_as_dict(bundle_quality_summary).get("hard_fail_reasons")),
-            "failures": [item for item in overall_failures if _safe_str(item)],
-        },
-    }
-
-
 __all__ = [
     "build_flow_scores",
-    "build_template_flow_scores",
     "collect_flow_observability",
 ]

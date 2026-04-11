@@ -47,7 +47,7 @@ from scripts._support.run_status import RunStatusSupervisor
 
 REQUIRED_DOC_OUTPUT_KEYS = ("contract_review_report",)
 
-DEFAULT_KICKOFF = (
+DEFAULT_USER_QUERY = (
     "请审查已上传合同并输出结构化结论：整体风险等级、合同类型、审查摘要、风险条款清单。"
     "重点关注违约责任、争议解决、免责条款与付款条件。"
 )
@@ -56,17 +56,21 @@ FLOW_OVERRIDES = {
     "profile.client_role": "applicant",
     "profile.summary": "合同审查，重点关注付款条件、违约责任、争议解决与免责条款。",
 }
-START_REQUESTED_DOCUMENTS = [
-    {"document_kind": "contract_review_report", "instance_key": ""},
-]
+START_CHAT_RUN = {
+    "entry_mode": "direct_drafting",
+    "service_type_id": "contract_review",
+    "delivery_goal": "contract_review",
+    "target_document_kind": "contract_review_report",
+    "supporting_document_kinds": [],
+}
 
 
 def _safe_str(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _start_requested_documents() -> list[dict[str, str]]:
-    return [dict(item) for item in START_REQUESTED_DOCUMENTS]
+def _start_chat_run() -> dict[str, Any]:
+    return dict(START_CHAT_RUN)
 
 
 def _select_contract_file(cli_value: str, *, contract_type_id: str) -> Path:
@@ -278,7 +282,7 @@ def _extract_runtime_deliverables(snapshot: dict[str, Any] | None) -> dict[str, 
             status = _safe_str(output.get("render_status")) or _safe_str(row.get("status")) or run_status
             if status:
                 entry["status"] = status
-            for key in ("file_id", "preview_file_id", "deliverable_id", "document_id", "render_format"):
+            for key in ("file_id", "preview_file_id", "artifact_id", "document_id", "render_format"):
                 value = _safe_str(output.get(key))
                 if value:
                     entry[key] = value
@@ -289,6 +293,21 @@ def _extract_runtime_deliverables(snapshot: dict[str, Any] | None) -> dict[str, 
             if artifact_refs:
                 entry["artifact_refs"] = artifact_refs
     return out
+
+
+def _current_execution_phase_id(execution_snapshot: dict[str, Any] | None) -> str:
+    snapshot = execution_snapshot if isinstance(execution_snapshot, dict) else {}
+    workflow = snapshot.get("workflow") if isinstance(snapshot.get("workflow"), dict) else {}
+    phases = workflow.get("phases") if isinstance(workflow.get("phases"), list) else []
+    for row in phases:
+        if isinstance(row, dict) and row.get("current") is True:
+            return _safe_str(row.get("phase_id") or row.get("id"))
+    for row in phases:
+        if not isinstance(row, dict):
+            continue
+        if _safe_str(row.get("status")).lower() in {"running", "blocked", "awaiting_review"}:
+            return _safe_str(row.get("phase_id") or row.get("id"))
+    return ""
 
 
 def _build_contract_view(
@@ -383,7 +402,7 @@ async def run(args: argparse.Namespace) -> int:
         base_url = _safe_str(args.base_url) or _safe_str(os.getenv("BASE_URL")) or "http://localhost:18001/api/v1"
     username = _safe_str(args.username) or _safe_str(os.getenv("LAWYER_USERNAME")) or "lawyer1"
     password = _safe_str(args.password) or _safe_str(os.getenv("LAWYER_PASSWORD")) or "lawyer123456"
-    kickoff = _safe_str(args.kickoff) or DEFAULT_KICKOFF
+    user_query = _safe_str(args.user_query) or DEFAULT_USER_QUERY
     requested_contract_type_id = _safe_str(args.contract_type_id).lower() or "construction"
     contract_file = _select_contract_file(args.contract_file, contract_type_id=requested_contract_type_id)
     contract_review_expectations = _load_contract_review_expectations(contract_file)
@@ -404,7 +423,7 @@ async def run(args: argparse.Namespace) -> int:
         default_leaf=f"output/contract-review-chain/{ts}",
     )
     supervisor = RunStatusSupervisor(out_dir=out_dir, flow_id="contract_review")
-    supervisor.update(status="booting", current_step="bootstrap.init", next_action="login")
+    supervisor.update(status="booting", progress_label="bootstrap.init", next_action="login")
 
     print(f"[config] base_url={base_url}")
     print(f"[config] direct_service_mode={direct_mode}")
@@ -426,7 +445,7 @@ async def run(args: argparse.Namespace) -> int:
     async with ApiClient(base_url) as client:
         await client.login(username, password)
         print(f"[login] ok user_id={client.user_id} org_id={client.organization_id}")
-        supervisor.update(status="booting", current_step="bootstrap.login", next_action="upload_contract")
+        supervisor.update(status="booting", progress_label="bootstrap.login", next_action="upload_contract")
 
         uploaded_file_ids = await upload_consultation_files(client, [contract_file])
         file_id = uploaded_file_ids[0] if uploaded_file_ids else ""
@@ -435,7 +454,7 @@ async def run(args: argparse.Namespace) -> int:
         print(f"[upload] ok file_id={file_id}")
         supervisor.update(
             status="booting",
-            current_step="bootstrap.upload_contract",
+            progress_label="bootstrap.upload_contract",
             next_action="create_session",
             extra={"uploaded_file_ids": uploaded_file_ids},
         )
@@ -452,42 +471,42 @@ async def run(args: argparse.Namespace) -> int:
         print(f"[session] id={session_id} matter_id={matter_id or '-'}")
         supervisor.update(
             status="booting",
-            current_step="bootstrap.session_created",
+            progress_label="bootstrap.session_created",
             session_id=session_id,
             matter_id=matter_id,
-            next_action="kickoff",
+            next_action="submit_request",
         )
 
-        kickoff_settle_mode = "fire_and_poll" if args.cards_only else "full"
+        request_settle_mode = "fire_and_poll" if args.poll_only else "full"
         supervisor.update(
             status="running",
-            current_step="kickoff.submitting",
+            progress_label="request.submitting",
             session_id=session_id,
             matter_id=_safe_str(flow.matter_id) or matter_id,
-            next_action="await_kickoff_events",
+            next_action="await_request_events",
         )
-        kickoff_sse = await flow.request_documents(
-            _start_requested_documents(),
-            user_query=kickoff,
+        request_sse = await flow.start_chat_run(
+            **_start_chat_run(),
+            user_query=user_query,
             attachments=[file_id],
-            max_loops=max(1, int(args.kickoff_max_loops)),
-            settle_mode=kickoff_settle_mode,
+            max_loops=max(1, int(args.request_max_loops)),
+            settle_mode=request_settle_mode,
             label="contract_review_report",
         )
-        kickoff_counts = _event_counts(kickoff_sse if isinstance(kickoff_sse, dict) else {})
-        print(f"[kickoff] event_counts={kickoff_counts}")
-        write_json(out_dir / "kickoff.sse.json", kickoff_sse if isinstance(kickoff_sse, dict) else {})
+        request_event_counts = _event_counts(request_sse if isinstance(request_sse, dict) else {})
+        print(f"[request] event_counts={request_event_counts}")
+        write_json(out_dir / "start_chat_run.sse.json", request_sse if isinstance(request_sse, dict) else {})
         supervisor.update(
             status="running",
-            current_step="kickoff.completed",
+            progress_label="request.completed",
             session_id=session_id,
             matter_id=_safe_str(flow.matter_id) or matter_id,
             next_action="wait_deliverables",
-            extra={"kickoff_event_counts": kickoff_counts},
+            extra={"start_chat_run_event_counts": request_event_counts},
         )
         supervisor.update(
             status="running",
-            current_step="deliverables.waiting",
+            progress_label="deliverables.waiting",
             session_id=session_id,
             matter_id=_safe_str(flow.matter_id) or matter_id,
             next_action="continue_poll",
@@ -502,17 +521,19 @@ async def run(args: argparse.Namespace) -> int:
             last_runtime_snapshot = runtime_snapshot if isinstance(runtime_snapshot, dict) else {}
             runtime_matter_id = _safe_str(f.matter_id) or matter_id
             runtime_snapshot_view = await _fetch_snapshot(client, runtime_matter_id) if runtime_matter_id else {}
-            runtime_pending_card = await f.get_pending_card()
+            runtime_pending_card = await f.get_current_blocker()
             supervisor.update(
                 status="running",
-                current_step="deliverables.waiting",
+                progress_label="deliverables.waiting",
                 session_id=session_id,
                 matter_id=runtime_matter_id,
                 snapshot=runtime_snapshot_view if isinstance(runtime_snapshot_view, dict) else {},
                 execution_snapshot=last_runtime_snapshot,
                 execution_traces=runtime_traces,
-                pending_card=runtime_pending_card if isinstance(runtime_pending_card, dict) else None,
-                current_blocker=_safe_str((runtime_pending_card or {}).get("task_key")),
+                blocker_card=runtime_pending_card if isinstance(runtime_pending_card, dict) else None,
+                current_blocker=(
+                    runtime_pending_card if isinstance(runtime_pending_card, dict) and runtime_pending_card else None
+                ),
                 next_action="continue_poll",
             )
             by_key = _extract_runtime_deliverables(runtime_snapshot)
@@ -520,7 +541,7 @@ async def run(args: argparse.Namespace) -> int:
             if not report:
                 return False
             status = _safe_str(report.get("status")).lower()
-            if status and status not in {"completed", "ready"}:
+            if status and status not in {"draft", "review_pending", "approved", "published", "ready"}:
                 return False
             file_ref = _safe_str(report.get("file_id"))
             inline_text = _safe_str(report.get("full_text"))
@@ -538,7 +559,7 @@ async def run(args: argparse.Namespace) -> int:
             fail_snapshot = await _fetch_snapshot(client, fail_matter_id) if fail_matter_id else {}
             fail_runtime_snapshot = await _fetch_execution_snapshot(session_id)
             fail_runtime_traces = await _fetch_execution_traces(session_id)
-            fail_deliverables = _extract_runtime_deliverables(fail_runtime_snapshot)
+            fail_artifacts = _extract_runtime_deliverables(fail_runtime_snapshot)
             fail_messages = await _list_session_messages(client, session_id)
             debug_refs = await collect_ai_debug_refs(
                 client,
@@ -563,8 +584,8 @@ async def run(args: argparse.Namespace) -> int:
                 "session_id": session_id,
                 "matter_id": fail_matter_id,
                 "uploaded_file_id": file_id,
-                "kickoff_event_counts": kickoff_counts,
-                "deliverable_keys": sorted(fail_deliverables.keys()),
+                "start_chat_run_event_counts": request_event_counts,
+                "deliverable_keys": sorted(fail_artifacts.keys()),
                 "analysis_state_keys": sorted(fail_analysis.keys()) if isinstance(fail_analysis, dict) else [],
                 "contract_view_keys": sorted(fail_contract_view.keys()) if isinstance(fail_contract_view, dict) else [],
                 "latest_assistant_message": _latest_assistant_message(fail_messages),
@@ -574,7 +595,7 @@ async def run(args: argparse.Namespace) -> int:
                 "debug_refs": debug_refs,
             }
             write_json(out_dir / "failure_diagnostics.json", failure_diag)
-            write_json(out_dir / "deliverables.failure.json", fail_deliverables)
+            write_json(out_dir / "artifacts.failure.json", fail_artifacts)
             if isinstance(fail_snapshot, dict) and fail_snapshot:
                 write_json(out_dir / "snapshot.failure.json", fail_snapshot)
             if isinstance(fail_runtime_snapshot, dict) and fail_runtime_snapshot:
@@ -596,13 +617,13 @@ async def run(args: argparse.Namespace) -> int:
             write_json(out_dir / "bundle_quality.failure.json", bundle_quality)
             supervisor.update(
                 status="failed",
-                current_step="terminal.failed",
+                progress_label="terminal.failed",
                 session_id=session_id,
                 matter_id=fail_matter_id,
                 snapshot=fail_snapshot if isinstance(fail_snapshot, dict) else {},
                 execution_snapshot=fail_runtime_snapshot if isinstance(fail_runtime_snapshot, dict) else None,
                 execution_traces=fail_runtime_traces,
-                current_blocker="contract_review_real_flow_failed",
+                current_blocker={"type": "blocked", "summary": "contract_review_real_flow_failed"},
                 next_action="inspect_failure_summary",
                 error=str(e),
                 artifact_refs={"failure_summary": str(out_dir / "failure_summary.json")},
@@ -618,17 +639,17 @@ async def run(args: argparse.Namespace) -> int:
         execution_traces = await _fetch_execution_traces(session_id)
         if not isinstance(execution_snapshot, dict) or not execution_snapshot:
             raise RuntimeError("execution_snapshot_missing")
-        deliverables = _extract_runtime_deliverables(execution_snapshot)
+        artifacts = _extract_runtime_deliverables(execution_snapshot)
         snapshot = await _fetch_snapshot(client, final_matter_id) or {}
         contract_view = _build_contract_view(
             snapshot,
             contract_type_id=contract_type_id,
             review_scope=review_scope,
         )
-        pending_card = await flow.get_pending_card()
+        current_blocker = await flow.get_current_blocker()
 
-        report_file_id = _safe_str((deliverables.get("contract_review_report") or {}).get("file_id"))
-        report_text = _safe_str((deliverables.get("contract_review_report") or {}).get("full_text"))
+        report_file_id = _safe_str((artifacts.get("contract_review_report") or {}).get("file_id"))
+        report_text = _safe_str((artifacts.get("contract_review_report") or {}).get("full_text"))
         if report_file_id:
             raw = await client.download_file_bytes(report_file_id)
             report_text = extract_docx_text(raw)
@@ -644,15 +665,17 @@ async def run(args: argparse.Namespace) -> int:
             "session_id": session_id,
             "matter_id": final_matter_id,
             "uploaded_file_id": file_id,
-            "kickoff_event_counts": kickoff_counts,
-            "deliverable_keys": sorted(deliverables.keys()),
+            "start_chat_run_event_counts": request_event_counts,
+            "deliverable_keys": sorted(artifacts.keys()),
             "execution_status": _safe_str(execution_snapshot.get("status")),
-            "execution_phase_id": _safe_str(execution_snapshot.get("current_phase_id")),
+            "execution_phase_id": _current_execution_phase_id(execution_snapshot),
             "report_file_id": report_file_id,
-            "pending_card": {
-                "skill_id": _safe_str((pending_card or {}).get("skill_id")),
-                "task_key": _safe_str((pending_card or {}).get("task_key")),
-                "review_type": _safe_str((pending_card or {}).get("review_type")),
+            "current_blocker": {
+                "type": _safe_str((current_blocker or {}).get("type")),
+                "interruption_id": _safe_str((current_blocker or {}).get("interruption_id")),
+                "interruption_key": _safe_str((current_blocker or {}).get("interruption_key")),
+                "reason_kind": _safe_str((current_blocker or {}).get("reason_kind")),
+                "reason_code": _safe_str((current_blocker or {}).get("reason_code")),
             },
             "contract_view": {
                 "overall_risk_level": _safe_str(contract_view.get("overall_risk_level")),
@@ -678,7 +701,7 @@ async def run(args: argparse.Namespace) -> int:
             flow_id="contract_review",
             snapshot=snapshot,
             current_view=contract_view,
-            goal_completion_mode="card" if _safe_str((pending_card or {}).get("skill_id")).lower() == "goal-completion" else "none",
+            goal_completion_mode="card" if _safe_str((current_blocker or {}).get("interruption_key")).lower() == "goal_completion" else "none",
         )
         debug_refs = await collect_ai_debug_refs(
             client,
@@ -695,18 +718,18 @@ async def run(args: argparse.Namespace) -> int:
         flow_scores = build_flow_scores(
             flow_id="contract_review",
             seen_cards=flow.seen_cards,
-            pending_card=pending_card,
+            current_blocker=current_blocker,
             snapshot=snapshot,
             current_view=contract_view,
             aux_views={},
-            deliverables=deliverables,
+            deliverables=artifacts,
             deliverable_text=report_text,
-            deliverable_status=_safe_str((deliverables.get("contract_review_report") or {}).get("status")),
+            artifact_status=_safe_str((artifacts.get("contract_review_report") or {}).get("status")),
             gold_text=_safe_str(contract_review_expectations.get("gold_text")),
             contract_review_expectations=cast(dict[str, Any], contract_review_expectations),
             observability=observability,
             bundle_quality_summary=bundle_quality,
-            goal_completion_mode="card" if _safe_str((pending_card or {}).get("skill_id")).lower() == "goal-completion" else "none",
+            goal_completion_mode="card" if _safe_str((current_blocker or {}).get("interruption_key")).lower() == "goal_completion" else "none",
         )
         summary["flow_scores"] = flow_scores
         summary["debug_refs"] = debug_refs
@@ -718,7 +741,7 @@ async def run(args: argparse.Namespace) -> int:
         write_json(out_dir / "summary.json", summary)
         write_json(out_dir / "bundle_quality.json", bundle_quality)
         write_json(out_dir / "flow_scores.json", flow_scores)
-        write_json(out_dir / "deliverables.json", deliverables)
+        write_json(out_dir / "artifacts.json", artifacts)
         write_json(out_dir / "snapshot.json", snapshot)
         write_json(out_dir / "execution_snapshot.json", execution_snapshot)
         write_json(out_dir / "diagnostics_summary.json", debug_refs.get("diagnostics_summary") if isinstance(debug_refs.get("diagnostics_summary"), dict) else {})
@@ -728,27 +751,27 @@ async def run(args: argparse.Namespace) -> int:
             (out_dir / "contract_review_report.txt").write_text(report_text, encoding="utf-8")
         supervisor.update(
             status="completed",
-            current_step="terminal.completed",
+            progress_label="terminal.completed",
             session_id=session_id,
             matter_id=final_matter_id,
             snapshot=snapshot,
             execution_snapshot=execution_snapshot,
             execution_traces=execution_traces,
-            pending_card=pending_card,
+            blocker_card=current_blocker,
             next_action="inspect_summary",
             artifact_refs={
                 "summary": str(out_dir / "summary.json"),
-                "deliverables": str(out_dir / "deliverables.json"),
+                "artifacts": str(out_dir / "artifacts.json"),
             },
             extra={
-                "deliverable_keys": sorted(deliverables.keys()),
+                "deliverable_keys": sorted(artifacts.keys()),
                 "report_file_id": report_file_id,
                 "last_runtime_snapshot_status": _safe_str(last_runtime_snapshot.get("status")),
             },
         )
 
     print("[done] contract review workflow completed")
-    print(f"[artifacts] {out_dir}")
+    print(f"[deliverables] {out_dir}")
     return 0
 
 
@@ -767,10 +790,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--password", default="", help="Lawyer password")
     parser.add_argument("--contract-file", default="", help="Contract file path (.docx/.txt)")
     parser.add_argument("--contract-type-id", default="construction", help="Default fixture contract_type_id when --contract-file is omitted")
-    parser.add_argument("--kickoff", default=DEFAULT_KICKOFF, help="Initial user query")
-    parser.add_argument("--kickoff-max-loops", type=int, default=24, help="kickoff max_loops")
+    parser.add_argument("--user-query", default=DEFAULT_USER_QUERY, help="Initial unified request query")
+    parser.add_argument("--request-max-loops", type=int, default=24, help="chat run max_loops")
     parser.add_argument("--max-steps", type=int, default=220, help="run_until max steps")
-    parser.add_argument("--cards-only", action="store_true", default=False, help="Kickoff once, then only poll and answer cards")
+    parser.add_argument("--poll-only", action="store_true", default=False, help="Submit once, then only poll and answer blockers")
     parser.add_argument(
         "--assert-docx",
         action="store_true",

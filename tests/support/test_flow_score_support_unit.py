@@ -8,7 +8,6 @@ import pytest
 from scripts._support.flow_score_support import (
     build_flow_scores,
     build_legal_opinion_formal_ready_report,
-    build_template_flow_scores,
     collect_flow_observability,
     score_unexpected_cards,
 )
@@ -19,9 +18,10 @@ def test_score_unexpected_cards_flags_forbidden_skill_and_data_group() -> None:
         flow_id="analysis",
         seen_cards=[
             {
-                "skill_id": "skill-error-analysis",
-                "task_key": "x",
-                "review_type": "clarify",
+                "type": "awaiting_review",
+                "interruption_id": "awaiting_review:skill_error",
+                "reason_kind": "human_confirmation",
+                "reason_code": "skill_error_analysis",
                 "questions": [{"field_key": "data.unknown.bad", "input_type": "text"}],
             }
         ],
@@ -29,36 +29,15 @@ def test_score_unexpected_cards_flags_forbidden_skill_and_data_group() -> None:
 
     assert score["passed"] is False
     assert score["unexpected_count"] == 1
-    assert "forbidden_skill:skill-error-analysis" in score["unexpected_cards"][0]["reasons"]
-
-
-def test_score_unexpected_cards_reads_nested_card_questions() -> None:
-    score = score_unexpected_cards(
-        flow_id="template_draft",
-        seen_cards=[
-            {
-                "skill_id": "document-intake",
-                "task_key": "workflow_input_document_drafting_intake_document-intake",
-                "review_type": "clarify",
-                "card": {
-                    "questions": [
-                        {
-                            "field_key": "profile.parties",
-                            "input_type": "textarea",
-                            "required": True,
-                        }
-                    ]
-                },
-            }
-        ],
-    )
-
-    assert score["passed"] is True
-    assert score["unexpected_count"] == 0
+    assert "forbidden_reason_code:skill_error_analysis" in score["unexpected_cards"][0]["reasons"]
 
 
 def test_build_flow_scores_produces_all_four_scores_for_analysis() -> None:
-    snapshot = {"analysis_state": {"current_phase_id": "artifact_render", "current_phase_name": "交付物渲染"}}
+    snapshot = {
+        "workflow": {
+            "phases": [{"phase_id": "render_deliverable", "label": "交付物渲染", "status": "running", "current": True}]
+        }
+    }
     analysis_view = {
         "status": "ready",
         "summary": "这是一个足够长的案件分析摘要。" * 8,
@@ -70,22 +49,29 @@ def test_build_flow_scores_produces_all_four_scores_for_analysis() -> None:
     }
     scores = build_flow_scores(
         flow_id="analysis",
-        seen_cards=[{"skill_id": "goal-completion", "task_key": "goal_completion", "review_type": "select", "questions": [{"field_key": "data.workbench.goal"}]}],
-        pending_card={"skill_id": "goal-completion", "task_key": "goal_completion", "review_type": "select", "questions": [{"field_key": "data.workbench.goal"}]},
+        seen_cards=[
+            {
+                "type": "awaiting_review",
+                "interruption_id": "awaiting_review:goal_completion",
+                "interruption_key": "goal_completion",
+                "questions": [{"field_key": "data.workbench.goal"}],
+            }
+        ],
+        current_blocker={"type": "awaiting_review", "interruption_id": "awaiting_review:goal_completion", "interruption_key": "goal_completion", "questions": [{"field_key": "data.workbench.goal"}]},
         snapshot=snapshot,
         current_view=analysis_view,
         aux_views={},
         deliverables={},
-        deliverable_status="ready",
+        artifact_status="ready",
         observability={
-            "matter_traces": [{"node_id": "civil_litigation_program:grounding", "task_id": "grounding"}],
-            "session_traces": [{"node_id": "civil_litigation_program:artifact_render", "task_id": "artifact_render"}],
-            "phase_timeline": {"phases": [{"id": "artifact_render", "status": "completed"}]},
+            "matter_traces": [{"node_id": "dispute_analysis_program:dispute_analysis_source_pack", "task_id": "dispute_analysis_source_pack"}],
+            "session_traces": [{"node_id": "dispute_analysis_program:render_deliverable", "task_id": "render_deliverable"}],
+            "phase_timeline": {"phases": [{"id": "render_deliverable", "status": "completed"}]},
             "matter_timeline": {"rounds": [{"content": {"produced_output_keys": ["analysis_view"]}}]},
-            "session_timeline": {"entries": [{"step_id": "civil_litigation_program:reasoning", "phase": "reasoning", "status": "completed", "event_type": "result.merge", "payload": {"work_product_type": "reasoning"}}]},
+            "session_timeline": {"entries": [{"phase_id": "dispute_analysis_issue_matrix", "phase": "dispute_analysis_issue_matrix", "status": "completed", "event_type": "result.merge", "payload": {"work_product_type": "issue_matrix"}}]},
             "errors": {},
         },
-        goal_completion_mode="requested_documents",
+        goal_completion_mode="chat_run",
     )
 
     assert "unexpected_card_score" in scores
@@ -110,9 +96,9 @@ async def test_collect_flow_observability_falls_back_to_ai_engine_bundle(tmp_pat
                     {
                         "event_type": "result.merge",
                         "status": "completed",
-                        "step_id": "civil_litigation_program:grounding",
-                        "phase": "grounding",
-                        "payload": {"work_product_type": "grounding"},
+                        "phase_id": "dispute_analysis_source_pack",
+                        "phase": "dispute_analysis_source_pack",
+                        "payload": {"work_product_type": "source_pack"},
                     }
                 ],
             }
@@ -125,8 +111,8 @@ async def test_collect_flow_observability_falls_back_to_ai_engine_bundle(tmp_pat
                 "thread_id": "session:demo",
                 "traces": [
                     {
-                        "id": "session:demo::civil_litigation_program:artifact_render",
-                        "node_id": "civil_litigation_program:artifact_render",
+                        "id": "session:demo::dispute_analysis_program:render_deliverable",
+                        "node_id": "dispute_analysis_program:render_deliverable",
                         "node_type": "result.merge",
                         "sequence": 2,
                         "status": "completed",
@@ -163,81 +149,15 @@ async def test_collect_flow_observability_falls_back_to_ai_engine_bundle(tmp_pat
     assert "session_traces" not in observability["errors"]
 
 
-def test_build_template_flow_scores_uses_existing_dialogue_and_document_quality() -> None:
-    scores = build_template_flow_scores(
-        cards=[{"skill_id": "goal-completion", "task_key": "goal_completion", "review_type": "select", "questions": [{"field_key": "data.workbench.goal"}]}],
-        pending_card={},
-        node_timeline=[
-            {"docgen_node": "intake"},
-            {"docgen_node": "compose"},
-            {"docgen_node": "render"},
-            {"docgen_node": "sync"},
-            {"docgen_node": "finish"},
-        ],
-        summary={"latest_docgen_node": "finish"},
-        last_docgen_snapshot={
-            "current_phase": "docgen",
-            "current_task_id": "goal_completion",
-            "template_quality_contracts_json_exists": True,
-            "quality_review_decision": "pass",
-            "deliverable": {"status": "completed"},
-        },
-        dialogue_quality={"pass": True},
-        document_quality={"pass": True, "citation_count": 2, "fact_coverage_score": 90.0},
-    )
-
-    assert scores["node_path_score"]["passed"] is True
-    assert scores["deliverable_quality_score"]["passed"] is True
-    assert scores["overall_e2e_score"]["passed"] is True
-
-
-def test_build_template_flow_scores_uses_summary_docgen_sequence_when_timeline_is_sparse() -> None:
-    scores = build_template_flow_scores(
-        cards=[],
-        pending_card={},
-        node_timeline=[{"docgen_node": "finish"}],
-        summary={
-            "latest_docgen_node": "finish",
-            "docgen_node_sequence": ["section_contract", "compose", "hard_validate", "soft_validate", "render", "sync", "finish"],
-        },
-        last_docgen_snapshot={
-            "current_phase": "docgen",
-            "current_task_id": "goal_completion",
-            "template_quality_contracts_json_exists": True,
-            "quality_review_decision": "pass",
-            "deliverable": {"status": "completed"},
-        },
-        dialogue_quality={"pass": True},
-        document_quality={"pass": True, "citation_count": 2, "fact_coverage_score": 90.0},
-    )
-
-    assert scores["node_path_score"]["matched_hints"] == ["compose", "finish", "render", "sync"]
-    assert scores["node_path_score"]["passed"] is True
-
-
-def test_build_template_flow_scores_accepts_terminal_quality_review_when_contract_flag_is_missing() -> None:
-    scores = build_template_flow_scores(
-        cards=[],
-        pending_card={},
-        node_timeline=[{"docgen_node": "finish"}],
-        summary={"latest_docgen_node": "finish", "docgen_node_sequence": ["compose", "render", "sync", "finish"]},
-        last_docgen_snapshot={
-            "current_phase": "docgen",
-            "current_task_id": "goal_completion",
-            "template_quality_contracts_json_exists": False,
-            "quality_review_decision": "repair",
-            "deliverable": {"status": "completed"},
-        },
-        dialogue_quality={"pass": True},
-        document_quality={"pass": True, "citation_count": 2, "fact_coverage_score": 90.0},
-    )
-
-    assert scores["snapshot_progress_score"]["passed"] is True
-    assert "template_quality_contracts_missing" not in scores["snapshot_progress_score"]["failures"]
-
-
 def test_build_flow_scores_enforces_contract_review_v2_expectations() -> None:
-    snapshot = {"analysis_state": {"current_node": "goal_completion", "current_phase": "contract_review"}}
+    snapshot = {
+        "workflow": {
+            "phases": [
+                {"phase_id": "contract_review", "label": "合同审查", "status": "running", "current": True}
+            ]
+        },
+        "analysis_state": {"current_node": "goal_completion"},
+    }
     contract_view = {
         "summary": "这是一个足够长的合同审查摘要。" * 8,
         "contract_type_id": "construction",
@@ -291,15 +211,22 @@ def test_build_flow_scores_enforces_contract_review_v2_expectations() -> None:
     )
     scores = build_flow_scores(
         flow_id="contract_review",
-        seen_cards=[{"skill_id": "goal-completion", "task_key": "goal_completion", "review_type": "select", "questions": [{"field_key": "data.workbench.goal"}]}],
-        pending_card={"skill_id": "goal-completion", "task_key": "goal_completion", "review_type": "select", "questions": [{"field_key": "data.workbench.goal"}]},
+        seen_cards=[
+            {
+                "type": "awaiting_review",
+                "interruption_id": "awaiting_review:goal_completion",
+                "interruption_key": "goal_completion",
+                "questions": [{"field_key": "data.workbench.goal"}],
+            }
+        ],
+        current_blocker={"type": "awaiting_review", "interruption_id": "awaiting_review:goal_completion", "interruption_key": "goal_completion", "questions": [{"field_key": "data.workbench.goal"}]},
         snapshot=snapshot,
         current_view=contract_view,
         deliverables={
             "contract_review_report": {"status": "completed"},
         },
         deliverable_text=report_text,
-        deliverable_status="completed",
+        artifact_status="completed",
         contract_review_expectations=expectations,
         observability={
             "matter_traces": [{"node_id": "contract_output_finalize", "task_id": "goal_completion"}],
@@ -328,14 +255,13 @@ def test_build_legal_opinion_formal_ready_report_flags_internal_text_pollution()
             "fact_gaps": [],
         },
         aux_views={
-            "document_generation_state": {
+            "typed_render_state": {
                 "formal_gate_blocked": True,
                 "formal_gate_reason_codes": ["formal_opinion_authority_pending"],
-                "formal_gate_actions": [{"action_id": "references_refresh_partial"}],
-            }
+            },
         },
         deliverable_text="关于contract_dispute事项的法律意见书\n当前结论来源：陈述泳道。",
-        deliverable_status="completed",
+        artifact_status="completed",
     )
 
     assert report["passed"] is False
@@ -346,8 +272,15 @@ def test_build_flow_scores_uses_formal_ready_signals_for_legal_opinion() -> None
     scores = build_flow_scores(
         flow_id="legal_opinion",
         seen_cards=[],
-        pending_card={},
-        snapshot={"analysis_state": {"current_node": "goal_completion", "current_phase": "legal_opinion"}},
+        current_blocker={},
+        snapshot={
+            "workflow": {
+                "phases": [
+                    {"phase_id": "legal_opinion", "label": "法律意见", "status": "running", "current": True}
+                ]
+            },
+            "analysis_state": {"current_node": "goal_completion"},
+        },
         current_view={
             "title": "服务器采购合同履约争议法律意见书",
             "summary": "围绕交付迟延、质量瑕疵和尾款抗辩形成的法律意见。" * 6,
@@ -360,29 +293,25 @@ def test_build_flow_scores_uses_formal_ready_signals_for_legal_opinion() -> None
             "result_contract_diagnostics": {"status": "valid"},
         },
         aux_views={
-            "document_generation_state": {
+            "typed_render_state": {
                 "formal_gate_blocked": True,
                 "formal_gate_reason_codes": ["formal_opinion_authority_pending"],
-                "formal_gate_actions": [{"action_id": "references_refresh_partial"}],
-            }
+            },
         },
         deliverables={"legal_opinion": {"status": "completed"}},
         deliverable_text="法律意见书\n事实基础\n规则依据\n分析论证\n结论意见\n风险提示\n应对建议\n《中华人民共和国民法典》第509条\n第8.2款\n1. 补齐验收材料。",
-        deliverable_status="completed",
+        artifact_status="completed",
         observability={
             "matter_traces": [{"node_id": "legal_opinion_output", "task_id": "goal_completion"}],
-            "session_traces": [{"node_id": "docgen_prepare", "task_id": "document_generation"}],
+            "session_traces": [{"node_id": "typed_render_prepare", "task_id": "document_render"}],
             "phase_timeline": {"phases": [{"id": "legal_opinion", "status": "completed"}]},
-            "matter_timeline": {"rounds": [{"content": {"produced_output_keys": ["analysis_projection", "document_generation_state"]}}]},
+            "matter_timeline": {"rounds": [{"content": {"produced_output_keys": ["analysis_projection", "typed_render_state"]}}]},
             "session_timeline": {"rounds": []},
             "errors": {},
         },
-        goal_completion_mode="requested_documents",
+        goal_completion_mode="chat_run",
     )
 
     assert scores["deliverable_quality_score"]["details"]["formal_ready"]["blocking_reason_codes"] == [
         "formal_opinion_authority_pending"
-    ]
-    assert scores["deliverable_quality_score"]["details"]["formal_ready"]["required_actions"] == [
-        {"action_id": "references_refresh_partial"}
     ]

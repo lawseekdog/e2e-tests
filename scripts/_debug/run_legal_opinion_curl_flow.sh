@@ -146,12 +146,12 @@ CHAT_JSON="$(
 )"
 write_json "$OUTPUT_DIR/chat-1.json" "$CHAT_JSON"
 
-PENDING_JSON="$(request "$BASE_URL/consultations-service/consultations/sessions/${SESSION_ID}/pending_card" "${AUTH_HEADER[@]}")"
+BLOCKER_JSON="$(request "$BASE_URL/consultations-service/consultations/sessions/${SESSION_ID}/blocker" "${AUTH_HEADER[@]}")"
 SNAPSHOT_JSON="$(request "$BASE_URL/matter-service/lawyer/matters/${MATTER_ID}/workbench/snapshot" "${AUTH_HEADER[@]}")"
 DELIVERABLES_JSON="$(request "$BASE_URL/matter-service/lawyer/matters/${MATTER_ID}/deliverables" "${AUTH_HEADER[@]}")"
 MESSAGES_JSON="$(request "$BASE_URL/consultations-service/consultations/sessions/${SESSION_ID}/messages?page=1&size=100" "${AUTH_HEADER[@]}")"
 
-write_json "$OUTPUT_DIR/pending-1.json" "$PENDING_JSON"
+write_json "$OUTPUT_DIR/blocker-1.json" "$BLOCKER_JSON"
 write_json "$OUTPUT_DIR/snapshot-1.json" "$SNAPSHOT_JSON"
 write_json "$OUTPUT_DIR/deliverables-1.json" "$DELIVERABLES_JSON"
 write_json "$OUTPUT_DIR/messages-1.json" "$MESSAGES_JSON"
@@ -164,11 +164,13 @@ jq -nc \
   --arg chat_success "$(json_get '.data.success' "$OUTPUT_DIR/chat-1.json")" \
   --arg chat_error "$(json_get '.data.error' "$OUTPUT_DIR/chat-1.json")" \
   --arg output_preview "$(json_get '.data.output' "$OUTPUT_DIR/chat-1.json" | cut -c 1-200)" \
-  --arg cardId "$(json_get '.data.card.id' "$OUTPUT_DIR/chat-1.json")" \
-  --arg card_skill_id "$(json_get '.data.card.skill_id' "$OUTPUT_DIR/chat-1.json")" \
-  --arg pendingCardId "$(json_get '.data.id' "$OUTPUT_DIR/pending-1.json")" \
-  --arg pending_skill_id "$(json_get '.data.skill_id' "$OUTPUT_DIR/pending-1.json")" \
-  --arg pending_type "$(json_get '.data.type' "$OUTPUT_DIR/pending-1.json")" \
+  --arg card_interruption_id "$(json_get '.data.card.interruption_id' "$OUTPUT_DIR/chat-1.json")" \
+  --arg card_interruption_key "$(json_get '.data.card.interruption_key' "$OUTPUT_DIR/chat-1.json")" \
+  --arg card_reason_code "$(json_get '.data.card.reason_code' "$OUTPUT_DIR/chat-1.json")" \
+  --arg blocker_interruption_id "$(json_get '.data.interruption_id' "$OUTPUT_DIR/blocker-1.json")" \
+  --arg blocker_interruption_key "$(json_get '.data.interruption_key' "$OUTPUT_DIR/blocker-1.json")" \
+  --arg blocker_reason_code "$(json_get '.data.reason_code' "$OUTPUT_DIR/blocker-1.json")" \
+  --arg blocker_type "$(json_get '.data.type' "$OUTPUT_DIR/blocker-1.json")" \
   --arg deliverable_count "$(jq -r '(.data.deliverables // []) | length' "$OUTPUT_DIR/deliverables-1.json")" \
   --arg message_count "$(jq -r '(.data.data // []) | length' "$OUTPUT_DIR/messages-1.json")" \
   '{
@@ -179,11 +181,13 @@ jq -nc \
     chat_success: $chat_success,
     chat_error: $chat_error,
     output_preview: $output_preview,
-    cardId: $cardId,
-    card_skill_id: $card_skill_id,
-    pendingCardId: $pendingCardId,
-    pending_skill_id: $pending_skill_id,
-    pending_type: $pending_type,
+    card_interruption_id: $card_interruption_id,
+    card_interruption_key: $card_interruption_key,
+    card_reason_code: $card_reason_code,
+    blocker_interruption_id: $blocker_interruption_id,
+    blocker_interruption_key: $blocker_interruption_key,
+    blocker_reason_code: $blocker_reason_code,
+    blocker_type: $blocker_type,
     deliverable_count: $deliverable_count,
     message_count: $message_count
   }' | tee "$OUTPUT_DIR/summary.json"

@@ -8,7 +8,6 @@
 - 民事起诉主链
 - 合同审查主链
 - 法律意见主链
-- 模板文书起草主链
 
 ## 目录结构
 
@@ -39,7 +38,6 @@ e2e-tests/
     ├── run_analysis_real_flow.py
     ├── run_contract_review_real_flow.py
     ├── run_legal_opinion_real_flow.py
-    ├── run_template_draft_real_flow.py
     ├── _support/
     │   └── ... shared support modules and fixtures
     └── _debug/
@@ -70,7 +68,6 @@ python scripts/smoke_test.py
 python scripts/run_analysis_real_flow.py --base-url http://<host>/api/v1 --cards-only
 python scripts/run_contract_review_real_flow.py --base-url http://<host>/api/v1 --cards-only
 python scripts/run_legal_opinion_real_flow.py --base-url http://<host>/api/v1 --cards-only
-python scripts/run_template_draft_real_flow.py --base-url http://<host>/api/v1 --template-id <TEMPLATE_ID> --cards-only
 ```
 
 pytest 只保留最小 support / unit：
@@ -86,8 +83,6 @@ pytest tests/support/test_flow_runner_unit.py -q
 - 民事起诉
 - 合同审查
 - 法律意见
-- 模板文书起草
-
 这些脚本只验证产品链路：
 
 - 对话与卡片推进
@@ -95,7 +90,7 @@ pytest tests/support/test_flow_runner_unit.py -q
 - deliverable 生成
 - traces / timeline / workflow profile 基本可用
 - 正式脚本约束：kickoff 一次，后续只答卡，不自动发送“继续”
-- 统一入口是 `requested_documents`；模板起草通过 `document_kind + instance_key(template_id)` 直接启动
+- 统一入口是 chat run；`entry_mode / service_type_id / delivery_goal / target_document_kind / supporting_document_kinds` 只用于创建或绑定 matter truth，不作为 ai-engine runtime 契约
 
 ## 不再在本仓库维护
 
@@ -113,7 +108,6 @@ python scripts/smoke_test.py
 python scripts/run_analysis_real_flow.py --base-url http://<host>/api/v1 --cards-only
 python scripts/run_contract_review_real_flow.py --base-url http://<host>/api/v1 --cards-only
 python scripts/run_legal_opinion_real_flow.py --base-url http://<host>/api/v1 --cards-only
-python scripts/run_template_draft_real_flow.py --base-url http://<host>/api/v1 --template-id <TEMPLATE_ID> --cards-only
 ```
 
 说明：

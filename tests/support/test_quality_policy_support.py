@@ -46,7 +46,7 @@ def test_build_bundle_quality_reports_writes_summary_and_refs(tmp_path: Path) ->
                 "final_validate_ok": True,
                 "output_contract_ok": True,
                 "ask_user": False,
-                "human_input_required": False,
+                "reason_kind": "",
                 "recovered_after_retry": True,
                 "empty_output": False,
                 "produced_output_keys": ["analysis_view"],
@@ -81,6 +81,7 @@ def test_build_bundle_quality_reports_writes_summary_and_refs(tmp_path: Path) ->
                 "retry_count": 1,
                 "final_action": "continue",
                 "final_reason_code": "",
+                "final_reason_kind": "",
                 "trace_ids": ["trace-1"],
                 "skill_stage_dir": "/tmp/skill",
                 "skill_stage_refs": [],
@@ -125,118 +126,6 @@ def test_build_bundle_quality_reports_writes_summary_and_refs(tmp_path: Path) ->
     assert not any(str(reason).startswith("unknown_") for reason in summary["hard_fail_reasons"])
 
 
-def test_document_drafting_quality_policy_matches_dynamic_lanes_and_support_profiles(tmp_path: Path) -> None:
-    bundle_dir = tmp_path / "session:template-draft"
-    bundle_dir.mkdir(parents=True)
-    for name in ("failure_summary.json", "execution_traces.json", "timeline.json", "node_trace_timeline.json"):
-        (bundle_dir / name).write_text("{}", encoding="utf-8")
-
-    _write_jsonl(
-        bundle_dir / "quality" / "raw" / "nodes.jsonl",
-        [
-            {
-                "trace_id": "trace-1",
-                "node_id": "materials",
-                "node_path": "workbench/materials",
-                "sequence": 12,
-                "skill_name": "",
-                "task_id": "materials",
-                "status": "completed",
-                "failure_class": "",
-                "primary_reason_code": "",
-                "reason_code_chain": [],
-                "duration_ms": 100,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "tool_call_count": 0,
-                "llm_call_count": 0,
-                "provider_raw_captured": False,
-                "structured_response_captured": False,
-                "parser_ok": True,
-                "raw_validate_ok": True,
-                "final_validate_ok": True,
-                "output_contract_ok": True,
-                "ask_user": False,
-                "human_input_required": False,
-                "recovered_after_retry": False,
-                "empty_output": False,
-                "produced_output_keys": ["data.files.classifications"],
-                "changed_fields": ["data.files.classifications"],
-                "state_input_ref": "",
-                "state_output_ref": "",
-                "skill_stage_refs": [],
-                "llm_call_refs": [],
-                "contract_diff_refs": [],
-            }
-        ],
-    )
-    _write_jsonl(
-        bundle_dir / "quality" / "raw" / "skills.jsonl",
-        [
-            {
-                "skill_name": "document-intake",
-                "attempt_id": "attempt-1",
-                "task_id": "",
-                "prepare_status": "completed",
-                "preprocess_status": "completed",
-                "mode_guard_status": "completed",
-                "llm_stage_status": "completed",
-                "envelope_action_status": "completed",
-                "finalize_status": "completed",
-                "prompt_contract_ok": True,
-                "prefetch_ok": True,
-                "llm_admission_ok": True,
-                "provider_raw_captured": True,
-                "parser_error": "",
-                "validator_error_count": 0,
-                "retry_count": 0,
-                "final_action": "continue",
-                "final_reason_code": "validated",
-                "trace_ids": ["trace-1"],
-                "skill_stage_dir": "/tmp/skill",
-                "skill_stage_refs": [],
-                "llm_call_refs": [],
-            }
-        ],
-    )
-    _write_jsonl(
-        bundle_dir / "quality" / "raw" / "lanes.jsonl",
-        [
-            {
-                "lane_id": "analysis:1173",
-                "task_id": "1173",
-                "phase": "analysis",
-                "node_count": 1,
-                "skill_count": 0,
-                "retry_count": 0,
-                "blocked_count": 0,
-                "ask_user_count": 0,
-                "first_unresolved_bad": {},
-                "trace_ids": ["trace-1"],
-                "skill_attempt_ids": [],
-            }
-        ],
-    )
-
-    summary = build_bundle_quality_reports(
-        bundle_dir=str(bundle_dir),
-        flow_id="template_draft",
-        snapshot={
-            "matter": {
-                "service_type_id": "document_drafting",
-                "id": "1173",
-                "session_id": "session:2533",
-            }
-        },
-        current_view={"summary": "ok"},
-        goal_completion_mode="none",
-    )
-
-    assert "unknown_node_profile:materials" not in summary["hard_fail_reasons"]
-    assert "unknown_skill_profile:document-intake" not in summary["hard_fail_reasons"]
-    assert "unknown_lane_profile:analysis:1173" not in summary["hard_fail_reasons"]
-
-
 def test_merge_bundle_quality_report_and_flow_scores_include_quality_failures() -> None:
     quality_summary = {
         "refs": {"summary": "/tmp/quality/summary.json"},
@@ -257,8 +146,15 @@ def test_merge_bundle_quality_report_and_flow_scores_include_quality_failures() 
     scores = build_flow_scores(
         flow_id="analysis",
         seen_cards=[],
-        pending_card={},
-        snapshot={"analysis_state": {"current_node": "goal_completion", "current_phase": "analysis"}},
+        current_blocker={},
+        snapshot={
+            "workflow": {
+                "phases": [
+                    {"phase_id": "analysis", "label": "案件分析", "status": "running", "current": True}
+                ]
+            },
+            "analysis_state": {"current_node": "goal_completion"},
+        },
         current_view={
             "summary": "这是一个足够长的案件分析摘要。" * 8,
             "issues": [{"issue_id": "i1"}],
@@ -269,7 +165,7 @@ def test_merge_bundle_quality_report_and_flow_scores_include_quality_failures() 
         aux_views={"pricing_view": {"status": "ready"}},
         deliverables={},
         deliverable_text="",
-        deliverable_status="ready",
+        artifact_status="ready",
         observability={"matter_traces": [{"node_id": "analysis_output", "task_id": "goal_completion"}], "errors": {}},
         bundle_quality_summary=quality_summary,
         goal_completion_mode="card",
@@ -317,7 +213,7 @@ def test_build_bundle_quality_reports_fails_on_analysis_chain_prompt_and_placeho
                 "placeholder_profile_fields": ["plaintiff", "defendant", "claims"],
                 "placeholder_profile_count": 3,
                 "ask_user": True,
-                "human_input_required": True,
+                "reason_kind": "missing_input",
                 "recovered_after_retry": False,
                 "empty_output": False,
                 "produced_output_keys": ["profile.summary"],
@@ -358,6 +254,7 @@ def test_build_bundle_quality_reports_fails_on_analysis_chain_prompt_and_placeho
                 "retry_count": 0,
                 "final_action": "continue",
                 "final_reason_code": "",
+                "final_reason_kind": "missing_input",
                 "trace_ids": ["trace-intake"],
                 "skill_stage_dir": "/tmp/skill",
                 "skill_stage_refs": [],
@@ -435,7 +332,7 @@ def test_build_bundle_quality_reports_skips_unknown_profile_hard_fail_without_po
                 "final_validate_ok": True,
                 "output_contract_ok": True,
                 "ask_user": False,
-                "human_input_required": False,
+                "reason_kind": "",
                 "recovered_after_retry": False,
                 "empty_output": False,
                 "produced_output_keys": [],

@@ -464,6 +464,7 @@ async def run(args: argparse.Namespace) -> int:
             service_type_id="contract_review",
             client_role="applicant",
             uploaded_file_ids=[file_id],
+            matter_create_payload=_start_chat_run(),
             overrides=flow_overrides,
             strict_card_driven=True,
             progress_observer=supervisor.observe_flow_progress,

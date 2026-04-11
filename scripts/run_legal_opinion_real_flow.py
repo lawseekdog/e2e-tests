@@ -898,6 +898,7 @@ async def run(args: argparse.Namespace) -> int:
             service_type_id="legal_opinion",
             client_role="applicant",
             uploaded_file_ids=uploaded_file_ids,
+            matter_create_payload=LEGAL_OPINION_CHAT_RUN,
             overrides=FLOW_OVERRIDES,
             preseed_profile=False,
             progress_observer=supervisor.observe_flow_progress,

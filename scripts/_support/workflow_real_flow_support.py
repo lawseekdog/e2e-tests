@@ -405,15 +405,23 @@ async def bootstrap_flow(
     service_type_id: str,
     client_role: str,
     uploaded_file_ids: list[str],
+    matter_create_payload: dict[str, Any],
     overrides: dict[str, Any],
     preseed_profile: bool = True,
     strict_card_driven: bool = True,
     progress_observer: Any = None,
 ) -> tuple[WorkbenchFlow, str, str]:
+    payload = dict(matter_create_payload or {})
     sess = await client.create_session(
         service_type_id=service_type_id,
         client_role=client_role,
         file_ids=uploaded_file_ids,
+        entry_mode=safe_str(payload.get("entry_mode")) or None,
+        delivery_goal=safe_str(payload.get("delivery_goal")) or None,
+        target_document_kind=safe_str(payload.get("target_document_kind")) or None,
+        supporting_document_kinds=payload.get("supporting_document_kinds")
+        if isinstance(payload.get("supporting_document_kinds"), list)
+        else [],
     )
     sess_data = (sess.get("data") if isinstance(sess, dict) else {}) or {}
     session_id = safe_str(sess_data.get("id"))

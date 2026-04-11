@@ -42,7 +42,13 @@ async def smoke_test():
 
         # 2. 创建工作台会话（service_type_id 必须为 vNext 字典中的 leaf id）
         print("2. 测试创建工作台会话...")
-        sess = await c.create_session(service_type_id="civil_prosecution")
+        sess = await c.create_session(
+            service_type_id="legal_opinion",
+            entry_mode="direct_drafting",
+            delivery_goal="formal_opinion",
+            target_document_kind="legal_opinion",
+            supporting_document_kinds=[],
+        )
         session_id = str((sess.get("data") or {}).get("id") or "").strip()
         assert session_id, f"创建会话失败: {sess}"
         print(f"   ✓ 创建会话成功: {session_id}")

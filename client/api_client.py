@@ -532,6 +532,10 @@ class ApiClient:
         matter_id: str | None = None,
         file_ids: list[str] | None = None,
         client_role: str | None = None,
+        entry_mode: str | None = None,
+        delivery_goal: str | None = None,
+        target_document_kind: str | None = None,
+        supporting_document_kinds: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a consultation session (hard-cut: sessions are matter-backed).
 
@@ -542,7 +546,13 @@ class ApiClient:
         mid = str(matter_id or "").strip() or None
         st = str(service_type_id or "").strip() or None
         role = str(client_role or "").strip() or None
+        entry = str(entry_mode or "").strip() or None
+        goal = str(delivery_goal or "").strip() or None
+        target_kind = str(target_document_kind or "").strip() or None
         normalized_file_ids = [str(x).strip() for x in (file_ids or []) if str(x).strip()]
+        normalized_supporting_document_kinds = [
+            str(x).strip() for x in (supporting_document_kinds or []) if str(x).strip()
+        ]
 
         payload: dict[str, Any] = {}
         t = str(title or "").strip()
@@ -573,6 +583,10 @@ class ApiClient:
         # For service_type-driven sessions, matter creation can be eventually consistent in remote envs.
         # Verify the matter is queryable before we return the session to workflow tests.
         if mid is None and st:
+            if not entry:
+                raise ValueError("entry_mode is required for service_type-driven session creation")
+            if not goal:
+                raise ValueError("delivery_goal is required for service_type-driven session creation")
             max_attempts = int(os.getenv("E2E_CREATE_SESSION_ATTEMPTS", "8") or 8)
             last_session: dict[str, Any] | None = None
             for attempt in range(1, max(1, max_attempts) + 1):
@@ -581,6 +595,10 @@ class ApiClient:
                     title=t or None,
                     file_ids=normalized_file_ids,
                     client_role=role,
+                    entry_mode=entry,
+                    delivery_goal=goal,
+                    target_document_kind=target_kind,
+                    supporting_document_kinds=normalized_supporting_document_kinds,
                 )
                 mid_candidate = str(
                     ((created.get("data") or {}) if isinstance(created, dict) else {}).get("id") or ""
@@ -927,13 +945,34 @@ class ApiClient:
         file_ids: list[str] | None = None,
         matter_category: str | None = None,
         client_role: str | None = None,
+        entry_mode: str | None = None,
+        delivery_goal: str | None = None,
+        target_document_kind: str | None = None,
+        supporting_document_kinds: list[str] | None = None,
     ) -> dict[str, Any]:
         st = str(service_type_id or "").strip()
         if not st:
             raise ValueError("service_type_id is required")
+        entry = str(entry_mode or "").strip()
+        if not entry:
+            raise ValueError("entry_mode is required")
+        goal = str(delivery_goal or "").strip()
+        if not goal:
+            raise ValueError("delivery_goal is required")
+        target_kind = str(target_document_kind or "").strip() or None
 
         t = str(title or "").strip() or f"E2E matter ({st})"
-        data: dict[str, Any] = {"title": t, "service_type_id": st}
+        data: dict[str, Any] = {
+            "title": t,
+            "entry_mode": entry,
+            "service_type_id": st,
+            "delivery_goal": goal,
+        }
+        if target_kind:
+            data["target_document_kind"] = target_kind
+        data["supporting_document_kinds"] = [
+            str(x).strip() for x in (supporting_document_kinds or []) if str(x).strip()
+        ]
         if file_ids:
             data["file_ids"] = [str(x).strip() for x in file_ids if str(x).strip()]
         if matter_category:
